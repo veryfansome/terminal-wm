@@ -95,9 +95,26 @@ This is the same discipline the world-model margin already uses: score the gap o
 baselines, because a mechanism that lifts the metric and the baselines equally has discovered
 nothing.
 
-Measured on the real inner slice: `at_name` and `h_last` sit at exactly zero, `h_lastmv` is
-negative, `deepest` is slightly positive, and `h_first` is the binding arm at about `+0.10`. The
-band is re-measured on every run and reported, so a re-mint that changes it cannot pass unnoticed.
+Measured, with no model involved, on both splits (each 62 windows, disjoint images):
+
+| arm | inner | final |
+|---|---|---|
+| `at_name` | +0.0000 | +0.0000 |
+| `h_first` | **+0.1290** | **+0.0806** |
+| `h_last` | +0.0000 | −0.1290 |
+| `h_lastmv` | −0.0484 | +0.0806 |
+| `deepest` | +0.0323 | +0.0081 |
+
+`at_name` is exactly zero on both, as the construction promises. Everything else **moves a lot
+between two equal-sized draws from the same generator** — `h_last` swings by 0.13, `h_lastmv`
+changes sign. That is window-sampling variation exhibited by a deterministic quantity, which makes
+it a clean lower bound on how much a *model's* comp_ca on 62 windows can move for reasons that have
+nothing to do with the model.
+
+Two consequences. First, this is why the band is recomputed per split and per run rather than
+pinned: a number carried across splits with the wrong band subtracted is meaningless. Second, and
+usefully, subtracting each split's own band is what makes an inner and a final number comparable at
+all — the largest split-to-split artefact is removed by construction.
 
 ## 4. The eligible slice W
 

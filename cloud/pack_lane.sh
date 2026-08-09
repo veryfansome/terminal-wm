@@ -77,12 +77,19 @@ PY
     uv run python -m evolve.reencode --perception "$TWM_EYE" --src "$RAW" --out "$ENC_ROOT"
   fi
 
-  say "preflight"
-  uv run python -c "
-from eval.adapter import preflight
-print('root, eye =', preflight())
-"
-  say "PREPARE OK — $ENC_ROOT is scoreable"
+  say "preflight + embedding sha"
+  uv run python -m eval.preflight
+  say "PREPARE OK — $ENC_ROOT is scoreable. Pin the embedding_sha above as TWM_ROOT_SHA."
+}
+
+publish() {
+  # Encode ONCE, publish, let every other box PULL the same bytes. Re-encoding per box is cheap in
+  # wall-clock but not free in meaning: the eye is pinned, the tensors it produces are not, and a
+  # forward pass on different hardware can differ in the last bits. That is a different
+  # standardization frame with every existing check still passing.
+  local repo="${TWM_HF_DATASET:-veryfansome/terminal-jepa-dockerfs}"
+  say "publishing $ENC_ROOT to $repo"
+  uv run python -m cloud.publish_root "$ENC_ROOT" "$repo"
 }
 
 score() {
@@ -139,7 +146,8 @@ PY
 
 case "${1:-}" in
   prepare) prepare ;;
+  publish) publish ;;
   score)   score "$2" "$3" ;;
-  *) echo "usage: pack_lane.sh prepare | pack_lane.sh score <genome.json> <candidate-id>" >&2
+  *) echo "usage: pack_lane.sh prepare | publish | score <genome.json> <candidate-id>" >&2
      exit 2 ;;
 esac
