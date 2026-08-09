@@ -6,7 +6,9 @@ Invoked by the evolve engine, once per seed, as:
 
 It trains ONE net on the cups pack root and emits {results_dir}/metrics.json:
 
-    combined_score = comp_ca   (evolve/cups_ca.py — the compositional-depth differential)
+    combined_score = comp_ca_margin   (evolve/cups_ca.py — the compositional-depth
+                                       differential, minus the best analytic non-tracker
+                                       measured on the same windows)
 
 Everything else the net can tell us rides along in `public` (what inventors get to see) and
 `private` (recorded, never briefed). One net per (genome, seed): the compositional metric and
@@ -136,10 +138,27 @@ def main(argv):
         # Frame discipline: the net trains on the pack root's OWN train statistics, and the probe
         # windows are standardized in that same frame. Borrowing another root's stats here is the
         # documented way to collapse two incomparable frames into one silent number.
-        train_full = H._cached_encode(root, "train", eye, device)
-        mo, so, mc, sc = M.standardize_stats(train_full)
-        M.apply_stats(train_full, mo, so, mc, sc)
-        ctx = CP.load_cups_context(root, split, eye, device, stats_data=root)
+        #
+        # TWM_CONTEXT points at a prebuilt lane context (cloud/build_context.py): the standardized
+        # splits, the window layout, and the role-swap chains already synthesized and encoded. All
+        # of that is a property of (root, split, eye, swap-seed) and none of it is a property of
+        # the genome, so a campaign derives it once and memory-maps it into every worker instead of
+        # reloading the encoder and re-encoding every alternative chain per candidate.
+        cpath = _env("TWM_CONTEXT")
+        if cpath:
+            blob = torch.load(cpath, map_location="cpu", weights_only=False, mmap=True)
+            if (blob["root"], blob["eye"], blob["split"]) != (root, eye, split):
+                raise RuntimeError(
+                    f"context {cpath} was built for {(blob['root'], blob['eye'], blob['split'])} "
+                    f"but this run is {(root, eye, split)} — a context from another frame would "
+                    f"silently score in that frame")
+            train_full, ctx, swap_cache = blob["train_full"], blob["ctx"], blob["swap"]
+        else:
+            train_full = H._cached_encode(root, "train", eye, device)
+            mo, so, mc, sc = M.standardize_stats(train_full)
+            M.apply_stats(train_full, mo, so, mc, sc)
+            ctx = CP.load_cups_context(root, split, eye, device, stats_data=root)
+            swap_cache = None
         if ctx is None:
             raise RuntimeError(f"no cups windows in the {split} split of {root}")
     except Exception as e:
@@ -160,7 +179,7 @@ def main(argv):
         tm = getattr(net, "target_module", None)
         tmod = copy.deepcopy(tm).cpu() if tm is not None else target_mod
         ca = CA.measure_trained_net(net, ctx, tmod, device, eye, cells,
-                                    ceiling_table=cells)
+                                    ceiling_table=cells, swap_cache=swap_cache)
 
         # World-model health on the same net: plain next-observation retrieval against same-verb
         # foils on the pack's own val split. No baseline arms, no content-cell tables — this is a

@@ -383,9 +383,19 @@ def exposure_swap(net, ctx, target_mod, device, seed=20260806, ceiling_table=Non
     return out
 
 
-def alt_chain(net, ctx, target_mod, device, percep_name, seed=20260806, max_windows=None,
-              ceiling_table=None):
-    """Probe 1 (operator attribution): re-encode each window with a DIFFERENT valid chain over the
+def build_swap_cache(ctx, percep_name, device, seed=20260806, max_windows=None):
+    """Synthesize and encode the role-swap chains ONCE.
+
+    Nothing here depends on the net: the partner draw is a deterministic function of the window
+    index and the seed, the alternative chain is a function of the board, and the resulting mv
+    embeddings are a function of the encoder. So this is a fixed property of
+    (root, split, eye, seed) and must not be recomputed per candidate — doing so reloads the
+    encoder and re-encodes every alternative chain once per (genome, seed), which is the dominant
+    avoidable cost in a measurement campaign.
+
+    Returns the spliced token tensor plus the routing and marker maps that scoring needs.
+
+    Probe 1 (operator attribution): re-encode each window with a DIFFERENT valid chain over the
     SAME board, synthesized by ROLE-SWAP (review 2026-08-06): pick a swap partner c' != routed and
     exchange the move-position sets of routed and c' in the schedule. The alternative keeps the
     exact dst sequence, is always legal (each content's moves stay in increasing positions from
@@ -536,6 +546,26 @@ def alt_chain(net, ctx, target_mod, device, percep_name, seed=20260806, max_wind
         for kd, t in enumerate(mv_steps):
             tok2[i, 2 * t] = z[kd]
         alts[i] = routed2
+    return {"tok2": tok2, "alts": alts, "alt_marks": alt_marks, "idxs": idxs,
+            "name_skip": name_skip, "partner_mover": partner_mover,
+            "self_parity_cos": self_parity_cos, "eye_tree_sha": eye_tree_sha, "seed": seed}
+
+
+def alt_chain(net, ctx, target_mod, device, percep_name=None, seed=20260806, max_windows=None,
+              ceiling_table=None, cache=None):
+    """Score a trained net against the role-swapped chains.
+
+    `cache` is the output of build_swap_cache. Pass it: it is net-independent, and rebuilding it
+    per candidate re-pays the encoder load and the whole re-encode. Omitting it rebuilds inline,
+    which is correct but wasteful and is kept only so a one-off probe stays a one-liner.
+    """
+    if cache is None:
+        cache = build_swap_cache(ctx, percep_name, device, seed=seed, max_windows=max_windows)
+    wins = ctx["wins"]
+    tok2, alts, alt_marks = cache["tok2"], cache["alts"], cache["alt_marks"]
+    idxs, name_skip, partner_mover = cache["idxs"], cache["name_skip"], cache["partner_mover"]
+    self_parity_cos, eye_tree_sha = cache["self_parity_cos"], cache["eye_tree_sha"]
+
     pred = _fwd_pred(net, tok2, ctx["types"], ctx["key_pad"], ctx["rpos"], device)
     pred_obs = target_mod.to_obs(pred, ctx["z_prev"]) if target_mod is not None else pred
     picks = _nway(pred_obs, ctx)

@@ -2,7 +2,9 @@
 # The pack lane — everything GPU-heavy, on a rented box.
 #
 #   pack_lane.sh prepare                     one-time: pull the eye + the pack root, pin, encode
-#   pack_lane.sh score <genome.json> <id>    train + measure a candidate, emit an ingestable result
+#   pack_lane.sh publish                     upload the encoded root so other boxes pull, not re-encode
+#   pack_lane.sh campaign <genome.json>...   measure many genomes in one pass, saturating the box
+#   pack_lane.sh score <genome.json> <id>    fold one genome's seeds into an ingestable record
 #
 # WHAT THIS COSTS YOU, STATED PLAINLY
 # There are two supported ways to score on a remote box. Running the evolve CLI ON the box keeps
@@ -96,14 +98,14 @@ score() {
   local genome="$1" cand_id="$2"
   local seeds="${TWM_SEEDS:-0,1,2}"
   local out="cloud/podresults/${cand_id}.json"
-  export REPO_RESULTS="$REPO/.results/$cand_id"
+  # the runner keys its output by genome stem; the fold reads the same place
+  export REPO_RESULTS="$REPO/.results/$(basename "$genome" .json)"
   mkdir -p cloud/podresults "$REPO_RESULTS"
 
   IFS=',' read -ra SEEDLIST <<< "$seeds"
-  for s in "${SEEDLIST[@]}"; do
-    say "seed $s"
-    $TWM_PYTHON -m eval.adapter "$REPO_RESULTS/s$s" "$genome" "$s" inner full
-  done
+  # Seeds are independent trains — run them concurrently. One GPU is not saturated by one job.
+  $TWM_PYTHON -m cloud.runner --genomes "$genome" --seeds "$seeds" \
+      --gpus "${TWM_GPUS:-1}" --out "$REPO/.results" --split inner --mode full
 
   # Fold the per-seed metrics into one ingestable record. The engine means the per-seed scores
   # itself when it drives the eval; here we are outside it, so we do the same arithmetic and say
@@ -144,10 +146,25 @@ PY
   echo "so comparability is measured rather than assumed."
 }
 
+campaign() {
+  # Measure a whole set of genomes in one pass, saturating the box. This is the shape of a
+  # first measurement campaign: every genome is unmeasured on this lane, so there is nothing to
+  # screen and no reason to serialize.
+  local seeds="${TWM_SEEDS:-0,1,2}"
+  say "campaign: $# genome(s) x seeds $seeds on ${TWM_GPUS:-1} gpu(s)"
+  say "(the lane context — splits, windows, role-swap chains — is derived once and shared)"
+  $TWM_PYTHON -m cloud.runner --genomes "$@" --seeds "$seeds" \
+      --gpus "${TWM_GPUS:-1}" --out "$REPO/.results" --split inner --mode full
+  echo
+  echo "Fold each genome into an ingestable record with:  pack_lane.sh score <genome.json> <id>"
+  echo "(the per-seed work is already cached, so that step just aggregates)"
+}
+
 case "${1:-}" in
-  prepare) prepare ;;
-  publish) publish ;;
-  score)   score "$2" "$3" ;;
-  *) echo "usage: pack_lane.sh prepare | publish | score <genome.json> <candidate-id>" >&2
+  prepare)  prepare ;;
+  publish)  publish ;;
+  score)    score "$2" "$3" ;;
+  campaign) shift; campaign "$@" ;;
+  *) echo "usage: pack_lane.sh prepare | publish | campaign <genome.json>... | score <genome.json> <id>" >&2
      exit 2 ;;
 esac

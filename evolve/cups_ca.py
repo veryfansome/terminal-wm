@@ -173,7 +173,7 @@ def _diagnostics(pred_obs, cands, idxs):
 
 @torch.no_grad()
 def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
-                        seed=20260806, ceiling_table=None):
+                        seed=20260806, ceiling_table=None, swap_cache=None):
     """comp_ca for ONE trained net on ONE (root, split). Returns unrounded per-seed values.
 
     The scored scalar is comp_ca_margin = comp_ca - max(analytic_band): the differential's margin
@@ -186,8 +186,10 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     their frozen-ceiling columns; comp_ca itself never reads a ceiling value arithmetically.
     """
     cap = CP.measure(net, ctx, target_mod, device, ceiling_table=ceiling_table)
+    # swap_cache is the prebuilt role-swap synthesis: net-independent, so a campaign builds it
+    # once rather than reloading the encoder per candidate.
     alt = CP.alt_chain(net, ctx, target_mod, device, percep_name, seed=seed,
-                       ceiling_table=ceiling_table)
+                       ceiling_table=ceiling_table, cache=swap_cache)
 
     native = {r["id"]: r for r in cap["rows"]}
     swap = {r["id"]: r for r in alt["rows"]}
