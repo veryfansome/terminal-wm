@@ -11,9 +11,9 @@ import pathlib
 
 
 # ---------------------------------------------------------------- v3-policy scoring-side infra
-# These helpers are classes-file-INDEPENDENT (dockerfs3-prereg §7): they let the reencode/
-# mv_encode stampers, the harness cached-encode gate, and load_perception_for_root fail-closed on
-# a v3 root, keyed only on the root's own declaration. They never touch v1/v2 roots.
+# These helpers depend on nothing but a root's OWN declaration — no external class table — which is
+# what lets the reencode stamper, the harness cached-encode gate and load_perception_for_root all
+# fail closed on a malformed root without a shared authority to consult.
 
 def is_v3_policy(data_root):
     """True iff the root's summary.json declares a dockerfs3 (v3) bench policy. Lightweight
