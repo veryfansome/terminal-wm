@@ -1,6 +1,6 @@
 """R20 native imagination-write arch.
 
-This is the champion r18 path-state model with one parameter-free causal branch: a
+This is the r18 path-state latent-transition model with one parameter-free causal branch: a
 valid command whose observation token is masked writes the existing learned transition
 f(s_pre, cmd) into path memory. The branch is identically zero on fully observed streams.
 """

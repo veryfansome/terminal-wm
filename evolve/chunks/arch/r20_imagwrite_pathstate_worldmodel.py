@@ -1,32 +1,32 @@
-"""R20 arch: IMAGINATION-WRITE path-state world model — the champion r18 arch plus ONE
+"""R20 arch: IMAGINATION-WRITE path-state world model — the r18 path-state arch plus ONE
 parameter-free branch that makes the net natively forward an OBS-MISSING suffix, so the
-imagination the champion ALREADY TRAINS becomes reachable at composition time. Nothing else
+imagination the r18 stack ALREADY TRAINS becomes reachable at composition time. Nothing else
 changes: zero new parameters, zero new training pressure, and the branch is identically dead
-on every fully-observed stream — the trained model is bit-for-bit the champion.
+on every fully-observed stream — the trained model is bit-for-bit the r18 path-state arch.
 
-THE GAP (measured, R20 brief): the champion cannot imagine a mutation->read outcome without
-observation feedback (hardened companion: genuine dedup endhist-pre margin -0.066 / mem-pre
--0.342), and its native masked forward is nearly blind to the mutation (+0.0085 over the
-no-mutation counterfactual, P4 probe) for a MECHANICAL reason visible in the code:
+THE GAP (measured, R20 brief): the r18 path-state arch cannot imagine a mutation->read outcome
+without observation feedback (hardened companion: genuine dedup endhist-pre margin -0.066 /
+mem-pre -0.342), and its native masked forward is nearly blind to the mutation (+0.0085 over
+the no-mutation counterfactual, P4 probe) for a MECHANICAL reason visible in the code:
 `_transition_reads` gates every memory write with `active = valid_obs & valid_cmd`, so a pair
-whose observation is masked — the round's declared path-(b) endpoint layout
+whose observation is masked — the declared path-(b) endpoint layout
 [prefix, cmd_m, PAD-obs, cmd_r] — writes NOTHING. The mutation never enters the path state and
 the read at cmd_r retrieves the STALE pre-mutation content (the counterfactual twin the eval
-punishes). Meanwhile the champion's own head aux (`r18_transition_forwardmodel_consistency`,
+punishes). Meanwhile the r18 head aux (`r18_transition_forwardmodel_consistency`,
 aux_weight 1.0) already trains the transition operator f(s_pre, cmd) as an obs-calibrated
 forward model on mined (pre, mutating-cmd, future-read) triples, and the trained read path
 (spectral-capped tr_read + gates + syscond FiLM) already knows how to render memory content
 into predictions. The ONLY missing piece of the imagination loop is the write when obs is
 absent — this file adds exactly that piece:
 
-    corr_i = (v_i - s_pre_i) * [valid_obs & valid_cmd]                    (champion, unchanged)
+    corr_i = (v_i - s_pre_i) * [valid_obs & valid_cmd]                    (r18, unchanged)
            + w_i * (delta_i - s_pre_i) * [valid_cmd & ~valid_obs]         (NEW imagination write)
 
-with delta_i = f(s_pre_i, cmd_i) the champion's own command-conditioned transition and
+with delta_i = f(s_pre_i, cmd_i) the r18 arch's own command-conditioned transition and
 w_i = sigmoid(tr_mut_gate) its own mutation detector (mut_gate_mean 0.946 on real mutations).
 The mutation is applied in latent state exactly as the fully-observed write would apply it,
 minus the unavailable obs blend, and the LATER read composes post-mutation content through the
-champion's untouched machinery — trunk attention over prefix + c_m + c_r, path/file memories
+r18 arch's untouched machinery — trunk attention over prefix + c_m + c_r, path/file memories
 over the prefix, transition memory carrying the imagined edit, 3-way read mix, syscond FiLM.
 
 EVIDENCE (image-disjoint TRAIN-window probe, mini 2-layer/d128 stack, 700 steps, n=2315
@@ -36,24 +36,24 @@ family with NO imagination-specific training at all — margins +0.081 full / +0
 (mv +0.064/+0.117, redir:prod> +0.142/+0.117, redir:echo> +0.049/+0.045, mkdir +0.061/+0.145,
 ln +0.087/+0.105) — while an in-pass masked-endpoint InfoNCE aux (also tested, both with and
 without this branch) DEGRADED both the main task and the endpoint (-0.065/-0.002 full), so the
-aux was dropped and this mutation ships PURE: the imagination is emergent from the champion's
+aux was dropped and this mutation ships PURE: the imagination is emergent from the r18 stack's
 existing losses, not from new training. Same-weights write-ON vs write-OFF ablation isolates
 the branch's contribution (+0.032/+0.026 full margin in the main-only training, +0.026/+0.017
-with the real champion head aux; positive on all 5 families in both trainings).
+with the r18 head aux; positive on all 5 families in both trainings).
 
 WHY THE FITNESS PATH IS PROVABLY UNCHANGED: training/eval streams (baseline_interleave) are
 even-length with pairs either both-valid or both-padded, so [valid_cmd & ~valid_obs] is
 identically False — verified bit-identical forward (pred AND h) to the verbatim r18 class on
-even streams at champion config, including after weight perturbation. ZERO new parameters ->
-state_dict, init-RNG stream, gradients, optimizer routing (Muon keys + the (D,D) spectral-cap
-signature) all bit-identical: score_genome retrains literally the same model (verified: a
-30-step training with the champion head + champion optim produced a bit-identical state_dict
-vs the champion arch). The imag_direct (a)-path instrument is also bit-identical (s_pre at m
+even streams at the r18 reference config, including after weight perturbation. ZERO new
+parameters -> state_dict, init-RNG stream, gradients, optimizer routing (Muon keys + the (D,D)
+spectral-cap signature) all bit-identical: score_genome retrains literally the same model
+(verified: a 30-step training with the r18 head + r18 optim produced a bit-identical state_dict
+vs the r18 arch). The imag_direct (a)-path instrument is also bit-identical (s_pre at m
 is read STRICTLY BEFORE the write at m; verified on the instrument's own layout), so
-operator-composition companion numbers stay byte-comparable with the champion re-baseline.
+operator-composition companion numbers stay byte-comparable with the r18 arch's own numbers.
 
 LEAK-FREE: the masked pair's obs VALUE is never read (the obs term is multiplied by the
-champion's own active-gate, and key_pad excludes the slot from attention) — PAD-value
+r18 arch's own active-gate, and key_pad excludes the slot from attention) — PAD-value
 perturbation Delta == 0.0 exactly at the prediction position; prefix-obs and mutation-command
 perturbations DO move the endpoint (the mechanism reads history and c_m). Future-obs leakage
 on normal streams is 0.0 (inherited; re-verified).
@@ -85,7 +85,7 @@ DESCRIPTION = (
 
 class R20ImagWritePathState(R18PathStateLatentTransition):
     """Subclass overriding ONLY `_transition_reads` (the imagination-write branch); every other
-    champion method — trunk, memories, gates, `_transition`, `transition_from_emb`, forward —
+    r18 method — trunk, memories, gates, `_transition`, `transition_from_emb`, forward —
     is inherited verbatim."""
 
     def _transition_reads(self, x_cmd, obs_tok, valid_cmd, valid_obs, n_cmd, n_pair):
@@ -115,7 +115,7 @@ class R20ImagWritePathState(R18PathStateLatentTransition):
                 wi = w[:, i].unsqueeze(-1) * 0.0
                 active = x_cmd.new_zeros(B, 1)
                 imag = x_cmd.new_zeros(B, 1)
-            v_i = (1.0 - wi) * obs_i + wi * delta                    # champion write value
+            v_i = (1.0 - wi) * obs_i + wi * delta                    # r18 write value
             corr = (v_i - s_pre) * active \
                 + (w[:, i].unsqueeze(-1) * (delta - s_pre)) * imag   # NEW imagination write
             mem = decay * mem + torch.bmm(pi.unsqueeze(2), corr.unsqueeze(1))

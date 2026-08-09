@@ -2,8 +2,8 @@
 from the observation render — everything else (model, pool, OBS_CAP, `passage:` prefix, cmd
 render) byte-identical to enc_e5_base. Tests whether the content-verb margin survives when the
 model must INFER the working directory from history instead of being handed it (the JEPA
-latent-state premise). Compare a champion scored on data/dockerfs3-e5 (cwd-in) vs a root
-re-encoded with THIS perception (cwd-out)."""
+latent-state premise). Compare a genome scored on data/dockerfs3-e5 (cwd-in) vs the same genome
+scored on a root re-encoded with THIS perception (cwd-out)."""
 from evolve.chunks.perception.baseline import pool, OBS_CAP
 MODEL = "intfloat/e5-base-v2"
 

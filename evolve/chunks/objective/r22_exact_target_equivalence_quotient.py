@@ -2,7 +2,7 @@
 
 The identity target admits exact equivalence classes: two occurrences with the same
 standardized target vector are the same answer. The squared-L2 eval agrees—an exactly
-equal foil ties the truth and therefore cannot beat it. The incumbent r12 loss does not:
+equal foil ties the truth and therefore cannot beat it. The r12 loss does not:
 its duplicate guard only removes the EXTRA ring emphasis, while duplicate occurrences
 remain separate one-hot classes, separate candidate columns, and separate focal anchors.
 For an exact class of size k, diagonal probability is at most about 1/k even when the
@@ -14,12 +14,12 @@ This loss takes the quotient by exact target equality. If k_j is target j's clas
   * the positive numerator is logsumexp over every target equivalent to t_i;
   * focal hardness uses total positive-class probability;
   * query rows, precision estimates, MSE, and repulsion use measure 1/k_i.
-Thus duplicating any training example leaves the complete loss invariant. The incumbent
+Thus duplicating any training example leaves the complete loss invariant. The r12
 precision-weighted L2 geometry and close-BUT-DISTINCT ring remain, so mutation twins and
 other genuinely different hard targets are still separated.
 
-Measured TRAIN fact: 55.22% of rows in champion batches have an exact sibling. On the
-three archived 4000-step champion checkpoints their aggregate class probability is
+Measured TRAIN fact: 55.22% of rows in reference-stack batches have an exact sibling. On
+the three archived 4000-step reference-stack checkpoints their aggregate class probability is
 0.994-0.996, but diagonal focal hardness remains 0.800-0.812. Quotient weighting shifts
 effective batch mass from repeated intervention stdout toward diverse read/revisit targets.
 
@@ -55,7 +55,7 @@ _MARGIN = 0.5
 _TAU_R = 0.25
 _GATE_EPS = 1e-3
 
-# Float32 Gram-matrix equality tolerance. On 20 real champion batches:
+# Float32 Gram-matrix equality tolerance. On 20 real reference-stack batches:
 # same-class max 3.34e-6; distinct-class min 3.31e-4; zero FP/FN at 1e-5.
 _EQ_EPS = 1e-5
 _NUM_EPS = 1e-12
@@ -92,7 +92,7 @@ def loss(pred, tgt):
 
     mse_anchor = (inv_class * per_row_mse).sum() / row_measure
 
-    # Champion precision-weighted per-dimension squared-L2 geometry.
+    # r12 precision-weighted per-dimension squared-L2 geometry.
     pw = pred * sqrt_precision
     tw = tgt * sqrt_precision
     pw_sq = (pw * pw).sum(dim=1, keepdim=True)
@@ -140,7 +140,7 @@ def loss(pred, tgt):
 
     listwise = (inv_class * focal * nll).sum() / row_measure
 
-    # Champion close-distinct repulsion, integrated once per candidate class and once
+    # r12 close-distinct repulsion, integrated once per candidate class and once
     # per anchor class. Exact-equivalent targets carry zero repulsion by construction.
     with torch.no_grad():
         ring_measure = ring * candidate_measure

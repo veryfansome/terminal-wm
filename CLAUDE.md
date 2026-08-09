@@ -4,34 +4,33 @@ A shell **world model** over real Linux Docker filesystems, improved by an evolu
 objective is **compositional depth**: can the model track *which content* now sits at a location
 after a silent chain of moves, on a system it has never seen?
 
-This repo is a deliberate re-founding of an earlier project (`../jepa`). It carries that project's
-world model, its evolvable chunk registry and its capability-pack instruments, and it drops that
-project's custom evolutionary machinery entirely.
+Earlier work on this world model and its instruments is at
+<https://github.com/veryfansome/jepa>. Everything below describes this repo.
 
-## The one structural change from the predecessor
+## What the search is
 
-**Search never crowns.** The predecessor grew a champion pointer, a promotion predicate, anchored
-drift budgets, a debt ledger and a frontier record. That machinery skews a search: an anchor every
-candidate is told to beat becomes the population's de facto objective, and diversity collapses
-toward it. Here the search is what the ShinkaEvolve line of work says it should be — **weighted
-parent sampling and breeding a diverse set of effective solutions**, with an archive that
-accumulates and never promotes.
+**Parent selection and breeding a diverse set of effective solutions.** Parents are sampled by
+fitness and novelty with an offspring penalty, so the search explores lineages rather than deepening
+one; every scored candidate enters the archive and stays there, negatives weighted the same as wins;
+each round's output is N candidates measured against their own parents.
 
-So this repo owns **no** selection machinery. The [`evolve` plugin](https://github.com/veryfansome/claudemods)
-owns the archive, fitness-and-novelty parent sampling with an offspring penalty, novelty dedup,
-isolated-export scoring, budgets, the inventor jail and the holdout firewall. This repo supplies
-exactly three things: an evolvable surface, an eval command, and a contract file. Nothing else.
+This repo owns **no** selection machinery. The [`evolve` plugin](https://github.com/veryfansome/claudemods)
+owns the archive, parent sampling, novelty dedup, isolated-export scoring, budgets, the inventor jail
+and the holdout firewall. This repo supplies exactly three things: an evolvable surface, an eval
+command, and a contract file. Nothing else.
 
-There is no promotion step and no adoption step. Validity is enforced per candidate at score time;
-a post-hoc discovery is an append-only retraction; shipping an artifact is an ordinary engineering
-act taken outside the search (`evolve apply`), and it never feeds back into selection.
+Validity is a per-candidate property, enforced at score time by the gates in `eval/`. A candidate
+found invalid afterwards is retracted append-only (`evolve retract`). Materializing an archived
+candidate to use somewhere is an ordinary engineering act (`evolve apply`) taken outside the search,
+and it never feeds back into selection.
 
 ## What is scored
 
-`combined_score = comp_ca` — one scalar, defined in `evolve/cups_ca.py`:
+`combined_score = comp_ca_margin` — one scalar, defined in `evolve/cups_ca.py`:
 
 ```
-comp_ca = mean over the eligible windows of ( native_hit - swap_stayed )
+comp_ca        = mean over the eligible windows of ( native_hit - swap_stayed )
+comp_ca_margin = comp_ca - the best analytic non-tracker's own comp_ca on the same windows
 ```
 
 A window exposes N contents at N locations, silently moves them around in a chain, then reads one
@@ -41,10 +40,11 @@ chain is **role-swapped** — the move-position sets of the routed content and a
 over the same board, same destinations, same depth, only the move commands re-encoded.
 
 The point is what cancels. A model that keys on the *name* being asked about predicts identically
-under both chains, so its per-window difference is exactly zero — structurally, not on average. A
-model that keys on chain position (first mover, last mover, deepest) mimics a tracker on one half
-of the exchange and anti-mimics on the other, so it averages to zero. Only carrying content
-identity across hops scores.
+under both chains, so its per-window difference is exactly zero — structurally, not on average, and
+verified so on the real slice. A model that keys on chain position cancels only in expectation, and
+the scored slice is one frozen realization where a first-mover lookup does score positive — which is
+why the band of analytic non-trackers is measured on every run and subtracted. Zero means *no better
+than the best depth-zero shortcut*.
 
 **The capability gate is not the objective.** The pack also has an honest absolute measurement —
 the pick rate against a frozen analytic per-cell ceiling. That is the yardstick, and the search
@@ -80,8 +80,8 @@ genome. The gate reading rides along in `private` as a report and is never an in
 - **Never score the `final` split for selection.** It exists for one-shot, report-only validation
   before an external claim. The engine firewalls it; don't route around it.
 - **No step-reduced proxy.** The cheap tier is fewer *seeds* at full step count. A shortened proxy
-  was measured in the predecessor to invert the ranking of exactly the slow-converging memory and
-  architecture mechanisms this objective is about. `eval/adapter.py` ignores the tier when choosing
+  has been measured to invert the ranking of exactly the slow-converging memory and architecture
+  mechanisms this objective is about. `eval/adapter.py` ignores the tier when choosing
   the step budget, structurally.
 - **Scores compare only within one environment.** Remote results come back through
   `evolve ingest --env <tag>`. Measure comparability with `evolve doctor --measure-env-offset`

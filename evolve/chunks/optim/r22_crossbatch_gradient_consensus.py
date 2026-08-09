@@ -1,12 +1,13 @@
 '''R22 optimizer: CROSS-BATCH GRADIENT CONSENSUS.
 
-The champion already has strong content-attributable native imagination (CA 0.5471), but
-R20/R21 added only about +0.005 cumulative CA and the strongest write-family HA result was
-mostly command decoding. The untouched optimization path still turns each pooled batch into
-one update, even though TRAIN-only gradient analysis at two archived 4000-step champion
-checkpoints found a useful temporal separation: genuine mutation-to-read subset gradients
-align much more strongly than intervention-output subset gradients with a slow EMA of the
-ordinary full-batch gradient on input, trunk, renderer, output, and transition matrices.
+The reference stack already has strong content-attributable native imagination (CA 0.5471),
+but the R20/R21 candidates measured only about +0.005 cumulative CA and the strongest
+write-family HA result was mostly command decoding. The untouched optimization path still
+turns each pooled batch into one update, even though TRAIN-only gradient analysis at two
+archived 4000-step reference-stack checkpoints found a useful temporal separation: genuine
+mutation-to-read subset gradients align much more strongly than intervention-output subset
+gradients with a slow EMA of the ordinary full-batch gradient on input, trunk, renderer,
+output, and transition matrices.
 
 For every large non-addressing matrix this optimizer maintains a slow bias-corrected gradient
 EMA c_t, RMS-matches it to the current gradient g_t, and applies the bounded convex filter
@@ -18,7 +19,7 @@ directions are attenuated. Since c_t is RMS-matched and the mixture is convex, e
 tensor's gradient norm cannot exceed its pre-filter norm. A delayed smooth ramp leaves early
 representation formation unchanged.
 
-The incumbent is otherwise retained: Muon still owns the six repeated 64xd addressing
+The carried optimizer stack is otherwise retained: Muon still owns the six repeated 64xd addressing
 matrices, AdamW keeps the same warmup/hold/cosine-floor schedule, and the 768x768 transition
 readout keeps the same spectral cap. The optimizer sees no data, masks, targets, metadata,
 images, or eval artifacts; it adds no model parameter or forward branch and cannot detect the

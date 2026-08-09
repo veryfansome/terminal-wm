@@ -1,4 +1,4 @@
-"""objective chunk: ANTI-RETRIEVAL ring-negative contrastive — champion free-energy
+"""objective chunk: ANTI-RETRIEVAL ring-negative contrastive — the r6 free-energy
 precision geometry with in-batch negatives re-weighted toward RETRIEVAL-CONFUSABLE
 target pairs (close-but-distinct observations), plus a small repulsion hinge away
 from the confusable set.
@@ -11,19 +11,19 @@ max(retrieve-by-cmd, within-trajectory retrieval). The two binding baselines are
   * grep (+.326, within-traj .513): the trajectory supplies the file's own earlier
     content; the grep answer (matching lines) embeds NEAR that earlier observation.
 Both failure modes share one geometric signature: retrieval's candidate is a target
-vector CLOSE TO (but distinct from) the true target. Under the champion's uniform
+vector CLOSE TO (but distinct from) the true target. Under r6's uniform
 in-batch softmax, such pairs are a vanishing fraction of the negatives, so almost all
 contrastive gradient is spent separating easy far negatives — precisely the pairs
 retrieval already gets right, which the margin cancels out.
 
 MECHANISM — weight the negatives by a detached CONFUSABILITY RING on target-target
-distances, computed in the champion's own precision-weighted per-dim-mean L2 geometry:
+distances, computed in r6's own precision-weighted per-dim-mean L2 geometry:
   tt[i,j]   = precision-weighted per-dim-mean sqL2 between TRUE targets t_i, t_j
   confus    = exp(-tt / lambda),   lambda = 0.5 * mean off-diag tt  (batch-adaptive)
   dupmask   = 1 - exp(-tt / delta), delta = 0.05  (false-negative guard)
   ring      = confus * dupmask                    (band-pass: peak on close-but-distinct)
   a[i,j]    = (1 + kappa * ring) / row-mean       (off-diag, mean-1 per row; a[i,i] = 1)
-and run the champion listwise term as an IMPORTANCE-WEIGHTED softmax:
+and run the r6 listwise term as an IMPORTANCE-WEIGHTED softmax:
   logits = -dist2 / tau + log a
 This is the hard-negative reweighting of Robinson et al. (arXiv:2010.04592) with two
 deliberate inversions: hardness is defined by TARGET-TARGET geometry, not
@@ -33,8 +33,8 @@ it is band-passed a la conditional / ring negative sampling (Wu et al.,
 arXiv:2010.02037; Chuang et al. debiased contrastive, arXiv:2007.00224): NEAR-IDENTICAL
 targets are down-weighted to ~0 because in this corpus they are FALSE negatives — the
 same config file catted in two trajectories is the same right answer, and pushing away
-from it is unsatisfiable noise (the champion's uniform softmax pays that noise; the
-ring removes it, a second, separate win).
+from it is unsatisfiable noise (r6's uniform softmax pays that noise; the
+ring removes it, a second, separate effect).
 
 The batcher (sysblock hard-negative) makes this bite: every trajectory contributes all
 its cmd positions to the flattened batch, so a grep step's own earlier observations sit
@@ -60,7 +60,7 @@ baselines get for free.
 
 Contract / safety:
   * Pure function of (pred, tgt); ring weights, q, gate, precision all DETACHED; no
-    state, no in-place edits of inputs; two extra [n,n] ops beyond the champion (fast).
+    state, no in-place edits of inputs; two extra [n,n] ops beyond r6 (fast).
   * NaN-safe: eps floors in precision, lambda, row means, ring mass; dist2/tt
     clamp_min(0); weights bounded in [1/(1+kappa), 1+kappa] before normalization; log
     of a clamped strictly-positive tensor; n < 2 -> MSE anchor only.
@@ -86,7 +86,7 @@ DESCRIPTION = (
     "eval's own squared-L2 decision variable."
 )
 
-# ---- champion constants (unchanged) ----
+# ---- r6 precision-geometry constants (unchanged) ----
 _TEMP = 0.25       # softmax temperature on mean-1-normalized per-dim-mean sqL2
 _GAMMA = 1.0       # focal focus on not-yet-#1 rows
 _ANCHOR = 0.05     # small MSE anchor (anti-collapse + absolute placement)
@@ -123,7 +123,7 @@ def loss(pred, tgt):
         w = w / w.mean().clamp_min(1e-12)                      # re-normalize
         sw = w.sqrt().unsqueeze(0)                             # [1, d]
 
-    # Precision-weighted per-dim-mean squared L2 (champion geometry).
+    # Precision-weighted per-dim-mean squared L2 (r6 geometry).
     pw = pred * sw                                             # [n, d]
     tw = tgt * sw                                              # [n, d]
     pw_sq = (pw * pw).sum(dim=1, keepdim=True)                 # [n, 1]
@@ -142,7 +142,7 @@ def loss(pred, tgt):
         ring = (confus * dupmask).masked_fill(eye, 0.0)        # [n, n] band-pass, zero diag
 
         # Importance weights: off-diag mean 1 per row (effective negative count unchanged,
-        # so temperature/scale stay comparable to the champion), diagonal exactly 1.
+        # so temperature/scale stay comparable to r6), diagonal exactly 1.
         a_raw = 1.0 + _KAPPA * ring
         row_mean = a_raw.masked_fill(eye, 0.0).sum(dim=1, keepdim=True) / (n - 1)
         a = (a_raw / row_mean.clamp_min(1e-6)).masked_fill(eye, 1.0)
@@ -153,7 +153,7 @@ def loss(pred, tgt):
         q = ring / mass.clamp_min(1e-6).unsqueeze(1)           # [n, n], rows sum to ~1 (or ~0)
         gate = mass / (mass + _GEPS)                           # [n] in [0, 1): ~0 if no confusables
 
-    # --- Champion listwise term with importance-weighted negatives. ---
+    # --- r6 listwise term with importance-weighted negatives. ---
     logits = -dist2 / _TEMP + log_a
     labels = torch.arange(n, device=pred.device)
     logp = F.log_softmax(logits, dim=1)

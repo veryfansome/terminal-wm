@@ -1,23 +1,23 @@
 """R20 arch: CONTENT-CONDITIONED TRANSITION OPERATOR + the imagination write — attack the one
-measured headroom no other R20 candidate touches: the champion transition's FUNCTIONAL FORM.
+measured headroom no other R20 mechanism touches: the r18 transition's FUNCTIONAL FORM.
 
-FINDING 7 (round brief): a fresh operator trained on the frozen champion's memory content,
-(s_pre_m, c_m) -> z_r, scores 0.510 with the champion's exact command-only AFFINE form — i.e.
+FINDING 7 (round brief): a fresh operator trained on the frozen r18 arch's memory content,
+(s_pre_m, c_m) -> z_r, scores 0.510 with the r18 arch's exact command-only AFFINE form — i.e.
 AT the lexical floor (0.511) — while an MLP on the same inputs scores 0.569 (+0.057). The
-champion's operator cannot express content-dependent edits: gamma, beta are functions of the
-COMMAND ONLY, a restriction chosen for a closed-form linear scan that was then NOT adopted (the
-<=16-step sequential loop ships — see the champion `_transition_reads` docstring). So the
+r18 operator cannot express content-dependent edits: gamma, beta are functions of the
+COMMAND ONLY, a restriction chosen for a closed-form linear scan that was then NOT used (the
+<=16-step sequential loop ships — see the r18 `_transition_reads` docstring). So the
 restriction buys nothing at runtime and measurably costs +0.057 of operator-level composition
-at champion scale. Every other R20 candidate freezes this operator and works AROUND it
+at full r18 scale. Every other R20 mechanism freezes this operator and works AROUND it
 (endpoint correctors / calibrators / renderers / de-novo regressors); this mutation upgrades
-the operator ITSELF, inside the champion's existing training pressure.
+the operator ITSELF, inside the r18 stack's existing training pressure.
 
-MECHANISM — two changes on the champion r18 arch:
+MECHANISM — two changes on the r18 path-state arch:
 
 1. CONTENT-CONDITIONED TRANSITION RESIDUAL (the new capacity). `_transition` becomes
-       delta = s_pre*(1+gamma(cmd)) + beta(cmd)                    (champion affine, unchanged)
+       delta = s_pre*(1+gamma(cmd)) + beta(cmd)                    (r18 affine, unchanged)
              + cap * tanh( W2 gelu( W1 [rms_norm(s_pre); cmd_feat] ) / cap )   (NEW, W2 ZERO-INIT)
-   Zero-init -> the arch computes exactly the champion function at step 0 (the champion's own
+   Zero-init -> the arch computes exactly the r18 function at step 0 (the r18 stack's own
    fade-in discipline: tr_read / film_out / sysfilm_out are all zero-init; cf. ReZero,
    arXiv:2003.04887). The rms-normalization of s_pre makes the residual robust to the measured
    memory-vs-raw norm shift (eval s_pre_m mean norm 11.5 vs mined-triple s_pre_k 18.4 vs raw
@@ -29,38 +29,38 @@ MECHANISM — two changes on the champion r18 arch:
    represent; this is exactly the mutated-cell content a symbolic tracker cannot compute (where
    the v3 margin lives), so the same capacity that serves imagination is in play FOR fitness
    (mut_gate 0.946 — the arch heavily uses this write in-distribution), not merely protected
-   from it. Trained by the champion's own losses: the main loss through the memory reads, and
+   from it. Trained by the r18 stack's own losses: the main loss through the memory reads, and
    the (co-designed) head aux supervising `transition_from_emb` on mined mutation triples.
 
-2. THE PARAMETER-FREE IMAGINATION WRITE (adopted VERBATIM from `r20_imagwrite_pathstate_
+2. THE PARAMETER-FREE IMAGINATION WRITE (taken VERBATIM from `r20_imagwrite_pathstate_
    worldmodel`, attributed): a pair with a valid command but a masked (key_pad) observation
    writes w_i*(f(s_pre, c_m) - s_pre) into its path slot, so the net natively forwards the
-   round's declared obs-missing endpoint layout [prefix, c_m, PAD-obs, c_r] and the LATER read
-   composes post-mutation content through the champion's untouched machinery — now with the
+   declared obs-missing endpoint layout [prefix, c_m, PAD-obs, c_r] and the LATER read
+   composes post-mutation content through the r18 arch's untouched machinery — now with the
    richer f. Identically dead on even-length streams (pairs pad together in every harness
    collate), so fitness training/eval never executes it.
 
 WHY THIS LEVER AND NOT ANOTHER (all measured, image-disjoint TRAIN-window minis, 2 seeds,
 protocol byte-matching the prior R20 minis — floor 0.5404 full / 0.5032 dedup, n=2315/1400):
 the write-family COMPOSITION is at its own ceiling — an ORACLE that substitutes the TRUE
-mutation observation into the masked slot beats the write by only ~+0.003, a fully
+mutation observation into the masked slot scores only ~+0.003 above the write, a fully
 in-distribution self-rollout (dream the mutation's obs, re-forward fully-observed) TIES the
 write (residual-error cosine 0.98: same predictor), endpoint ensembling is dead, a re-read
 refinement pass is negative, and endpoint scale calibration is worth only ~+0.005/+0.002. So
 further (b)-path gains cannot come from better composition of a frozen operator; the operator
 itself is the remaining lever. At the mini's 700-step budget the recruited residual
 (||res||/||base|| = 0.42 on eval inputs) is outcome-neutral (write-endpoint and main-task tie
-the champion within seed noise; raw-pre operator composition improves slightly, +0.01..+0.03);
+the r18 arch within seed noise; raw-pre operator composition improves slightly, +0.01..+0.03);
 the repo's own measurement doctrine (evolve/CLAUDE.md: proxy under-trains slow-converging
 memory mechanisms, documented rank-inversions) is why the full-budget 3-seed run — where
-finding 7's +0.057 was measured — is the arbiter this proposal requests.
+finding 7's +0.057 was measured — is the measurement this file's mechanism needs.
 
 FITNESS PATH: NOT bit-identical (deliberately — the capacity aims at the mutated cells);
-protected by the champion's proven fade-in discipline (exact champion function at init,
+protected by the r18 stack's proven fade-in discipline (exact r18 function at init,
 verified bit-identical pred AND h on even streams), a bounded residual, unchanged interfaces,
 and the paired 2x2 mini showing main-task deltas <= 0.0013 across all quadrants and both
-seeds. New params (~330K at champion scale) are constructed AFTER the entire champion __init__,
-so every champion parameter draws the IDENTICAL init-RNG stream; the residual's two Linears
+seeds. New params (~330K at full r18 scale) are constructed AFTER the entire r18 __init__,
+so every r18 parameter draws the IDENTICAL init-RNG stream; the residual's two Linears
 route to AdamW under the co-designed optim (shapes (192, D+d) and (D, 192) match neither the
 Muon (key_d, *) signature nor the (D,D) spectral-cap signature — verified against the real
 make()). The imag_direct (a)-path instrument works unchanged (`transition_from_emb` /
@@ -70,7 +70,7 @@ layout) and now measures the trained operator.
 LEAK-FREE: the residual reads s_pre (writes strictly < i) and cmd_feat (the current command) —
 no new information flow; the masked pair's obs VALUE is never read (PAD-value perturbation
 Delta == 0.0 exactly at the prediction position, verified; prefix-obs and c_m perturbations DO
-move the endpoint; even-stream causality bit-identical to the champion at init).
+move the endpoint; even-stream causality bit-identical to the r18 arch at init).
 
 Refs: DeltaProduct — richer per-token memory transforms beyond one delta step, arXiv:2502.10297;
 Gated DeltaNet erase-capable writes, arXiv:2412.06464; RSSM/PlaNet/Dreamer latent transitions

@@ -1,11 +1,11 @@
-"""R22 head: IN-PASS MASKED-ENDPOINT TRUNK TASK — the champion forward-model consistency
+"""R22 head: IN-PASS MASKED-ENDPOINT TRUNK TASK — the r18 forward-model consistency
 aux VERBATIM, plus a second training term that forwards the TRUNK ITSELF on in-batch-built
 obs-missing masked-endpoint layouts (the instrument's exact (b)-layout) and supervises the
 prediction at the read slot with an eval-geometry contrastive loss. Gradients flow into the
 whole trunk. ZERO new parameters — the state_dict, module set, and optimizer routing
-(Muon/spectral-cap signatures) are bit-identical to the champion's.
+(Muon/spectral-cap signatures) are bit-identical to the r18 stack's.
 
-WHY THE TRUNK (the R20/R21 record, engaged): the champion's IMAG_CA (0.5471) comes from its
+WHY THE TRUNK (the R20/R21 measurements, engaged): the r18 stack's IMAG_CA (0.5471) comes from its
 TRUNK — every bolt-on module measured ~0 content-attributable at full scale (R21: honest
 observers' mini gains +0.05-0.09 compressed to <= +0.004, 4x-replicated subsumption; the
 evidence-gated write family's HA gain F1-decomposed to ~86% presence-gated command-decode,
@@ -20,10 +20,10 @@ This head does the one untried thing: pose the task to the trunk, INSIDE the pas
 and anchored by the main loss — closing the train/measure distribution gap on the object
 the frozen instrument actually measures.
 
-MINING (metadata-free, measured on TRAIN images with the champion's canonical s0 ckpt):
+MINING (metadata-free, measured on TRAIN images with the r18 stack's canonical s0 ckpt):
 the arch's own trained mutation gate w_mut = sigmoid(tr_mut_gate(in_norm(cmd_proj(z_cmd) +
 type_emb[0]))) separates mutation commands from reads (intervene mean 0.958, 99.7% > 0.5;
-reads 0.40; fires on EVERY family incl. redir:prod> 0.99 / mkdir 0.826 — where the champion
+reads 0.40; fires on EVERY family incl. redir:prod> 0.99 / mkdir 0.826 — where the r18
 head's cmd-cosine rule has 0.0 coverage). Rule: for each command position j with an observed
 label (and w_mut(j) <= floor), k(j) = the NEAREST EARLIER position with w_mut(k) > floor
 (floor 0.8, swept: every family supplies true pairs, hidden-cause labels 0.7%); build
@@ -35,7 +35,7 @@ suppressed (measured 0.7% of pairs); ~56% of harvested genuine windows are recov
 exactly and the rest become visible-cause compressed-layout examples (the same task
 family). The gate starts undifferentiated (bias -1.0 => w~0.27 < floor) so the term is
 SILENT until the trunk's own training matures the gate — an automatic curriculum; if the
-gate never differentiates the term stays 0.0 and the genome degrades to the champion.
+gate never differentiates the term stays 0.0 and the genome degrades to the plain r18 head.
 
 LOSS (eval geometry): per-dim-mean squared-L2 logits InfoNCE (tau 0.25) over the mined
 labels + sampled batch targets, negatives importance-weighted by READ-COMMAND cosine (the
@@ -48,12 +48,12 @@ make command-decode insufficient on exactly the deciding foils (same read verb t
 priors; content discriminates). The training distribution contains ONLY coherent
 (prefix, endpoints) pairs — an incoherence/donor detector has no training signal, so the
 coherence-saboteur class named in the prereg cannot be learned from this term; the
-wrong-history arm's behavior stays the honest misled-by-content the champion already shows.
+wrong-history arm's behavior stays the honest misled-by-content the r18 stack already shows.
 
 Causal / leak-free: eval forward untouched (wrap adds no module, registers no params, never
-re-points forward — the arch's forward is bit-identical to the plain champion's at eval).
+re-points forward — the arch's forward is bit-identical to the plain r18 stack's at eval).
 The masked forward's inputs are strictly plan-time (gather sources are positions <= 2k plus
-the read command 2j); z_j enters ONLY as a loss label (sanctioned — the champion aux already
+the read command 2j); z_j enters ONLY as a loss label (sanctioned — the r18 aux already
 consumes future obs as labels); the future read command is a train-only aux INPUT mirroring
 the sanctioned endpoint formulation (the measurement itself supplies c_r as the query) and
 never touches any scored prediction.
@@ -80,7 +80,7 @@ DESCRIPTION = (
 )
 
 _DEFAULTS = {
-    # ---- champion forward-model consistency term (verbatim constants) ----
+    # ---- r18 forward-model consistency term (verbatim constants) ----
     "row_frac": 0.6,       # fraction of batch rows the aux mining runs on
     "path_thresh": 0.60,   # frozen cmd-cosine floor for "same path"
     "change_floor": 0.25,  # min mean-sq change ||obs_i-obs_j||^2 to call it a mutation
@@ -146,7 +146,7 @@ def _has_gate(net):
 
 def wrap(net, D, **params):
     """No forward re-point, no module cycle, no new module, NO NEW PARAMETERS: both terms use
-    the ARCH's own modules by reference. Returns a config dict; the champion term is disabled
+    the ARCH's own modules by reference. Returns a config dict; the r18 term is disabled
     if the arch lacks `transition_from_emb`, the trunk task if it lacks the mutation-gate
     featurization path (passthrough-equivalent in both cases)."""
     cfg = dict(_DEFAULTS)
@@ -158,13 +158,13 @@ def wrap(net, D, **params):
     return cfg
 
 
-# ==== champion term: forward-model consistency on the shared transition operator (VERBATIM) ====
+# ==== r18 term: forward-model consistency on the shared transition operator (VERBATIM) ====
 
 @torch.no_grad()
 def _mine_triples(cmd, obs, valid, path_thresh, change_floor):
     """Per row, mine (row, i, k, j) same-path triples with obs changed across k, plus a weight.
     cmd/obs [B,maxn,D] standardized; valid [B,maxn] bool. FULLY VECTORIZED — identical to the
-    champion head's mining (r18_transition_forwardmodel_consistency)."""
+    r18 head's mining (r18_transition_forwardmodel_consistency)."""
     B, maxn, _ = cmd.shape
     device = cmd.device
     cu = _unit(torch.nan_to_num(cmd, nan=0.0, posinf=1e4, neginf=-1e4))
@@ -206,7 +206,7 @@ def _mine_triples(cmd, obs, valid, path_thresh, change_floor):
 
 
 def _transition_term(cfg, batch, net, device, ramp):
-    """The champion aux, bit-for-bit (same mining, weights, loss math, RNG call)."""
+    """The r18 aux, bit-for-bit (same mining, weights, loss math, RNG call)."""
     if cfg.get("_disabled", True):
         return 0.0
     if float(cfg.get("aux_weight", 0.0)) <= 0.0:
@@ -386,7 +386,7 @@ def aux_loss(head_state, batch, net, device):
 
     total = 0.0
     if ramp > 0.0:
-        t = _transition_term(cfg, batch, net, device, ramp)        # champion term (verbatim)
+        t = _transition_term(cfg, batch, net, device, ramp)        # r18 term (verbatim)
         if torch.is_tensor(t):
             if bool(torch.isfinite(t).item()):
                 total = total + t
@@ -406,7 +406,7 @@ def aux_loss(head_state, batch, net, device):
 
 def leak_safe(mod, params):
     """Forward untouched (wrap adds no module, registers no params, never re-points forward).
-    The champion term consumes future obs strictly as loss labels; the trunk task's masked
+    The r18 term consumes future obs strictly as loss labels; the trunk task's masked
     forward gathers ONLY positions <= 2k plus the read command 2j (verified construction) and
     consumes z_j strictly as a loss label. Validate params are finite and in range."""
     p = dict(_DEFAULTS)

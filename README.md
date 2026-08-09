@@ -18,10 +18,10 @@ target transform, batch composition, token stream layout, readout head — drive
 [`evolve` plugin](https://github.com/veryfansome/claudemods). LLM inventor agents are the mutation
 operators; a deterministic engine owns everything selection-critical.
 
-The search **accumulates and never crowns**. There is no champion, no promotion, no adoption step.
-Parents are sampled by fitness and novelty with an offspring penalty; every scored candidate stays
+The search is **parent selection and breeding**. Parents are sampled by fitness and novelty with an
+offspring penalty, so it explores lineages rather than deepening one; every scored candidate stays
 in the archive, negatives with the same weight as wins; validity is enforced per candidate at score
-time. Shipping something is an engineering decision taken outside the search.
+time. Each round's output is N candidates measured against their own parents.
 
 ## Status
 
@@ -52,10 +52,3 @@ research/                   why the objective is shaped the way it is
 
 `CLAUDE.md` is the working context; `evolve/EVOLVE.md` is the round manual.
 
-## Provenance
-
-Re-founded from an earlier project that built the world model, the chunk registry and the
-capability-pack instruments carried here. That project's custom evolutionary machinery — a champion
-pointer, a promotion predicate, drift budgets and a debt ledger — is deliberately **not** carried:
-an anchor every candidate is told to beat becomes the population's objective and collapses the
-diversity a search exists to maintain.

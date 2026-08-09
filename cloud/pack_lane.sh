@@ -16,8 +16,8 @@ set -euo pipefail
 
 # MANDATORY thread caps. A rented GPU box reports the SHARED HOST's core count, while the
 # container is CFS-quota-capped to a fraction of it. Sizing BLAS threads to the reported count
-# measured as heavy throttling in the predecessor project and once wedged a box badly enough to
-# lose the session. Do not remove these.
+# measured as heavy throttling and once wedged a box badly enough to lose the
+# session. Do not remove these.
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
 export MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}
 

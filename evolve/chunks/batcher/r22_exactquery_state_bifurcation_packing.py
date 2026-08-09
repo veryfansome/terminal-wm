@@ -1,15 +1,15 @@
 '''R22 batcher: EXACT-QUERY STATE-BIFURCATION PACKING.
 
-The R21 record isolated command decoding behind a history-presence gate as the dominant
-failure mode. This batcher makes command decoding insufficient during ordinary causal
+An earlier diagnostic isolated command decoding behind a history-presence gate as the
+dominant failure mode. This batcher makes command decoding insufficient during ordinary causal
 training: it co-packs distinct fit trajectories from the SAME image and cwd that issue the
 EXACT same cat/ls command but have close-yet-distinct observation targets. Image, cwd, and
 command are held fixed; only preceding trajectory/state can explain which target is right.
 
 Mining is fit-only and read-only. For each (image, cwd, raw command) group, retain distinct-
 sequence target pairs with cosine in [min_target_cos, max_target_cos]. The upper threshold
-removes near-duplicate false negatives; the lower threshold keeps the pair in the champion
-antiretrieval-ring objective's confusable regime. At training time, preserve the champion's
+removes near-duplicate false negatives; the lower threshold keeps the pair in the
+antiretrieval-ring objective's confusable regime. At training time, preserve the sysblock
 uniform-to-image-blocked hard curriculum, but fill the hard block round-robin from a few of
 these state-bifurcation groups. Unfilled slots use the ordinary selected-image pool.
 
@@ -201,7 +201,7 @@ def make_batcher(
                     used.update(pair)
                     cursor += 1
 
-            # Odd slots, sparse groups, or complete fallback use the champion-style image pool.
+            # Odd slots, sparse groups, or complete fallback use the sysblock-style image pool.
             if len(hard) < n_hard:
                 fill = block_pool[torch.randint(
                     0, block_pool.numel(), (n_hard - len(hard),), generator=g

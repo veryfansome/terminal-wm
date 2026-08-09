@@ -26,9 +26,9 @@ transition OPERATOR the arch runs — a supervised latent-dynamics term (Dreamer
 self-consistency), the head half of the co-designed stack.
 
 Composability: disabled (hard 0.0, passthrough-equivalent) on any arch that does not expose
-`transition_from_emb` (i.e. every arch but the co-designed one) — like the champion optim's
-strict-incumbent fallback. Causal/leak-free: future obs_j enters ONLY as a loss label; the
-mined pre/cmd are strictly earlier; forward is untouched.
+`transition_from_emb` (i.e. every arch but the co-designed one). Causal/leak-free: future
+obs_j enters ONLY as a loss label; the mined pre/cmd are strictly earlier; forward is
+untouched.
 """
 
 import math

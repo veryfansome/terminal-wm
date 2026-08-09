@@ -16,7 +16,7 @@ WHY this might raise the held-out content-verb margin:
   is high on signal dims, low on noise dims. Weighting the contrastive squared-distance by Pi_d
   DENOISES the ranking -- it concentrates the margin on the dimensions that actually separate
   same-verb observations, the JEPA "abstract away unpredictable detail" bet applied per-dimension.
-  We keep the SAME metric-matched geometry as the L2 contrastive champion (row-only direction,
+  We keep the SAME metric-matched geometry as the uniform L2 contrastive objective (row-only direction,
   per-dim-mean squared L2, temperature 0.25, focal top-1 reweighting, small MSE anchor) and add
   ONLY the precision tilt, NORMALIZED to mean 1 so overall scale/temperature match the uniform
   eval geometry (avoiding plain-InfoNCE's metric-mismatch penalty) while the tilt aligns training
@@ -49,7 +49,7 @@ DESCRIPTION = (
 _TEMP = 0.25       # on the mean-1-normalized per-dim-mean sqL2; gap d_true(~0.1-1) vs foil(~2) is O(1)
 _GAMMA = 1.0       # focal focus on not-yet-#1 examples (the ones that decide top-1)
 _ANCHOR = 0.05     # absolute-placement anchor (metric is shift-sensitive); also anti-collapse
-_BETA = 0.5        # precision temper: w_d = Pi_d^BETA (0 -> uniform champion geometry; 1 -> full precision)
+_BETA = 0.5        # precision temper: w_d = Pi_d^BETA (0 -> uniform L2 geometry; 1 -> full precision)
 _EPS = 1e-2        # MSE floor inside precision (standardized dims have MSE ~0.1-2; caps 1/MSE blow-up)
 _WMIN, _WMAX = 0.25, 4.0  # band on the mean-1 weights so no single dim dominates the geometry
 

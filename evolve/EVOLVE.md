@@ -14,19 +14,19 @@ An LLM-driven evolutionary search over a marked part of this repo (registry mode
 
 ## How a round runs (the `/evolve:round` skill drives this)
 
-1. Re-ground: `evolve board`, read `insights.md`.
+1. Re-ground: `evolve board`.
 2. `evolve sample --k N --seed <round-tag>` — parents (fitness+novelty weighted, offspring-penalized), operators, inspirations per slot. Refuses when the budget is spent. The slot table persists to `evolve/rounds/<seed>-<hash>-slots.json` (exact path printed as `slots_file`) as the round's evidence of what was assigned; use a fresh seed each round and never edit the file after dispatch.
 3. Brief + isolate per slot: markers mode — `evolve brief` + a worktree per inventor; registry mode — `evolve jail --parent <id> --axis <axis> --round <tag> --slot <n> --seed <slot seed> --operator <op> [--cross-with <id>]` builds an isolated workspace whose BRIEF.md is the information-diet brief (parent genome + parent fitness + baseline + prior mechanisms as source, nothing else — asserted, not assumed), and the inventor runs with the jail as its cwd. Declare `surface.registry.inventor_files` (the harness modules an impl may import) once; add project notes (dataset roots, machine budgets) via `surface.registry.jail_notes`.
 4. `evolve guard` each proposal → fix-or-re-brief on violations (bounded retries).
 5. `evolve score --mode proxy` each survivor — guard, dedup, pristine clone, smoke, eval, record. Failures are recorded with reasons; they are search signal. The proxy **screens** (decides whether to spend a full run); it never concludes anything.
 6. Trust only full budget: re-score keepers (`evolve rescore --id <c> --mode full`); for noisy evals, pair a parent re-run at proxy first. Child-vs-parent at full budget is the round's result.
 7. Recombine winners (cross operator / stacked genome) and score the combination — epistasis is real in both directions; always test, never assume.
-8. Every few rounds: distill neutral stats into `insights.md` (≤5 recommendations; record numbers, not verdicts). A round with no new best still closes with the measured trade-off frontier as its result.
+8. A round with no new best still closes with the measured trade-off frontier as its result.
 9. Before any external claim: score that candidate once on the `final` split — report the number, never re-rank on it.
 
 ## Validity — per candidate, not per decision
 
-Search never crowns anything — it scores, selects parents, and breeds; every round's output is N scored candidates measured against their parents. There is no promotion and no adoption step (an anchor the search is told to beat is a champion at any timescale, and it becomes the population's de-facto objective). What the engine enforces instead:
+The search scores, selects parents, and breeds; every round's output is N scored candidates measured against their parents. Validity is a property of a candidate, established when it is scored — not a decision taken later about which candidate is best. What the engine enforces:
 
 - **`eval.guardrails` run against every candidate at score time.** A candidate without a PASS has no usable number — validity checks (causality, provenance, structural) belong here, so they cost every candidate the same and nothing needs a gate ceremony.
 - **A post-hoc validity discovery is an append-only retraction** — `evolve retract --id <c> --reason "<why>"`. The verdict is cross-partition (a mechanism invalid on one dataset is invalid on every dataset — a regime change must not launder it), earlier scores stop counting, history stays intact, and a deliberate rescore under a fixed eval reinstates. Numeric ingests for a retracted id are refused without `--reinstate`, so a re-measurement wave can't reinstate one by accident. Verify a retraction by its EFFECT on `evolve board`, never by the write succeeding. (Remote result payloads may equivalently carry `{"retract": true, "fitness": null, "guardrail": "<reason>"}`.)
@@ -61,9 +61,9 @@ environment problem surfaces as a broken run instead of being recorded as some c
 
 ### The tiers
 `proxy` is one seed, `full` is three — both at the **same step count**. The tier never shortens
-training. A step-reduced proxy was measured in the predecessor project to invert the ranking of
-exactly the slow-converging memory and architecture mechanisms this objective is about, and the
-deepest one timed out at proxy. `eval/adapter.py` ignores `{mode}` when choosing the step budget so
+training. A step-reduced proxy has been measured to invert the ranking of exactly the
+slow-converging memory and architecture mechanisms this objective is about, and the deepest one
+timed out at proxy. `eval/adapter.py` ignores `{mode}` when choosing the step budget so
 this cannot drift back in.
 
 ### The noise floor is deliberately unset
@@ -76,12 +76,12 @@ a slice of fewer than a hundred windows. Derive the floor from the spread of thr
 (the engine then refuses to clobber it and will not nag).
 
 ### Recombination is the point
-Eleven of the thirteen genomes carried from the predecessor's scoreboard differ on only two axes,
-and the whole visible band there was narrower than that project's own same-genome re-run spread.
-Rank carried almost no information; mechanism family did. The starting population in
-`evolve/genomes/` is chosen for family coverage, and it deliberately includes families the old
-scoreboard never rewarded — in particular a content-conditioned transition operator, whose
-conditioning in the carried champion is command-only and therefore provably cannot express a
+On the next-observation margin these mechanisms were previously ranked by, the whole visible band
+across the top performers was narrower than the same-genome re-run spread — rank carried almost no
+information, mechanism family did. The starting population in `evolve/genomes/` is therefore chosen
+for family coverage rather than for inherited rank, and it deliberately includes families that
+ranking never rewarded — in particular a content-conditioned transition operator, where the widely
+used alternative conditions on the command only and therefore provably cannot express a
 content-dependent composition. `search.op_probs` weights `cross` above the plugin default for the
 same reason.
 
@@ -110,3 +110,10 @@ consistency head. A jail only copies the parent's own impl for the axis being mu
 per-axis baselines, so an inventor mutating a descendant would otherwise be handed source with an
 import it cannot resolve or read. Those two modules are therefore granted to every jail. If a new
 shared base module appears, add it here in the same commit.
+
+### Reading a score
+`combined_score` is `comp_ca_margin` — the differential minus the best analytic non-tracker measured
+on the identical slice. Zero means the candidate did no better than a depth-zero positional lookup.
+`public.analytic_band` prints every arm's own value and `public.best_analytic_arm` names the binding
+one; if that band shifts between runs, the slice or the mint changed and nothing is comparable
+across the change. `public.comp_ca` is the raw differential before the band is removed.

@@ -14,9 +14,9 @@ the world-model health readout both come off that same trained net, because trai
 to measure two things off it is pure waste.
 
 WHY THE TIER DOES NOT CHANGE THE STEP COUNT
-  `mode` is reported but never shortens training. A step-reduced proxy was measured, in the
-  predecessor project, to RANK-INVERT exactly the slow-converging memory and architecture
-  mechanisms that a compositional objective is about — and the deepest one simply timed out.
+  `mode` is reported but never shortens training. A step-reduced proxy has been measured to
+  RANK-INVERT exactly the slow-converging memory and architecture mechanisms that a compositional
+  objective is about — and the deepest one simply timed out.
   The cheap tier here is fewer SEEDS at full step count, which is configured in evolve.json.
   If you find yourself wanting a shorter proxy, read that lesson again first.
 
@@ -28,6 +28,7 @@ WHAT COUNTS AS WHOSE FAULT
   bank — are caught and written as correct:false with the reason, because a failure that is the
   candidate's own is search signal and belongs in the archive.
 """
+import copy
 import json
 import os
 import pathlib
@@ -50,7 +51,7 @@ def _env(name, default=None, required=False):
             f"{name} is not set. The eval runs in a git-less export of HEAD with no environment "
             f"injected by the engine and with the multi-GB data roots living OUTSIDE the repo, "
             f"so every root and checkpoint must arrive through the ambient environment as an "
-            f"ABSOLUTE path. See cloud/README.md.")
+            f"ABSOLUTE path. See evolve/EVOLVE.md.")
     return v
 
 
@@ -116,6 +117,17 @@ def main(argv):
     except Exception as e:
         return fail(results_dir, "genome_invalid", f"{type(e).__name__}: {e}")
 
+    # The cups instrument builds a fixed [cmd, obs, cmd, obs, ...] layout and reads the
+    # prediction at a strided position. A stream that lays tokens out differently would be scored
+    # on a sequence the net never trained on — both arms of the differential wrong, no guard able
+    # to see it, and a plausible number written as a pass. Fail closed until the instrument learns
+    # to ask the stream where its tokens are.
+    if getattr(stream, "CUPS_LAYOUT", None) != "interleave2":
+        return fail(results_dir, "stream_layout_unsupported",
+                    "the scoring instrument pins a strided [cmd,obs,...] layout; this stream "
+                    "declares a different one, so the measurement would not correspond to the "
+                    "trained net")
+
     if not head.leak_safe(head, head_p):
         return fail(results_dir, "head_leak_fail",
                     "the head declares itself unsafe against the no-future-leakage contract")
@@ -143,8 +155,10 @@ def main(argv):
             return fail(results_dir, "leakage_fail",
                         "perturbing a later observation moved an earlier command's prediction")
 
+        # A learned target is a REGISTERED child of the net, so `tm.cpu()` is undone by the next
+        # `net.to(device)` inside the probe's forward. Take an unregistered copy instead.
         tm = getattr(net, "target_module", None)
-        tmod = tm.cpu() if tm is not None else target_mod
+        tmod = copy.deepcopy(tm).cpu() if tm is not None else target_mod
         ca = CA.measure_trained_net(net, ctx, tmod, device, eye, cells,
                                     ceiling_table=cells)
 
@@ -167,7 +181,10 @@ def main(argv):
 
     pd = ca["per_depth"]
     feedback = (
-        f"comp_ca {ca['comp_ca']:+.4f} over n={ca['n']} deep earnable windows "
+        f"comp_ca_margin {ca['comp_ca_margin']:+.4f} "
+        f"(raw differential {ca['comp_ca']:+.4f} minus the best analytic non-tracker, "
+        f"{ca['best_analytic_arm']} at {ca['analytic_band'][ca['best_analytic_arm']]:+.4f}) "
+        f"over n={ca['n']} deep earnable windows "
         f"(d2 n={pd['d2']['n']}, d3 n={pd['d3']['n']}, d4+ n={pd['d4plus']['n']}); "
         f"native picks {ca['native_wm']:.3f} vs chance {g['chance']:.3f}; "
         f"under role-swap the same pick is held {ca['swap_stayed']:.3f} and follows the swapped "
@@ -175,10 +192,13 @@ def main(argv):
         f"{health['top1_sameverb']:.3f}.")
 
     write(results_dir, {
-        "combined_score": ca["comp_ca"],
+        "combined_score": ca["comp_ca_margin"],
         "correct": True,
         "public": {
+            "comp_ca_margin": ca["comp_ca_margin"],
             "comp_ca": ca["comp_ca"],
+            "analytic_band": ca["analytic_band"],
+            "best_analytic_arm": ca["best_analytic_arm"],
             "n_windows": ca["n"],
             "per_depth": {k: v["comp_ca"] for k, v in pd.items()},
             "per_depth_n": {k: v["n"] for k, v in pd.items()},
@@ -189,7 +209,9 @@ def main(argv):
             "wm_health_top1_sameverb": health["top1_sameverb"],
             "steps": steps, "seed": seed, "split": split, "mode": mode,
         },
-        "private": {
+        # keyed by seed: the engine dict-MERGES private across seeds, so an unkeyed block would
+        # let the last seed silently overwrite the others
+        "private": {f"seed{seed}": {
             "guards": g,
             "slice": ca["slice"],
             "comp_ca_alt_only": ca["comp_ca_alt_only"],
@@ -197,7 +219,7 @@ def main(argv):
             "gate_report": ca["gate_report"],
             "wm_health": health,
             "root": root, "eye": eye,
-        },
+        }},
         "text_feedback": feedback,
     })
     return 0

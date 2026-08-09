@@ -6,16 +6,17 @@ even/command position) so the per-path transition operator f(s,cmd)=s*(1+gamma)+
 COMPOSED without any observation to feed it. A type-2 command writes to its path slot using
 its current retrieved content s_pre in place of the missing obs (base=s_pre when obs absent),
 gated by the same mutation gate; its paired obs slot contributes NOTHING (obs_present decoupled
-from valid_cmd across every obs-consuming branch). With no type-2 slots the arch is the R18
-champion BIT-FOR-BIT (the imagination path is inert). The write depends only on s_pre (strictly
+from valid_cmd across every obs-consuming branch). With no type-2 slots the arch computes the
+R18 path-state model BIT-FOR-BIT (the imagination path is inert). The write depends only on
+s_pre (strictly
 earlier writes) + the command — never on future/absent obs — so it stays strictly causal and
 leakage-clean; imagined mutations let the model roll the transition forward with no obs feedback
 (a latent "imagined rollout" / planning-by-composition endpoint).
 
 Base mechanism (unchanged, R18): an object-centric,
 Dreamer/RSSM-style *learned latent dynamics* keyed by path, added as a zero-init
-correction on the r13 champion trunk (syscond FiLM + verb-quotient filebind + path
-memory), so it is the champion bit-for-bit at init.
+correction on the carried r13 trunk (syscond FiLM + verb-quotient filebind + path
+memory), so at init it computes that trunk's function bit-for-bit.
 
 WHERE THE MARGIN LIVES (v3): the least-retrievable cells are content reads on
 MUTATED paths. A symbolic tracker + mutation-aware retrieval are already SUBTRACTED
@@ -42,7 +43,7 @@ WHY THIS IS A NEW CORE DYNAMICS (distinct from all prior path memories):
     RECURRENCE s -> f(s) -> f(f(s)) — a per-object latent world-model transition (RSSM /
     Dreamer, arXiv:1912.01603; object-centric slots), applied per PATH, in obs space.
 
-MECHANISM (sequential causal scan over the <=16 command positions — cheap; the champion
+MECHANISM (sequential causal scan over the <=16 command positions — cheap; the r13 trunk
 already runs a single-chunk delta solve at this length):
   For command i, with path key p_i = unit(W_tr x_cmd_i):
     s_pre_i = p_i^T MEM                         # current content from writes < i (CAUSAL)
@@ -58,7 +59,8 @@ already runs a single-chunk delta solve at this length):
   The read at i uses MEM from strictly-earlier writes only; obs_i enters the WRITE at i,
   which affects reads at i+1.. only — strictly causal (obs_t perturbs predictions at
   commands > t only). The read is injected as pred_cmd += sigmoid(gate) * W_ro(read),
-  with W_ro a ZERO-INIT (D,D) square Linear -> exactly 0 at init -> champion bit-for-bit.
+  with W_ro a ZERO-INIT (D,D) square Linear -> exactly 0 at init -> the r13 trunk's function
+  bit-for-bit.
   W_ro square (768,768) is the unique signature the co-designed optim's spectral cap targets.
 
 CO-DESIGN (the epistasis stack this round tests): the head aux
@@ -68,7 +70,7 @@ becomes a good forward model; the optim `r18_spectral_capped_transition_readout`
 spectral norm of the (D,D) `tr_read` so the injected off-manifold correction stays norm-
 calibrated (the R10/R11 off-manifold-norm finding). arch+head+optim reinforce.
 
-Champion machinery retained verbatim: verb-quotient filebind memory, path memory, view
+r13 trunk machinery retained verbatim: verb-quotient filebind memory, path memory, view
 FiLM, 3-way read mix, fuse/direct gates, causal system-identity summary + syscond FiLM,
 exact chunkwise delta solver. Strictly causal; NaN-safe; identity at init.
 
@@ -155,20 +157,20 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
         self.verb_codebook = nn.Parameter(torch.randn(self.n_verb, self.key_d) * 0.2)
         self.ctx_proj = nn.Linear(self.d, self.ctx_d)
 
-        # -- path-state memory (champion channel, unchanged).
+        # -- path-state memory (r13 trunk channel, unchanged).
         self.path_read = nn.Linear(self.d, self.key_d, bias=False)
         self.path_write = nn.Linear(self.d, self.key_d, bias=False)
 
         self.write_gate = nn.Linear(2 * self.d, 1)
 
-        # -- FiLM view transform (champion channel, unchanged).
+        # -- FiLM view transform (r13 trunk channel, unchanged).
         fh = max(16, int(film_hidden))
         self.film_in = nn.Linear(self.d + self.ctx_d, fh)
         self.film_out = nn.Linear(fh, 2 * D)
         nn.init.zeros_(self.film_out.weight)
         nn.init.zeros_(self.film_out.bias)
 
-        # -- causal system-identity summary + zero-init system FiLM (champion channel).
+        # -- causal system-identity summary + zero-init system FiLM (r13 trunk channel).
         self.sys_sal = nn.Linear(self.d, 1)
         self.sys_val = nn.Linear(self.d, self.sys_d)
         sh = max(16, int(sysfilm_hidden))
@@ -358,10 +360,11 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
         read_i = p_i^T mem_{i-1} (strictly-earlier writes -> obs_i affects reads>i only, causal).
 
         NOTE (2026-07-26 speed review): a batched closed-form solve of this scan was implemented
-        and verified numerically equivalent (leakage-clean, <1.1e-6 on pred/reads). It was NOT
-        adopted: the diagonal (per-channel) gate forces a per-channel [B,D,C,C] solve that cannot
-        share across the D output channels (unlike r9/r17's scalar-beta delta), so at the actual
-        train config (bs64, L16, N<=8) it is ~0.6x the loop's speed and a wash on the full arch
+        and verified numerically equivalent (leakage-clean, <1.1e-6 on pred/reads). It is NOT
+        the version that ships: the diagonal (per-channel) gate forces a per-channel [B,D,C,C]
+        solve that cannot share across the D output channels (unlike r9/r17's scalar-beta
+        delta), so at the actual train config (bs64, L16, N<=8) it is ~0.6x the loop's speed
+        and a wash on the full arch
         (0.386 vs 0.374 s/step full stack). The <=16-step Python loop is cheaper here and was
         never the arch bottleneck; the head-aux vectorization (r18 head) is what removed the
         timeout. Kept sequential for simplicity/speed."""

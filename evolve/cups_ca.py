@@ -16,9 +16,12 @@ WHY THIS IS HARD TO FAKE
   A name-keyed non-tracker predicts the exposure at the name index. That is identical under both
   arms (only mv embeddings change), so native_hit_i == swap_stayed_i EXACTLY, per window, and the
   window contributes exactly zero. The cancellation is structural, not statistical.
-  A chain-position non-tracker (first/last/deepest/eliminate) attends to mv tokens, but under the
-  routed<->partner position exchange it mimics a tracker on routed-marker windows and anti-mimics
-  on the symmetric partner windows; drawn exchangeably its expectation is zero.
+  A chain-position non-tracker (first/last/deepest/eliminate) attends to mv tokens. Under the
+  routed<->partner exchange it mimics a tracker on routed-marker windows and anti-mimics on the
+  symmetric partner windows, so its EXPECTATION is zero — but only over an exchangeable
+  population, and the scored slice is one frozen realization of a deliberately chain-biased mint.
+  Measured there, a first-mover lookup scores clearly positive. That is why the scored scalar is
+  comp_ca_margin: the differential MINUS the best analytic non-tracker on the same slice.
   A history-ignorer or memorizer has native ~ swap, so ~zero.
   A genuine multi-hop tracker follows the chain: native picks routed, swap follows the partner, so
   the difference is positive.
@@ -81,8 +84,54 @@ MIN_ANGULAR_DISPERSION = 0.5
 REPORT_NATIVE_WM_OVER_CHANCE = 0.10
 
 
+# --- the analytic non-tracker band -------------------------------------------------------------
+# The differential's null is zero only in EXPECTATION over an exchangeable population, and the
+# scored slice is one frozen realization of a mint whose chains are deliberately biased. Measured
+# on the real inner slice, the name-keyed and last-src arms cancel to exactly zero, as designed —
+# but a FIRST-MOVER lookup, a depth-zero strategy, scores clearly positive. Restricting the swap
+# partner to movers shrinks that but does not remove it, because the routed content is not
+# uniformly distributed over the movers.
+#
+# So the honest scalar is a MARGIN over the best analytic non-tracker, exactly as the project's
+# other metric is a margin over honest baselines: a mechanism that lifts the differential no more
+# than a positional lookup does has discovered nothing. Every arm here is a pure function of the
+# command strings, so the band is genome-INDEPENDENT — subtracting it is a constant shift that
+# leaves the ranking of candidates untouched and makes zero mean "no better than the best shortcut".
+ANALYTIC_ARMS = ("h_first", "h_last", "h_lastmv", "at_name", "deepest")
+
+
 def _cell_key(row):
     return f"{row['N']},{row['depth']},{row['m']},{row['R']}"
+
+
+def _native_marks(w):
+    """The native chain's positional markers, in the same shape alt_chain reports for the swap."""
+    return {"h_first": w["first_src"],
+            "h_last": w["last_src"] if w["last_src"] is not None else w["name"],
+            "h_lastmv": w["last_mover"],
+            "at_name": w["name"],
+            "deepest": w["deepest"]}
+
+
+def _arm_hit(marks, arm, routed):
+    v = marks[arm]
+    if arm == "deepest":
+        return (1.0 / len(v)) if v and routed in v else 0.0
+    return float(v == routed)
+
+
+def analytic_band(win_by_id, swap, W):
+    """comp_ca as each analytic non-tracker would score it, on the identical frozen slice."""
+    band = {}
+    for arm in ANALYTIC_ARMS:
+        tot = 0.0
+        for i in W:
+            w, s = win_by_id[i], swap[i]
+            routed = w["routed"]
+            tot += (_arm_hit(_native_marks(w), arm, routed)
+                    - _arm_hit(s["alt_marks"], arm, routed))
+        band[arm] = tot / len(W)
+    return band
 
 
 def eligible_ids(native_rows, cells):
@@ -126,6 +175,11 @@ def _diagnostics(pred_obs, cands, idxs):
 def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
                         seed=20260806, ceiling_table=None):
     """comp_ca for ONE trained net on ONE (root, split). Returns unrounded per-seed values.
+
+    The scored scalar is comp_ca_margin = comp_ca - max(analytic_band): the differential's margin
+    over the best depth-zero shortcut measured on the identical slice. The band is a pure function
+    of the command strings, so it is the same constant for every candidate — it does not reorder
+    anything, it makes zero mean "no better than a positional lookup".
 
     `cells` is the flat {"N,depth,m,R": ceiling} dict (the ceiling table's ["cells"]).
     `ceiling_table` is passed through to cups_probe purely so its own reported aggregates keep
@@ -186,7 +240,14 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
         }
 
     idxs = [swap[i]["i"] for i in W]
+    # Both arms, not just the native one: comp_ca is a DIFFERENCE, so a collapsed role-swap bank
+    # corrupts it exactly as badly as a collapsed native bank, and it was previously unchecked.
     diag = _diagnostics(cap["pred_obs"], ctx["cands"], idxs)
+    diag_swap = _diagnostics(alt["pred_obs"], ctx["cands"], idxs)
+    for nm, pb in (("native", cap["pred_obs"]), ("swap", alt["pred_obs"])):
+        if not torch.isfinite(pb[idxs]).all():
+            raise ValueError(f"cups_ca: the {nm} prediction bank contains non-finite values over "
+                             f"W — that is an instrument failure, not a calibration question")
     chance = sum(1.0 / native[i]["N"] for i in W) / len(W)
     native_wm = sum(native[i]["wm"] for i in W) / len(W)
 
@@ -201,10 +262,14 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
         "n_role_swap_dropped_from_W": len(dropped),
         "norm_over_bank": diag["norm_over_bank"],
         "angular_dispersion": diag["angular_dispersion"],
-        "norm_ok": diag["norm_over_bank"] is not None
-                   and diag["norm_over_bank"] >= MIN_NORM_OVER_BANK,
-        "dispersion_ok": diag["angular_dispersion"] is not None
-                         and diag["angular_dispersion"] >= MIN_ANGULAR_DISPERSION,
+        "norm_over_bank_swap": diag_swap["norm_over_bank"],
+        "angular_dispersion_swap": diag_swap["angular_dispersion"],
+        "norm_ok": all(d["norm_over_bank"] is not None
+                       and d["norm_over_bank"] >= MIN_NORM_OVER_BANK
+                       for d in (diag, diag_swap)),
+        "dispersion_ok": all(d["angular_dispersion"] is not None
+                             and d["angular_dispersion"] >= MIN_ANGULAR_DISPERSION
+                             for d in (diag, diag_swap)),
         # REPORTED ONLY — see REPORT_NATIVE_WM_OVER_CHANCE above.
         "native_wm": native_wm,
         "chance": chance,
@@ -213,8 +278,18 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
             (native_wm - chance) >= REPORT_NATIVE_WM_OVER_CHANCE,
     }
 
+    win_by_id = {w["id"]: w for w in ctx["wins"]}
+    band = analytic_band(win_by_id, swap, W)
+    best_arm = max(band, key=lambda a: band[a])
+    comp_ca_margin = comp_ca - band[best_arm]
+
     return {
-        "comp_ca": comp_ca,                 # THE scalar the search maximizes
+        # THE scalar the search maximizes: the differential's margin over the best analytic
+        # non-tracker on this exact slice. Zero means "no better than a depth-zero shortcut".
+        "comp_ca_margin": comp_ca_margin,
+        "comp_ca": comp_ca,                 # the raw differential, before the band is removed
+        "analytic_band": band,
+        "best_analytic_arm": best_arm,
         "n": len(W),
         "per_depth": per_depth,
         "comp_ca_alt_only": sum(alt_only) / len(alt_only),   # cross-check, never selection

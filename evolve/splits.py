@@ -1,6 +1,7 @@
 """The mandatory 3-way split (the anti-overfitting rail). All held-out (unseen) images:
   inner-val  = fedora + mariadb   -> fitness is scored here (the loop optimizes against it)
-  final-test = rockylinux + httpd -> the loop NEVER scores these; only the champion, once.
+  final-test = rockylinux + httpd -> NEVER scored for selection; a single report-only read of one
+                                     candidate, before an external claim.
 Each pair mixes a distro + a service image so the two held-out sets are comparable."""
 
 INNER_IMAGES = ("fedora", "mariadb")

@@ -27,19 +27,20 @@ Two facts make this pay:
   (2) CO-PACKING sequences that mutate+read the SAME canonical path (a path-keyed CLIQUE, drawn
       across DIFFERENT images / DIFFERENT mutation types) puts MANY pre/post/cross-mutation
       variants of one path in one batch — a bulk counterfactual collision, the same
-      block->clique concentration that made sysblock beat uniform, but keyed on MUTATION STATE
-      instead of system identity.
+      block->clique concentration that scored above uniform sampling for sysblock, but keyed on
+      MUTATION STATE instead of system identity.
 
-The hard fraction ramps 0 -> hard_frac_max over the first ramp_frac of training (the champion's
-proven warm-up); its steady state is the motif geometry. Clique members are drawn distinct-image-
-first so a co-packed clique is pre-vs-post / system-variant TRUE negatives, not a duplicated
-post-state (a false negative). This is complementary to the champion objective (antiretrieval
-ring): a pre/post twin is the canonical close-but-distinct pair that lands in the ring's pass-band
-and receives the repulsion hinge, while an accidental same-state duplicate is gated out by its
+The hard fraction ramps 0 -> hard_frac_max over the first ramp_frac of training (the same warm-up
+the sysblock curriculum uses); its steady state is the motif geometry. Clique members are drawn
+distinct-image-first so a co-packed clique is pre-vs-post / system-variant TRUE negatives, not a
+duplicated post-state (a false negative). This is complementary to the antiretrieval-ring
+objective: a pre/post twin is the canonical close-but-distinct pair that lands in the ring's
+pass-band and receives the repulsion hinge, while an accidental same-state duplicate is gated out by its
 dupmask — so packing and objective reinforce.
 
-WHY IT MAY BEAT the incumbent (+0.3922, evolved on read-only v2, NOT built for mutation tracking):
-the champion sysblock densifies same-SYSTEM negatives, which on v3 does nothing for the mutated
+HOW IT DIFFERS FROM THE SYSBLOCK BATCHER (measured +0.3922 on the read-only v2 world it was
+evolved on, NOT built for mutation tracking):
+sysblock densifies same-SYSTEM negatives, which on v3 does nothing for the mutated
 cells whose foil is the counterfactual twin, not another system. This batcher spends the hard
 budget on the mutated cells' actual foil. Retry-failed-in-changed-context: a mutation-keyed
 composition was pointless on the static world and is first-class now that the world mutates.

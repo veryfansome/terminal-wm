@@ -1,7 +1,7 @@
 '''R21 head: COUNTERFACTUAL HISTORY GUIDANCE.
 
 A parameter-free inference-time readout for the frozen odd masked-endpoint layout.
-The same champion trunk is evaluated with the supplied history and with a causal
+The same R18 trunk is evaluated with the supplied history and with a causal
 counterfactual in which positions strictly before the mutation command are masked.
 The conditional-minus-counterfactual latent is a direct estimate of the prefix's
 contribution. A small RMS-capped extrapolation sharpens that contribution:
@@ -13,7 +13,7 @@ embedding rather than a diffusion score. It is algebraically honest under IMAG_H
 when the caller already masks history, conditional and no_history are identical and
 the correction is exactly zero. No prefix-liveness statistic or arm-specific branch
 is used. All even-length and training-mode forwards are the original forward, the
-champion auxiliary is retained verbatim, and no parameter or RNG state is added.
+R18 auxiliary is retained verbatim, and no parameter or RNG state is added.
 '''
 
 import math

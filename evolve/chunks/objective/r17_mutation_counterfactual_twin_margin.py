@@ -1,6 +1,6 @@
-"""objective chunk: MUTATION-COUNTERFACTUAL TWIN margin — champion free-energy precision
-geometry + a hardest-single-twin, mutation-presence-gated relative margin that replaces the
-champion's diffuse *soft-ring* reweighting with a SHARP, per-row commitment against the single
+"""objective chunk: MUTATION-COUNTERFACTUAL TWIN margin — the r6 free-energy precision
+geometry + a hardest-single-twin, mutation-presence-gated relative margin that replaces
+r12's diffuse *soft-ring* reweighting with a SHARP, per-row commitment against the single
 most-confusable counterfactual foil the eval actually decides on.
 
 WHY this should raise the v3 (dynamical-world) margin — the mutation lever:
@@ -8,24 +8,24 @@ On v3 a read of a mutated path (ls|mutated / cat|mutated) has, sitting IN THE SA
 targets, its own COUNTERFACTUAL TWIN — the PRE-mutation content of that very path (the earlier
 `cat X -> orig` position's target) — and the retrieval eval ranks the POST-mutation truth against
 exactly that stale twin. The decisive top-1 flip on the high-value cells is therefore a SINGLE,
-IDENTIFIABLE binary decision: prefer `new` over its twin `orig`. The champion (r12) spreads its
+IDENTIFIABLE binary decision: prefer `new` over its twin `orig`. r12 spreads its
 anti-retrieval pressure across a soft continuous RING of all close-but-distinct pairs and an
 EXPECTED distance to that ring — on a static/read-only world the confusable mass is diffuse and a
 soft ring is right, but on v3 the mass CONCENTRATES on one partner per mutated path, so the eval's
 gradient is spent, per row, on beating that ONE twin. This objective mines that twin explicitly.
 
 MECHANISM (built on r12/r6 precision geometry; the ONE new piece is the twin margin):
-  1. Keep the champion's proven backbone unchanged: per-dim free-energy PRECISION weighting
+  1. Keep the r6 backbone unchanged: per-dim free-energy PRECISION weighting
      (Pi_d = 1/Var(err_d), detached, tempered, banded, mean-1) applied to per-dim-mean squared L2,
      a row-only focal listwise contrastive term, and a small MSE anchor. This already scores ~0.38
      on v3 and supplies the absolute-placement + anti-collapse floor.
   2. TWIN MINING on TARGET-TARGET geometry (detached, model-independent, stable from step 0 — the
-     champion's key design invariant): for each row i, the counterfactual twin is
+     key design invariant r12 also relies on): for each row i, the counterfactual twin is
          h(i) = argmin_{j != i, tt[i,j] > delta} tt[i,j]
      the nearest OTHER target that is NOT a near-duplicate (dup = same config file across systems =
-     a FALSE negative; excluded exactly as the champion's dupmask excludes them). h(i) is the single
+     a FALSE negative; excluded exactly as r12's dupmask excludes them). h(i) is the single
      hard foil retrieval would supply on a mutated/duplicated path.
-  3. MUTATION-PRESENCE GATE (detached band-pass on the twin distance, reusing the champion's own
+  3. MUTATION-PRESENCE GATE (detached band-pass on the twin distance, reusing r12's own
      confusability calibration): gate_i = exp(-hf/lam) * (1 - exp(-hf/delta)), lam = lam_frac *
      mean-off-diag(tt). gate_i ~ 1 only when row i HAS a distinctly-close-but-distinct twin (a
      mutated or cross-system-duplicated path — precisely the v3 high-value rows); gate_i ~ 0 on a
@@ -49,7 +49,7 @@ ARCH memory; this is the matched OBJECTIVE that turns a resolved twin into top-1
 Contract / safety:
   * Pure function of (pred, tgt). Precision, tt, h(i) indices, gate all DETACHED; grad flows only
     through d_true/d_twin (i.e. through pred). No state, no in-place edits; two [n,n] ops + one
-    argmin/gather beyond the champion backbone (fast on MPS).
+    argmin/gather beyond the r6 backbone (fast on MPS).
   * NaN-safe: eps floors in precision/lam/means; dist2, tt clamp_min(0); argmin over a masked tt
     where diag+dups are +inf, and rows with NO valid twin get hf=+inf -> gate = exp(-inf)=0 (term
     vanishes, no NaN); softplus is finite; n<2 -> MSE anchor only.
@@ -76,7 +76,7 @@ DESCRIPTION = (
     "commitment matched to the dynamical world's concentrated confusable mass."
 )
 
-# ---- champion backbone constants (unchanged) ----
+# ---- r6 backbone constants (unchanged) ----
 _TEMP = 0.25
 _GAMMA = 1.0
 _ANCHOR = 0.05
@@ -88,7 +88,7 @@ _WMIN, _WMAX = 0.25, 4.0
 _DELTA = 0.05       # per-dim sqL2 below which two targets are the SAME answer (dup / false neg)
 _LAM_FRAC = 0.5     # presence-gate kernel scale = _LAM_FRAC * mean off-diag target-target dist
 _MARGIN = 0.5       # required per-dim sqL2 gap of the twin over the true content
-_TAU_R = 0.25       # margin sharpness (champion scale)
+_TAU_R = 0.25       # margin sharpness (r12 scale)
 _LAMBDA_TWIN = 0.2  # weight on the twin margin (listwise backbone does the bulk placement)
 
 
@@ -99,7 +99,7 @@ def loss(pred, tgt):
     if n < 2:
         return mse_anchor
 
-    # --- Free-energy precision (detached), champion geometry. ---
+    # --- Free-energy precision (detached), r6 geometry. ---
     with torch.no_grad():
         mse_d = ((pred - tgt) ** 2).mean(dim=0)
         w = (1.0 / (mse_d + _EPS)).pow(_BETA)
@@ -115,7 +115,7 @@ def loss(pred, tgt):
     dist2 = pw_sq + tw_sq.t() - 2.0 * (pw @ tw.t())
     dist2 = dist2.clamp_min(0.0) / float(d)                       # [n, n], grad via pred
 
-    # --- Champion focal listwise term. ---
+    # --- r6 focal listwise term. ---
     logits = -dist2 / _TEMP
     labels = torch.arange(n, device=pred.device)
     logp = F.log_softmax(logits, dim=1)

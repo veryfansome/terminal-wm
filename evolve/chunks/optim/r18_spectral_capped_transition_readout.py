@@ -1,4 +1,4 @@
-"""OPTIM chunk: the incumbent Muon-on-addressing + AdamW/warmup-hold-cosine-floor, PLUS a soft
+"""OPTIM chunk: the r8 Muon-on-addressing + AdamW/warmup-hold-cosine-floor stack, PLUS a soft
 SPECTRAL-NORM CAP on the co-designed r18 arch's (D,D) latent-transition content READOUT
 (`tr_read`), applied as a post-step projection.
 
@@ -11,17 +11,17 @@ prediction's own norm, so this correction can grow off-manifold — the measured
 bounds the gain of the injected correction, keeping predictions norm-calibrated and the per-path
 recurrence dynamically stable, without touching the direction the operator learned.
 
-WHY DISTINCT from the other optim proposals / the incumbent:
-  * Muon (incumbent) orthogonalizes the momentum of the (key_d×d) ADDRESSING matrices — equalizes
+WHY DISTINCT from the other optim proposals / the r8 stack:
+  * Muon (r8) orthogonalizes the momentum of the (key_d×d) ADDRESSING matrices — equalizes
     ALL singular values of the key map for pattern separation. Kept here VERBATIM.
   * Shampoo (in-round #5) preconditions the ADDRESSING-matrix gradient with Kronecker curvature.
   * THIS caps only the TOP singular value of a DIFFERENT matrix (the content readout, not the
     addressing keys) toward a target, for norm-calibration / stability — a spectral-norm CONSTRAINT
     (Miyato et al., arXiv:1802.05957), not an orthogonalization or a curvature preconditioner.
 
-STRICT INCUMBENT SUPERSET. The cap group is routed by the UNIQUE (D,D) square signature — no
+STRICT SUPERSET OF THE r8 STACK. The cap group is routed by the UNIQUE (D,D) square signature — no
 registered arch has a 768×768 weight except the co-designed arch's `tr_read`. On every other arch
-the cap group is EMPTY and make() returns the exact incumbent (Muon on addressing when present,
+the cap group is EMPTY and make() returns the exact r8 stack (Muon on addressing when present,
 else plain AdamW), bit-identically. NaN-safe: non-finite weights skip the projection; the power
 iteration is normalized by a clamped norm; no RNG.
 
@@ -190,7 +190,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30,
          rms_match=0.2, spectral_cap=4.0, spectral_iters=2):
     params = [p for p in params]
 
-    # -- addressing keys -> Muon (exactly the incumbent routing) --
+    # -- addressing keys -> Muon (exactly the r8 routing) --
     cand = [p for p in params
             if p.ndim == 2 and p.shape[0] == key_d
             and p.shape[1] != key_d and p.shape[1] != D]
@@ -208,7 +208,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30,
 
     lr_lambda = _incumbent_lambda(steps, warmup_frac, hold_frac, floor_ratio)
 
-    if not keys and not dd:  # exact incumbent baseline (plain AdamW)
+    if not keys and not dd:  # exact carried baseline (plain AdamW)
         opt = torch.optim.AdamW(params, lr=lr, weight_decay=wd, betas=(0.9, beta2))
         return opt, torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
 
@@ -219,7 +219,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30,
         muon = _MuonKeys(keys, lr=lr, momentum=momentum, ns_steps=ns_steps, rms_match=rms_match)
         scheds.append(torch.optim.lr_scheduler.LambdaLR(muon, lr_lambda))
 
-    if not dd:  # keys present, no readout -> exact incumbent Muon path
+    if not dd:  # keys present, no readout -> exact r8 Muon path
         from types import SimpleNamespace
         cap = SimpleNamespace(project=lambda: None)
         return _CapOpt(adamw, muon, cap), _MultiSched(*scheds)

@@ -1,16 +1,15 @@
 # Compositional depth as the search objective
 
 **Status: implemented. This is what `evolve/cups_ca.py` computes and what the search maximizes.**
-Re-derived from the predecessor project's design note of the same name, with the champion/promotion
-apparatus removed and several numbers corrected against the recorded reference run.
+The search maximizes this and nothing else.
 
 ## 0. Why this objective
 
-The predecessor's fitness was a single-step next-observation margin, and its second axis was a
-single-hop imagination differential. Both are **depth-one**. Neither rewards composing a multi-hop
-tracking chain, so nothing in the search ever pressured a genome toward it — and the strongest
-genome it produced does not have the capability. To evolve toward compositional depth, the search
-has to score compositional depth.
+A single-step next-observation margin is **depth-one**, and so is a single-hop imagination
+differential. Neither rewards composing a multi-hop tracking chain, so a search built on them never
+pressures a genome toward one — and measurement on this pack confirms that the strongest genomes
+selected that way do not have the capability. To evolve toward compositional depth, the search has
+to score compositional depth.
 
 ## 1. The measurement
 
@@ -41,9 +40,13 @@ standardization frame fails loudly instead of recording noise.
   per window**. Contribution: exactly zero. This cancellation is structural, not statistical, and
   it is the reason the role-swap was chosen over a masked-endpoint content swap.
 - **Chain-position non-tracker** (first mover / last mover / deepest / eliminate-the-static) —
-  attends to move tokens, but under the routed↔partner exchange it mimics a tracker on
-  routed-marker windows and anti-mimics on the symmetric partner windows. Drawn exchangeably, its
-  expectation is zero.
+  attends to move tokens. Under the routed↔partner exchange it mimics a tracker on routed-marker
+  windows and anti-mimics on the symmetric partner windows, so its expectation is zero — **but only
+  over an exchangeable population, and the scored slice is one frozen realization.** Measured on the
+  real inner slice, `at_name` and `h_last` cancel to exactly zero as designed, while a first-mover
+  lookup scores about `+0.10`. The mint biases the chains, so the routed content is not uniform over
+  the movers and exchangeability never fully holds. This is why the scored scalar is
+  `comp_ca_margin` — the differential minus the best analytic non-tracker on the same slice (§3a).
 
   **This holds only if the partner is itself a mover, and enforcing that is load-bearing.** The
   routed content is always a mover, so if the partner is not, the exchange is one-sided: routed's
@@ -53,10 +56,10 @@ standardization frame fails loudly instead of recording noise.
   scoring `−1` — cannot occur, because a non-mover is never the native marker. The bias is
   systematic and positive, i.e. exactly farmable by the family this metric exists to exclude.
 
-  The instrument inherited from the predecessor did **not** enforce this: in its recorded reference
-  run the partner was a non-mover in roughly half of all probed windows. That was tolerable while
-  the role-swap was a diagnostic probe; it is not tolerable now that the differential is the
-  selection target. `cups_probe.alt_chain` now draws the partner from movers only, and `cups_ca`
+  The instrument as originally written did **not** enforce this: in a recorded reference run the
+  partner was a non-mover in roughly half of all probed windows. That was tolerable while the
+  role-swap was a diagnostic probe; it is not tolerable now that the differential is the selection
+  target. `cups_probe.alt_chain` now draws the partner from movers only, and `cups_ca`
   refuses to return a number if any probed window had a one-sided exchange.
 - **History-ignorer or memorizer** — native and swap agree, so approximately zero.
 - **Genuine tracker** — native picks the routed content, swap follows the partner. Positive.
@@ -64,7 +67,8 @@ standardization frame fails loudly instead of recording noise.
 ## 3. Why it is not the capability gate
 
 The pack's honest capability measurement is `pick_rate − ceiling_frozen`: an absolute rate minus a
-frozen analytic per-cell ceiling. That is a conjunctive go/no-go, and it is the yardstick.
+frozen analytic per-cell ceiling. That is the yardstick — a measurement, reported and never
+optimized against.
 
 `comp_ca` is a **paired within-genome differential in which the ceiling never appears
 arithmetically**. The table enters only to define the eligible window set, identically for every
@@ -73,6 +77,27 @@ measurement, and the separation is load-bearing: raising the pick rate uniformly
 and leaves `comp_ca` unmoved, so a search that climbs `comp_ca` cannot thereby climb the gate. The
 gate reading is carried in `private` on every measurement as a report. It is never an input to
 selection.
+
+## 3a. The scored scalar is a margin
+
+```
+comp_ca_margin = comp_ca − max over analytic arms of that arm's own comp_ca
+```
+
+The analytic arms — predict the name, the first mover, the last move's source, the last mover, the
+deepest — are pure functions of the command strings. So each one has its own comp_ca on the frozen
+slice, computable with no net at all, and that band is **the same constant for every candidate**.
+Subtracting the largest therefore reorders nothing; it fixes the *meaning* of zero. A candidate at
+`comp_ca_margin ≈ 0` has done no better than a depth-zero positional lookup, which is precisely the
+conclusion the raw differential would have hidden.
+
+This is the same discipline the world-model margin already uses: score the gap over honest
+baselines, because a mechanism that lifts the metric and the baselines equally has discovered
+nothing.
+
+Measured on the real inner slice: `at_name` and `h_last` sit at exactly zero, `h_lastmv` is
+negative, `deepest` is slightly positive, and `h_first` is the binding arm at about `+0.10`. The
+band is re-measured on every run and reported, so a re-mint that changes it cannot pass unnoticed.
 
 ## 4. The eligible slice W
 
@@ -106,8 +131,7 @@ agree on every window property, and means the differences unrounded.
 
 ## 5. What the reference run says — and what it does not
 
-Recomputed from the predecessor's recorded pack run (its strongest genome, three seeds, full step
-budget):
+Recomputed from a recorded pack run of a strong genome (three seeds, full step budget):
 
 | seed | n | native pick rate | swap stayed | comp_ca *(old draw)* |
 |---|---|---|---|---|
@@ -176,11 +200,11 @@ One net per (genome, seed), trained on the pack root and standardized on **that 
 statistics. Both the compositional metric and the world-model health readout come off that same
 net, because training twice to measure two things off it is waste.
 
-The predecessor measured a base-world fitness on a second root and treated it as a floor. That is
-dropped, for a measured reason: its strongest genome has three archived full three-seed records
-spanning 0.4251 / 0.4247 / 0.4262, while the entire top-thirteen leaderboard band is 0.0019 wide.
-Same-genome re-run noise is most of the visible spread, so a base-lane floor would have doubled the
-compute for a quantity that barely discriminates. The collapse check is instead the pack net's own
+A base-world fitness measured on a second root is deliberately NOT carried as a floor, for a
+measured reason: one strong genome has three archived full three-seed records spanning
+0.4251 / 0.4247 / 0.4262, while the entire visible band across the top thirteen is 0.0019 wide.
+Same-genome re-run noise is most of that spread, so a base lane would double the compute for a
+quantity that barely discriminates. The collapse check is instead the pack net's own
 next-observation retrieval, computed on the same net for free.
 
 Frames are never pooled. The pack root is its own comparability frame, and a number from another

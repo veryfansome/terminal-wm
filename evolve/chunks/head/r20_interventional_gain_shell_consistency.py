@@ -1,6 +1,6 @@
 """R20 head: train-only calibration of the interventional gain/shell arch.
 
-The champion R18 forward-model consistency auxiliary is retained. A second, sparse
+The R18 forward-model consistency auxiliary is retained. A second, sparse
 auxiliary mines same-path mutation/read candidates, evaluates the structured no-write and
 full-write hypotheses without trunk gradients, and trains only the arch's two-scalar
 calibrator in the same training pass.

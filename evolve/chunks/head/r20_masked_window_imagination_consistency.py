@@ -1,11 +1,11 @@
-"""R20 head: champion FORWARD-MODEL CONSISTENCY verbatim + a MASKED-WINDOW IMAGINATION
+"""R20 head: the r18 FORWARD-MODEL CONSISTENCY term verbatim + a MASKED-WINDOW IMAGINATION
 aux that trains the co-designed r20 arch's `imaginer` on in-batch-mined mutation->read
 windows — the missing training signal for direct-endpoint imagination.
 
-THE R20 TARGET (measured): the champion composes its obs-calibrated transition operator
+THE TARGET (measured): the r18 stack composes its obs-calibrated transition operator
 at -0.105 vs the lexical floor on mutation->read windows, while a frozen-embedding probe
 (cross-attention over the plan-time prefix queried by the two endpoint commands) proves
-+0.16-0.30 headroom exists on every family. Nothing in the champion's single training
++0.16-0.30 headroom exists on every family. Nothing in the r18 stack's single training
 pass ever POSES the imagination problem: by the time a read at r is scored, the obs at
 m..r-1 are present in the stream, so no mechanism is ever trained to predict z_r from
 (H_{<m}, c_m, c_r) alone. The refuted r19 attempt posed it POST-HOC (unstable all-params
@@ -13,11 +13,11 @@ InfoNCE fine-tune, non-reproducing); this head poses it INSIDE the pass, on a de
 module with stationary (frozen-embedding) inputs, so it cannot destabilize the trunk.
 
 MECHANISM (train-only; eval forward untouched — wrap adds no module, never re-points):
-  1. CHAMPION TERM, VERBATIM: mine same-path (i < k < j) triples by frozen cmd-cosine
-     with the observation changed across k, and require the arch's shared operator
-     f(obs_i, cmd_k) ~ obs_j (cos+MSE, change-weighted, ramped). Identical code, weights
-     and RNG consumption to `r18_transition_forwardmodel_consistency` — the fitness-
-     earning aux is preserved bit-for-bit.
+  1. TRANSITION-CONSISTENCY TERM, VERBATIM: mine same-path (i < k < j) triples by frozen
+     cmd-cosine with the observation changed across k, and require the arch's shared
+     operator f(obs_i, cmd_k) ~ obs_j (cos+MSE, change-weighted, ramped). Identical code,
+     weights and RNG consumption to `r18_transition_forwardmodel_consistency` — that aux
+     is preserved bit-for-bit.
   2. NEW IMAGINATION TERM: mine same-path (k -> j = nearest later touch) ENDPOINT pairs
      (no earlier-touch requirement — ~90% of genuine window targets have NO local source
      observation, and requiring one would mis-match the measurement distribution),
@@ -43,7 +43,7 @@ history-ON minus trained-history-OFF +0.309.
 Causal / leak-free: eval forward untouched; future obs_j enters ONLY as a loss label;
 future cmd_j is a train-only aux INPUT mirroring the sanctioned endpoint formulation
 (the measurement itself supplies c_r as the query) and never touches any scored
-prediction. Disabled (champion-term-only) on archs without `imaginer`; fully disabled
+prediction. Disabled (transition-term-only) on archs without `imaginer`; fully disabled
 (hard 0.0) on archs with neither `imaginer` nor `transition_from_emb`.
 
 Refs: I-JEPA masked latent prediction (arXiv:2301.08243); V-JEPA 2 action-conditioned
@@ -69,7 +69,7 @@ DESCRIPTION = (
 )
 
 _DEFAULTS = {
-    # ---- champion transition-consistency term (verbatim r18 defaults) ----
+    # ---- transition-consistency term (verbatim r18 defaults) ----
     "row_frac": 0.6,       # fraction of batch rows the aux mining runs on
     "path_thresh": 0.60,   # frozen cmd-cosine floor for "same path"
     "change_floor": 0.25,  # min mean-sq change |obs_i - obs_j|^2 to call it a mutation
@@ -263,8 +263,8 @@ def _imag_nce(pred, tgt, w, tau, dup_delta, mse_w):
 
 
 def _transition_term(cfg, batch, net, device, ramp):
-    """The champion r18 forward-model-consistency term, logic verbatim (including its
-    randperm row subsample — the ONLY RNG the aux consumes, matching the champion head's
+    """The r18 forward-model-consistency term, logic verbatim (including its
+    randperm row subsample — the ONLY RNG the aux consumes, matching the r18 head's
     per-step RNG consumption exactly)."""
     if cfg.get("_disabled", True) or float(cfg.get("aux_weight", 0.0)) <= 0.0:
         return 0.0
@@ -386,7 +386,7 @@ def aux_loss(head_state, batch, net, device):
 
 
 def leak_safe(mod, params):
-    """Forward untouched (wrap adds no module, never re-points forward). The champion
+    """Forward untouched (wrap adds no module, never re-points forward). The transition
     term consumes future obs_j strictly as a loss LABEL; the imagination term consumes
     future obs_j strictly as a loss LABEL and the future COMMAND c_j only as a train-
     only aux input to an eval-inactive module (the sanctioned endpoint formulation) —

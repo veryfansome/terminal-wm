@@ -1,7 +1,7 @@
 # R21 causal matched-prefix prototype for native obs-missing endpoints.
 #
 # Ordinary interleaved sequences have even length and are returned by the original
-# champion forward byte-for-byte. On an odd [prefix,c_m,PAD,c_r] layout, this
+# r18 forward byte-for-byte. On an odd [prefix,c_m,PAD,c_r] layout, this
 # head retrieves the observation paired with the most c_r-similar valid prefix
 # command and conservatively blends that prototype into the native prediction.
 # The same code runs in the history-masked arm; with no valid prefix pair it
@@ -185,7 +185,7 @@ def wrap(net, D, **params):
 
 
 def aux_loss(head_state, batch, net, device):
-    # Retain the incumbent shared transition-consistency objective exactly.
+    # Retain the shared transition-consistency objective exactly.
     return CHAMP.aux_loss(head_state, batch, net, device)
 
 

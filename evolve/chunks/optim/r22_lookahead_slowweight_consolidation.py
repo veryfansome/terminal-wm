@@ -1,9 +1,9 @@
 """OPTIM chunk: SLOW-WEIGHT CONSOLIDATION (Lookahead; Zhang, Lucas, Hinton & Ba, NeurIPS 2019,
-arXiv:1907.08610) wrapped AROUND the champion inner optimizer (Muon-on-addressing + AdamW
+arXiv:1907.08610) wrapped AROUND the r18 inner optimizer (Muon-on-addressing + AdamW
 warmup-hold-cosine-floor + spectral-capped (D,D) transition readout), all kept VERBATIM.
 
 WHY (the lever this round hasn't tried). After 21+8 candidates the record localizes all
-content-attributable imagination in the champion TRUNK, and BINDING-v2 selects the content-
+content-attributable imagination in the path-state TRUNK, and BINDING-v2 selects the content-
 attributable differential IMAG_CA. My own TRAIN-window analysis adds one fact the round did not
 have: the history/content-dependence of a read (its target's distance from the cross-system
 centroid of the SAME command) cleanly separates command-only-solvable reads (mean 0.230) from
@@ -15,7 +15,7 @@ DATA SELECTION. It can only be acted on where that diluted signal is integrated 
 optimizer) or where the function is changed (arch). The optimizer GRADIENT space was taken this
 round (temporal gradient consensus); the optimizer WEIGHT space is untried.
 
-MECHANISM. Lookahead keeps a set of SLOW weights phi and lets the champion inner optimizer A run
+MECHANISM. Lookahead keeps a set of SLOW weights phi and lets the r18 inner optimizer A run
 k fast steps from phi; then phi <- phi + alpha*(theta_k - phi) and the fast weights reset to phi
 (Algorithm 1, verbatim). A forced consolidation at the final step returns phi (the paper returns
 phi). Proposition 2 of the paper proves, on the noisy-quadratic proxy, that Lookahead converges to
@@ -27,11 +27,11 @@ consolidated phi is a lower-variance estimate of the content-direction (cleaner,
 across the held-out systems that fitness rewards) -- WITHOUT biasing the solution (same mean =>
 low fitness risk) and WITHOUT any model, loss, batch, forward, or eval change.
 
-STRICT INCUMBENT SUPERSET (verified, max|delta| = 0.0). The inner optimizer is the champion
+STRICT SUPERSET OF r18 (verified, max|delta| = 0.0). The inner optimizer is
 `r18_spectral_capped_transition_readout` inlined verbatim: identical Muon routing (6 (key_d,d)
 addressing matrices), identical spectral cap on the unique (D,D) `tr_read`, identical warmup-hold-
 cosine-floor schedule. At la_alpha = 1.0 (or la_k > steps) NO consolidation ever runs and the
-parameter trajectory is the champion's bit-for-bit. The slow-weight interpolation of spectral-
+parameter trajectory is r18's bit-for-bit. The slow-weight interpolation of spectral-
 capped iterates stays inside the spectral-norm ball by convexity, so the cap is never violated by
 consolidation. NaN-safe: a non-finite param skips its interpolation; no RNG. Lookahead's slow
 weights live in the OPTIMIZER, never on the net (net.state_dict untouched), so the frozen
@@ -62,7 +62,7 @@ DESCRIPTION = (
 D = 768
 
 
-# ================= champion inner optimizer, inlined VERBATIM =================
+# ================= r18 inner optimizer, inlined VERBATIM =================
 def _ns_orth(g, steps=5, eps=1e-7):
     a, b, c = 3.4445, -4.7750, 2.0315
     x = g.float()
@@ -186,7 +186,7 @@ def _incumbent_lambda(steps, warmup_frac, hold_frac, floor_ratio):
 
 # ================= NEW: Lookahead slow-weight consolidation wrapper =================
 class _Lookahead:
-    """Weight-space slow/fast consolidation (Zhang et al. 2019, Alg. 1) wrapping the champion inner
+    """Weight-space slow/fast consolidation (Zhang et al. 2019, Alg. 1) wrapping the r18 inner
     optimizer. Every la_k inner steps: slow += alpha*(fast - slow); fast <- slow. A forced final
     consolidation at t == total_steps makes the returned net hold the SLOW weights phi (Alg.1
     returns phi). la_alpha >= 1.0 skips all consolidation -> the inner optimizer bit-for-bit."""
@@ -230,7 +230,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30, floo
          spectral_iters=2, la_k=5, la_alpha=0.5):
     params = [p for p in params]
 
-    # -- champion routing, verbatim: addressing keys -> Muon --
+    # -- r18 routing, verbatim: addressing keys -> Muon --
     cand = [p for p in params
             if p.ndim == 2 and p.shape[0] == key_d and p.shape[1] != key_d and p.shape[1] != D]
     shape_counts = {}
@@ -248,7 +248,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30, floo
     def _wrap(inner, sched):
         return _Lookahead(inner, params, steps, la_k=la_k, la_alpha=la_alpha), sched
 
-    if not keys and not dd:                                       # exact incumbent baseline (plain AdamW)
+    if not keys and not dd:                                       # exact carried baseline (plain AdamW)
         opt = torch.optim.AdamW(params, lr=lr, weight_decay=wd, betas=(0.9, beta2))
         return _wrap(opt, torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda))
 

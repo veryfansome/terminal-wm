@@ -452,6 +452,7 @@ def alt_chain(net, ctx, target_mod, device, percep_name, seed=20260806, max_wind
             f"encode does not reproduce the cached z_cmd — wrong encoder/render/stats frame")
     tok2 = ctx["tok"].clone()
     alts, partner_mover, name_skip = {}, 0, 0
+    alt_marks = {}
     for i in idxs:
         w = wins[i]
         s = ctx["seqs"][w["si"]]
@@ -502,7 +503,9 @@ def alt_chain(net, ctx, target_mod, device, percep_name, seed=20260806, max_wind
         for kd in pos[c2]:
             sched2[kd] = w["routed"]
         loc2 = {k: slots[k] for k in range(w["N"])}
-        cmds2 = []
+        cmds2, srcs2 = [], []
+        depth2 = {k: 0 for k in range(w["N"])}
+        lastmv2 = None
         for kd, dst in enumerate(dsts):
             c = sched2.get(kd)
             if c is None:
@@ -510,8 +513,24 @@ def alt_chain(net, ctx, target_mod, device, percep_name, seed=20260806, max_wind
                 # identical under both chains, so the original src still identifies it
                 c = next(k for k, v in loc2.items() if v == w["mvs"][kd][1])
             cmds2.append(f"mv {loc2[c]} {dst}")
+            srcs2.append(loc2[c])
             loc2[c] = dst
+            depth2[c] += 1
+            lastmv2 = c
         routed2 = next(k for k, v in loc2.items() if v == tloc)
+        # The SWAPPED chain's positional markers, so a caller can evaluate the analytic
+        # non-tracker arms on the same exchange the net sees. These are pure functions of the
+        # command strings — no net, no embeddings — which is exactly why they are the honest
+        # floor to measure a candidate against.
+        slot_of2 = {p: k for k, p in enumerate(slots)}
+        dmax2 = max([d for d in depth2.values() if d > 0] or [0])
+        alt_marks[i] = {
+            "h_first": slot_of2.get(srcs2[0]) if srcs2 else None,
+            "h_last": next((slot_of2[s] for s in reversed(srcs2) if s in slot_of2), w["name"]),
+            "h_lastmv": lastmv2,
+            "at_name": w["name"],                      # untouched by the swap, by construction
+            "deepest": sorted(k for k, d in depth2.items() if d == dmax2 and d > 0),
+        }
         assert routed2 == c2 and routed2 != w["routed"], f"role-swap failed on {w['id']}"
         z = encode_cmds(cmds2)
         for kd, t in enumerate(mv_steps):
@@ -534,7 +553,8 @@ def alt_chain(net, ctx, target_mod, device, percep_name, seed=20260806, max_wind
              "m": len(wins[i]["movers"]), "routed": wins[i]["routed"],
              "alt_routed": r2, "pick": picks[i],
              "stayed": int(picks[i] == wins[i]["routed"]),
-             "follow": int(picks[i] == r2)}
+             "follow": int(picks[i] == r2),
+             "alt_marks": alt_marks[i]}
             for i, r2 in sorted(alts.items())]
     # deep = the §3 PRIMARY slice (N in {4,5}, depth >= 2); alt-depth == stamped depth by the
     # role-swap construction, so this slice's alternatives are genuinely deep. The GATE reads
@@ -544,7 +564,7 @@ def alt_chain(net, ctx, target_mod, device, percep_name, seed=20260806, max_wind
     earn_core = [i for i in deep_core if ceiling_table is not None and ceiling_table.get(
         f"{wins[i]['N']},{wins[i]['depth']},{len(wins[i]['movers'])},{wins[i]['R']}",
         1.0) < 0.99]
-    return {"rows": rows,
+    return {"rows": rows, "pred_obs": pred_obs,
             "self_parity_cos": self_parity_cos, "eye_tree_sha": eye_tree_sha,
             "n_matched": m, "n_probed": len(idxs), "n_no_partner_skipped": name_skip,
             "alt_depth_equals_stamped": True,

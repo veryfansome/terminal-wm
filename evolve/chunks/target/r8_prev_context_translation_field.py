@@ -2,7 +2,8 @@
 observation — make_target = z_obs + phi(z_prev), to_obs = pred - phi(z_prev). Exact inverse for
 ANY phi, no orthogonality machinery, identity at init (phi == 0 exactly).
 
-WHY THIS FAMILY, IN THE FASTWEIGHTS CONTEXT (the target chunk's job changed with the champion).
+WHY THIS FAMILY, IN THE FASTWEIGHTS CONTEXT (the target chunk's job changes with a fastweights
+trunk in the stack).
 The r7_path_delta_fastweights arch stores raw OBS embeddings as delta-rule memory VALUES and adds
 a SCALAR-gated read directly into the prediction: pred = head(h) + sigmoid(g) * target_read. The
 read is a linear blend sum_k a_k z_obs_k of past observations. Under a target transform with a
@@ -30,7 +31,7 @@ HONESTY / SAFETY.
 * Exact reconstruction by construction: to_obs(make_target(z, p), p) == z bit-near-exactly for any
   parameters — a degenerate phi cannot distort the eval, which stays in the fixed obs space.
 * Identity at init: the output layer and the diagonal skip are zero-initialized, so phi == 0 and
-  this genome starts bit-equal to the identity-target champion.
+  this genome starts bit-equal to the identity target.
 * Bounded: a radial soft-clip caps ||phi|| < RHO (= 8; obs norms ~ sqrt(768) ~ 28, hard-negative
   distances ~ O(10-40)), so phi can re-rank hard negatives but can never blow up the logits or
   drive the contrastive loss to zero by translation alone; reg() adds a weak pull toward phi = 0

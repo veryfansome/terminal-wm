@@ -18,7 +18,8 @@ def main(genome_path):
     G.validate(gen)                                  # shape + every impl exists in the registry
 
     loaders = [("objective", G.load_objective), ("target", G.load_target),
-               ("stream", G.load_stream)]
+               ("stream", G.load_stream), ("optim", G.load_optim),
+               ("batcher", G.load_batcher)]
     for axis, fn in loaders:
         fn(gen)
     head, head_p = G.load_head(gen)

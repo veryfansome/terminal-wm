@@ -1,5 +1,5 @@
-"""objective chunk (R23, WANTS_CTX): COMMAND-RESIDUAL within-command contrastive — the champion
-r12 anti-retrieval ring loss (verbatim, fitness base) PLUS a content-routing term that strips the
+"""objective chunk (R23, WANTS_CTX): COMMAND-RESIDUAL within-command contrastive — the
+r12 anti-retrieval ring loss (verbatim base) PLUS a content-routing term that strips the
 command-decodable component out of both prediction and target and contrasts on the RESIDUAL, so
 command-decode earns ZERO credit for it.
 
@@ -18,7 +18,7 @@ THE MECHANISM (uses ctx["cmd"], the command-INPUT embedding per row):
      command STRING, so exact-command rows have near-zero embedding distance while distinct commands
      are far away — MEASURED gap on TRAIN (dockerfs3-e5ft): same-string pairs sqdist <= 0.0019,
      distinct-string pairs sqdist >= 17.96 (n=1.1M pairs). A hard threshold at 1.0 isolates exact
-     siblings with zero error. Under the champion batcher the flattened batch is ~1785 cmd-rows and
+     siblings with zero error. Under the sysblock hard-negative batcher the flattened batch is ~1785 cmd-rows and
      ~50% of them have an exact-command sibling IN-BATCH (measured 848-912/batch across the ramp) — a
      DENSE signal, not the sparse per-64-row picture.
   2. Command-conditional mean = the command-decodable prediction. cmd_hat_i = leave-one-out mean of
@@ -51,7 +51,7 @@ content-mismatched donor prefix (wrong arm) and therefore shows up as +CA, not a
 CONTRACT / SAFETY:
   * WANTS_CTX = True; signature loss(pred, tgt, ctx). Pure function of (pred, tgt, ctx["cmd"]); NO
     module state, NO trainable params, NO RNG, NO in-place edits of inputs. cmd_hat / masks / gate all
-    DETACHED. Adds a few [n,n] ops at the champion's own n (r12 already runs this scale).
+    DETACHED. Adds a few [n,n] ops at the same n (r12 already runs this scale).
   * Causal: ctx["cmd"] is a model INPUT (the command), never a future obs — leakage_ok is untouched.
   * NaN-safe: the diagonal is always same-command (self, sqdist 0), so every gated row's masked
     softmax has >=1 finite entry; clamp_min on counts/denominators; n<2 -> MSE anchor only; the
@@ -78,7 +78,7 @@ DESCRIPTION = (
     "history-content the ordinary next-obs loss leaves unbanked — the quantity IMAG_CA rewards."
 )
 
-# ---- champion r12 constants (unchanged) ----
+# ---- r12 constants (unchanged) ----
 _TEMP = 0.25
 _GAMMA = 1.0
 _ANCHOR = 0.05
@@ -99,7 +99,7 @@ _CMD_EXACT = 1.0    # cmd-embedding sqdist below which two rows are the SAME exa
 _RTAU = 0.25        # residual-contrastive temperature (eval per-dim-mean sqL2, matches _TEMP)
 _DUP = 0.05         # per-dim-mean target sqdist below which a same-command sibling is the SAME
                     # ANSWER (false negative — content does not diverge). Matches r12 _DELTA scale.
-_LAMBDA_RESID = 0.5  # weight of the content-routing term (r12 base stays dominant -> F-path guard;
+_LAMBDA_RESID = 0.5  # weight of the content-routing term (r12 base stays dominant;
                      # the term is the ONLY gradient on content at the command-decode equilibrium).
 
 
@@ -112,7 +112,7 @@ def _pdmean_sq(a, b, d):
 def loss(pred, tgt, ctx):
     n, d = pred.shape
 
-    # ================= CHAMPION r12 BASE (verbatim; fitness) =================
+    # ================= r12 BASE (verbatim) =================
     mse_anchor = ((pred - tgt) ** 2).mean()
     if n < 2:
         return mse_anchor

@@ -148,7 +148,7 @@ def _native_endpoint(cfg, net, tok, key_pad, pred, hidden, transition_reads):
 
 
 def wrap(net, D, **params):
-    '''Preserve the champion aux, register the renderer, and install the native route.'''
+    '''Preserve the R18 aux, register the renderer, and install the native route.'''
     cfg = CHAMP.wrap(net, D, **params)
     for key, value in _IMAG_DEFAULTS.items():
         cfg.setdefault(key, value)
@@ -167,7 +167,7 @@ def wrap(net, D, **params):
         return cfg
 
     # Draw seed-dependent private parameters but restore the global RNG exactly, so
-    # the incumbent dropout/batcher/auxiliary random stream is unchanged.
+    # the harness dropout/batcher/auxiliary random stream is unchanged.
     rng = torch.get_rng_state()
     try:
         renderer = _PredictiveStateRenderer(
@@ -330,7 +330,7 @@ def _imagination_loss(cfg, batch, net):
 
 
 def aux_loss(head_state, batch, net, device):
-    '''Champion consistency plus the single-pass endpoint predictive-state loss.'''
+    '''R18 consistency plus the single-pass endpoint predictive-state loss.'''
     cfg = head_state
     champion_loss = CHAMP.aux_loss(cfg, batch, net, device)
     if cfg is None or cfg.get('_disabled', True):

@@ -2,15 +2,15 @@
 
 The ordinary R18 forward and its transition-consistency auxiliary are preserved.
 A private student is trained in the same pass on mined mutation-to-read endpoints.
-It receives two read-only executions of the champion: a no-mutation counterfactual
+It receives two read-only executions of the R18 stack: a no-mutation counterfactual
 read and the exact obs-missing [prefix, mutation, PAD, read] shadow execution.
 A command-routed mixture of residual experts predicts only the innovation over the
 counterfactual base.  The normal fully-observed read at the later command is used
 as training-only privileged information, gated on whether it improves on the base.
 
 At inference the private route fires only for the declared odd-length masked layout.
-All student inputs are detached and all extra champion forwards run under no_grad in
-eval mode, so the imagination loss sends zero gradient to the champion and consumes
+All student inputs are detached and all extra R18 forwards run under no_grad in
+eval mode, so the imagination loss sends zero gradient to the R18 stack and consumes
 no dropout RNG.  Future observations are labels only.
 """
 
@@ -65,7 +65,7 @@ def _smoothstep(x):
 class _ModularInnovation(nn.Module):
     """Counterfactual prior plus operation-routed residual experts.
 
-    No parameter has shape (768,768) or 64 rows, so the incumbent optimizer routes
+    No parameter has shape (768,768) or 64 rows, so the harness optimizer routes
     every private parameter to its ordinary AdamW group.
     """
 
@@ -256,7 +256,7 @@ def _detect_masked_endpoint(key_pad, L, device):
 
 @torch.no_grad()
 def _counterfactual_base(orig_forward, net, tok, rows, mutation, read_pos):
-    """Run [fully observed prefix before m, read command] through the champion."""
+    """Run [fully observed prefix before m, read command] through the R18 stack."""
     R = rows.numel()
     Lp = 2 * int(mutation.max().item()) + 1
     pos = torch.arange(Lp, device=tok.device)
@@ -471,8 +471,8 @@ def _private_loss(cfg, batch, net):
     router_loss = cond_entropy - marginal_entropy
 
     # Training-only future-observation teacher. It never sees obs at read itself
-    # (the champion is causal), and it is used only where it beats the counterfactual
-    # base by a pre-registered L2 margin.
+    # (the R18 stack is causal), and it is used only where its squared-L2 distance to
+    # the target is below the counterfactual base's by a pre-registered margin.
     with torch.no_grad():
         d_teacher = (teacher - target).pow(2).mean(dim=-1)
         d_base = (base - target).pow(2).mean(dim=-1)
@@ -500,7 +500,7 @@ def _private_loss(cfg, batch, net):
 
 
 def aux_loss(head_state, batch, net, device):
-    """Run the champion auxiliary first, preserving its RNG stream exactly."""
+    """Run the R18 auxiliary first, preserving its RNG stream exactly."""
     if head_state is None:
         return 0.0
     champion = CHAMP.aux_loss(head_state, batch, net, device)
@@ -528,7 +528,7 @@ def aux_loss(head_state, batch, net, device):
 def leak_safe(mod, params):
     """The normal path is original R18. The odd path uses only prefix, c_m and c_r.
 
-    The masked observation value is key-padded in both the champion and private
+    The masked observation value is key-padded in both the R18 and private
     executions. Later observations and the full-history teacher occur only in the
     train-only auxiliary, so they cannot affect a scored forward prediction.
     """

@@ -55,3 +55,7 @@ def leakage_ok(net, device):
     p1 = net(b1["tok"], b1["types"], b1["key_pad"])[0][:, 0::2].cpu()
     chg = (p1 - p0).abs().amax(-1)[0]
     return bool((chg[:4] < 1e-4).all())
+
+# The cups scoring instrument pins this layout; a stream declaring a different one is
+# refused before any GPU time is spent (see eval/adapter.py).
+CUPS_LAYOUT = "interleave2"

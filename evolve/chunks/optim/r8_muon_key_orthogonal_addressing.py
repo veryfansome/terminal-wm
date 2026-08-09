@@ -1,12 +1,12 @@
-"""OPTIM chunk: incumbent warmup-hold-cosine-floor AdamW everywhere, EXCEPT the champion
+"""OPTIM chunk: warmup-hold-cosine-floor AdamW everywhere, EXCEPT the path-delta
 fastweight arch's four delta-rule ADDRESSING projections (content_read/content_write/
 path_read/path_write: the only (key_d=64, d) matrices in the net), which get a Muon-style
 orthogonalized-momentum update (Newton-Schulz polar factor of the momentum, RMS-matched to
-AdamW so the incumbent peak LR and schedule carry over unchanged).
+AdamW so the carried peak LR and schedule apply unchanged).
 
 WHY THIS CAN RAISE THE MARGIN (fastweights-aware, not generic)
 --------------------------------------------------------------
-The champion arch (r7_path_delta_fastweights_codex) is an online delta-rule associative
+The fastweight arch (r7_path_delta_fastweights_codex) is an online delta-rule associative
 memory: it stores each (cmd, obs) pair as  mem <- decay*mem + beta * k (v - k^T mem)^T  with
 unit key k = unit(W x), and reads target-space predictions back as k_q^T mem. A linear
 associative memory's capacity and crosstalk are governed entirely by the GEOMETRY OF THE
@@ -26,8 +26,8 @@ gets equal magnitude. Applied ONLY to the addressing matrices, this is pattern s
 implemented in the optimizer: learning pressure is spread across ALL key_d addressing
 directions instead of amplifying the dominant few, keeping the key map well-conditioned /
 full-rank so the two memories keep key_d usable slots. The trunk, gates, memory-decay
-scalar, and head keep the exact incumbent AdamW + schedule (the proven config) - so this
-complements, rather than perturbs, everything already selected.
+scalar, and head keep the exact go_warmup_holdcos_floor AdamW + schedule - so this
+complements, rather than perturbs, the rest of the stack.
 
 MECHANISM (per addressing matrix, per step)
   buf   <- mu*buf + g                 (momentum, mu=0.95)
@@ -50,8 +50,8 @@ ROUTING + SAFETY
   path_write}.weight and nothing else (GRU cells are (528,176), FFN (352,176)/(176,352),
   projections (176,768), head (768,176), gates (1,352)/(2,176), norms/biases 1-D, scalars
   0-D); on every non-fastweights arch (baseline/hippo/mv/recency/...) the Muon group is
-  EMPTY and make() returns the EXACT incumbent (torch.optim.AdamW + the same LambdaLR) -
-  bit-identical behavior, strictly generalizing go_warmup_holdcos_floor.
+  EMPTY and make() returns the EXACT carried baseline (torch.optim.AdamW + the same
+  LambdaLR) - bit-identical behavior, strictly generalizing go_warmup_holdcos_floor.
   NaN-safe: non-finite grads skip that tensor's update; Newton-Schulz normalizes by a
   clamped Frobenius norm. No RNG anywhere -> deterministic given the harness seed. The
   optimizer only consumes gradients - it cannot touch the eval, causality, or the loss, and
@@ -95,8 +95,9 @@ def _ns_orth(g, steps=5, eps=1e-7):
 
 class _MuonKeys(torch.optim.Optimizer):
     """Muon for the addressing matrices only. group['lr'] is driven by LambdaLR on the
-    shared incumbent schedule; the update is RMS-matched to AdamW via 0.2*sqrt(max(n,m))
-    (arXiv:2502.16982), so peak lr 5e-4 transfers. wd=0 (keys are scale-invariant)."""
+    shared warmup-hold-cosine-floor schedule; the update is RMS-matched to AdamW via
+    0.2*sqrt(max(n,m)) (arXiv:2502.16982), so peak lr 5e-4 transfers. wd=0 (keys are
+    scale-invariant)."""
 
     def __init__(self, params, lr, momentum=0.95, ns_steps=5, rms_match=0.2):
         super().__init__(params, dict(lr=lr, momentum=momentum,
@@ -207,7 +208,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30,
 
     lr_lambda = _incumbent_lambda(steps, warmup_frac, hold_frac, floor_ratio)
 
-    if not keys:  # no addressing matrices (other archs) -> EXACT incumbent
+    if not keys:  # no addressing matrices (other archs) -> EXACT carried baseline
         opt = torch.optim.AdamW(params, lr=lr, weight_decay=wd, betas=(0.9, beta2))
         return opt, torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
 
