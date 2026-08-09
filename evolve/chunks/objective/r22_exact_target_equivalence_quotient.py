@@ -33,7 +33,7 @@ import torch.nn.functional as F
 
 NAME = "r22_exact_target_equivalence_quotient"
 DESCRIPTION = (
-    "Exact-target quotient of the champion precision/ring L2 objective: numerically equal "
+    "Exact-target quotient of the r12 precision/ring L2 objective: numerically equal "
     "identity targets form one multi-positive class, candidate and anchor occurrence mass is "
     "divided by class size, and focal hardness uses aggregate class probability. Retains the "
     "close-distinct ring, repulsion margin, and class-balanced MSE anchor; invariant to exact "

@@ -77,7 +77,7 @@ import torch.nn.functional as F
 
 NAME = "antiretrieval_ring_negatives"
 DESCRIPTION = (
-    "Champion free-energy precision-weighted focal listwise L2 contrastive whose in-batch "
+    "The free-energy precision-weighted focal listwise L2 contrastive whose in-batch "
     "negatives are importance-weighted by a detached CONFUSABILITY RING on target-target "
     "distances — band-pass: near-identical targets (false negatives, the repeated-config-file "
     "case) get ~0 weight, close-but-distinct targets (what retrieve-by-cmd / within-trajectory "

@@ -56,12 +56,12 @@ from evolve.chunks.head import r18_transition_forwardmodel_consistency as CH
 
 NAME = "r20_dualpre_transition_consistency"
 DESCRIPTION = (
-    "Champion r18 forward-model-consistency aux VERBATIM (raw-obs pre arm, weight 1.0) plus a "
+    "The r18 forward-model-consistency aux VERBATIM (raw-obs pre arm, weight 1.0) plus a "
     "mem-pre arm supervising the SAME shared transition operator on the arch's own memory "
     "content s_pre_k (computed via the arch's input block + _transition_reads under no_grad, "
     "detached) toward the same mined future reads — training the operator on its deployment "
     "distribution (brief findings 6+7) inside the single pass. One mining pass, RNG-draw count "
-    "identical to the champion head; mem arm auto-disables on archs without the memory surface."
+    "identical to the r18 head; mem arm auto-disables on archs without the memory surface."
 )
 
 _DEFAULTS = dict(CH._DEFAULTS)

@@ -33,10 +33,10 @@ import torch
 
 NAME = "r18_spectral_capped_transition_readout"
 DESCRIPTION = (
-    "Incumbent AdamW(warmup-hold-cosine-floor) + Muon on the (key_d×d) delta-rule addressing "
+    "AdamW(warmup-hold-cosine-floor) + Muon on the (key_d×d) delta-rule addressing "
     "projections, PLUS a soft spectral-norm cap on the co-designed r18 arch's (D,D) latent-"
     "transition content readout (post-step power-iteration projection of the top singular value "
-    "to a target), for on-manifold norm calibration and recurrence stability. Exact incumbent on "
+    "to a target), for on-manifold norm calibration and recurrence stability. Unchanged on "
     "archs without a (D,D) readout."
 )
 
@@ -167,7 +167,7 @@ class _MultiSched:
         return [lr for s in self.scheds for lr in s.get_last_lr()]
 
 
-def _incumbent_lambda(steps, warmup_frac, hold_frac, floor_ratio):
+def _schedule_lambda(steps, warmup_frac, hold_frac, floor_ratio):
     warm = max(20, int(warmup_frac * steps))
     hold = int(hold_frac * steps)
     decay_start = warm + hold
@@ -206,7 +206,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30,
 
     rest = [p for p in params if id(p) not in key_ids]  # (D,D) stays trained by AdamW too
 
-    lr_lambda = _incumbent_lambda(steps, warmup_frac, hold_frac, floor_ratio)
+    lr_lambda = _schedule_lambda(steps, warmup_frac, hold_frac, floor_ratio)
 
     if not keys and not dd:  # exact carried baseline (plain AdamW)
         opt = torch.optim.AdamW(params, lr=lr, weight_decay=wd, betas=(0.9, beta2))

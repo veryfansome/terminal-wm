@@ -11,11 +11,11 @@ import math
 import torch
 import torch.nn.functional as F
 
-from evolve.chunks.head import r18_transition_forwardmodel_consistency as CHAMP
+from evolve.chunks.head import r18_transition_forwardmodel_consistency as BASE
 
 NAME = "r20_interventional_gain_shell_consistency"
 DESCRIPTION = (
-    "Champion R18 forward-model consistency plus a sparse train-only auxiliary for the "
+    "The R18 forward-model consistency plus a sparse train-only auxiliary for the "
     "co-designed interventional gain/shell arch. It mines same-path endpoints, constructs "
     "[prefix,c_m,PAD,c_r], obtains detached no-write/full-write hypotheses, and trains only "
     "the 12.5K two-scalar calibrator with eval-geometry InfoNCE, MSE, prior anchoring and a "
@@ -114,12 +114,12 @@ def _build_masked(tok, sel_b, sel_k, sel_j):
 
 
 def wrap(net, D, **params):
-    champion_params = {k: params[k] for k in CHAMP._DEFAULTS if k in params}
+    base_params = {k: params[k] for k in BASE._DEFAULTS if k in params}
     cfg = dict(_DEFAULTS)
     cfg.update(params or {})
     cfg["D"] = int(D)
     cfg["_gain_step"] = 0
-    cfg["_champ"] = CHAMP.wrap(net, D, **champion_params)
+    cfg["_base"] = BASE.wrap(net, D, **base_params)
     cfg["_disabled"] = not (
         bool(getattr(net, "supports_interventional_calibrator", False))
         and callable(getattr(net, "imagination_command_features", None))
@@ -208,29 +208,29 @@ def aux_loss(head_state, batch, net, device):
     if cfg is None:
         return 0.0
 
-    champion = CHAMP.aux_loss(cfg.get("_champ"), batch, net, device)
+    base_term = BASE.aux_loss(cfg.get("_base"), batch, net, device)
     if cfg.get("_disabled", True) or float(cfg["gain_weight"]) <= 0.0:
-        return champion
-    if not CHAMP._interleave_layout_ok(batch):
-        return champion
+        return base_term
+    if not BASE._interleave_layout_ok(batch):
+        return base_term
 
     cfg["_gain_step"] = int(cfg.get("_gain_step", 0)) + 1
     step = cfg["_gain_step"]
     every = max(1, int(cfg["gain_every"]))
     if step % every != 0:
-        return champion
+        return base_term
 
     span = max(
         1.0, float(cfg["gain_ramp_full"]) - float(cfg["gain_ramp_start"])
     )
     ramp = _smoothstep((step - float(cfg["gain_ramp_start"])) / span)
     if ramp <= 0.0:
-        return champion
+        return base_term
 
     gain = _gain_loss(cfg, batch, net)
     if gain is None or not bool(torch.isfinite(gain).item()):
-        return champion
-    return champion + float(cfg["gain_weight"]) * ramp * gain
+        return base_term
+    return base_term + float(cfg["gain_weight"]) * ramp * gain
 
 
 def leak_safe(mod, params):
@@ -255,4 +255,4 @@ def leak_safe(mod, params):
         values["gain_prior"] >= 0.0,
         values["gain_shell_pen"] >= 0.0,
     ]
-    return all(checks) and CHAMP.leak_safe(mod, params or {})
+    return all(checks) and BASE.leak_safe(mod, params or {})

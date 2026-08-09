@@ -45,8 +45,8 @@ ROUTING + SAFETY
   in != 768, AND at least 2 candidate tensors share that exact shape - delta-rule addressing
   projections always come as read/write SIBLINGS of identical shape, while the one shape
   collision in the registry (baseline transformer's pos_emb.weight, an Embedding(64, d)
-  table) is a singleton. Verified against every arch impl in the registry: on the champion
-  (d=176, key_d=64) this matches EXACTLY {content_read, content_write, path_read,
+  table) is a singleton. Verified against every arch impl in the registry: on the fastweight
+  arch (d=176, key_d=64) this matches EXACTLY {content_read, content_write, path_read,
   path_write}.weight and nothing else (GRU cells are (528,176), FFN (352,176)/(176,352),
   projections (176,768), head (768,176), gates (1,352)/(2,176), norms/biases 1-D, scalars
   0-D); on every non-fastweights arch (baseline/hippo/mv/recency/...) the Muon group is
@@ -66,10 +66,10 @@ import math
 import torch
 
 NAME = "r8_muon_key_orthogonal_addressing"
-DESCRIPTION = ("Incumbent AdamW(5e-4, wd 5e-4, b2 .95; 4% warmup, 30% hold, cos-to-floor) "
+DESCRIPTION = ("AdamW(5e-4, wd 5e-4, b2 .95; 4% warmup, 30% hold, cos-to-floor) "
                "plus a Muon (Newton-Schulz orthogonalized-momentum, RMS-matched, wd 0) group "
                "scoped by shape signature to the fastweight arch's (key_d x d) delta-rule "
-               "addressing projections; exact incumbent on archs without them.")
+               "addressing projections; unchanged on archs without them.")
 
 D = 768  # frozen encoder dim; addressing matrices never touch it on either side
 
@@ -170,7 +170,7 @@ class _TwoSched:
         return [lr for s in self.scheds for lr in s.get_last_lr()]
 
 
-def _incumbent_lambda(steps, warmup_frac, hold_frac, floor_ratio):
+def _schedule_lambda(steps, warmup_frac, hold_frac, floor_ratio):
     """Exactly go_warmup_holdcos_floor's multiplier: warmup(4%, min 20) -> hold(30%) ->
     cosine to floor_ratio (never 0)."""
     warm = max(20, int(warmup_frac * steps))
@@ -206,7 +206,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30,
     key_ids = {id(p) for p in keys}
     rest = [p for p in params if id(p) not in key_ids]
 
-    lr_lambda = _incumbent_lambda(steps, warmup_frac, hold_frac, floor_ratio)
+    lr_lambda = _schedule_lambda(steps, warmup_frac, hold_frac, floor_ratio)
 
     if not keys:  # no addressing matrices (other archs) -> EXACT carried baseline
         opt = torch.optim.AdamW(params, lr=lr, weight_decay=wd, betas=(0.9, beta2))

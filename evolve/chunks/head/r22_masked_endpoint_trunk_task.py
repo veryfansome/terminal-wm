@@ -70,13 +70,13 @@ import torch.nn.functional as F
 
 NAME = "r22_masked_endpoint_trunk_task"
 DESCRIPTION = (
-    "Champion forward-model consistency verbatim + an in-pass MASKED-ENDPOINT task posed to "
+    "The forward-model consistency verbatim + an in-pass MASKED-ENDPOINT task posed to "
     "the TRUNK itself: mine (last-gated-mutation k -> later read j) pairs with the arch's own "
     "detached mutation gate (floor 0.8, measured), build the frozen instrument's exact "
     "obs-missing compressed layout in-batch, forward the same net, and train pred[2k+2] "
     "against z_j with a same-verb-weighted L2-InfoNCE + MSE anchor (ramped, pair-weighted). "
     "Zero new parameters; eval forward bit-identical; silent until the gate matures; "
-    "champion-term-only on archs without the gate."
+    "base-term-only on archs without the gate."
 )
 
 _DEFAULTS = {

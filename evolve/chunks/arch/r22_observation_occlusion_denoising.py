@@ -1,17 +1,17 @@
-"""R22 arch: OBSERVATION-OCCLUSION DENOISING on the champion world model — the champion
+"""R22 arch: OBSERVATION-OCCLUSION DENOISING on the r18 path-state world model —
 `r18_pathstate_latent_transition_worldmodel` with ONE training-time change and ZERO
 eval-time change: during the single sanctioned training pass, each (cmd, obs) pair's
 OBSERVATION token is independently occluded with a small ramped probability, using the
 frozen instrument's EXACT masked-slot semantics (token zeroed + internally key-padded,
-type kept = obs). Eval-mode forward is the champion bit-for-bit (code-identity: the
+type kept = obs). Eval-mode forward is the r18 forward bit-for-bit (code-identity: the
 subclass only edits its inputs when `self.training` and the ramped p > 0).
 
-THE MEASURED GAP THIS ATTACKS (R22 record + this inventor's probes): the champion's
-content-attributable imagination (CA 0.5471 anchor) is earned by its trunk ZERO-SHOT on
-an input regime it never trains on — in the ordinary interleave stream every observation
-between mutation and read is present by the time the read is supervised, while the
-instrument forwards an obs-missing masked-endpoint layout. This inventor measured, on the
-canonical full-scale champion checkpoints (s0/s1, TRAIN-image windows, instrument-exact
+THE MEASURED GAP THIS ATTACKS (R22 measurement history + this inventor's probes): the
+r18 stack's content-attributable imagination (measured CA 0.5471) is earned by its trunk
+ZERO-SHOT on an input regime it never trains on — in the ordinary interleave stream every
+observation between mutation and read is present by the time the read is supervised, while
+the instrument forwards an obs-missing masked-endpoint layout. This inventor measured, on
+the canonical full-scale r18 checkpoints (s0/s1, TRAIN-image windows, instrument-exact
 layouts + wrong-history donors), that the trained equilibrium is at a LOCAL OPTIMUM with
 respect to every eval-time content-channel edit tried: (1) shielding the content memories
 from intervention-step writes moves the b-arm by ~0 (db +0.0002/-0.0008; only the wrong
@@ -49,21 +49,21 @@ command-decode components cancel between arms by construction. The only thing th
 mechanism can learn is to answer occluded reads from surviving PREFIX CONTENT — i.e., a
 b-arm content gain, which does not transfer to content-mismatched donor prefixes. Honest
 failure modes: the trunk routes occluded reads through command priors (CA stays ~0 and
-nothing promotes), or the 12% context degradation costs fitness beyond the eps=0.002
-band. Both are decided only by the round's full-scale measurement.
+the channel contributes nothing), or the 12% context degradation costs fitness. Both are
+settled only by a full-scale measurement.
 
-Ramp rationale: warmup lets the champion equilibrium form first (house pattern: head aux
-ramp 400, batcher ramp 30%); full occlusion strength holds for the last ~3000 steps.
+Ramp rationale: warmup lets the r18 training equilibrium form first (house pattern: head
+aux ramp 400, batcher ramp 30%); full occlusion strength holds for the last ~3000 steps.
 p=0.12 sizes the imagination-condition incidence (~15 rows/batch) without dominating the
 observed regime; occ_p is a genome param.
 
 Causal/leak-safe: occlusion happens only in training mode; the harness's leakage guard
-and all scoring run under net.eval() where this forward is the champion's byte-identical
+and all scoring run under net.eval() where this forward is the r18 arch's byte-identical
 code path. The edit touches only observation positions (never commands), only the
 model's own INPUT VIEW (never targets), and only the current batch. RNG: global
 generator, seeded per run by the harness (the r16 conditioning-dropout precedent);
 during the p=0 warmup no draws are made, so the warmup RNG stream is bit-identical to
-the champion's.
+the r18 arch's.
 
 Optimizer/head co-design intact: zero new trainable parameters — Muon still routes the
 (key_d, d) addressing pair, the spectral cap still routes the unique (D, D) tr_read;
@@ -78,13 +78,13 @@ from evolve.chunks.arch.r18_pathstate_latent_transition_worldmodel import (
 
 NAME = "r22_observation_occlusion_denoising"
 DESCRIPTION = (
-    "Champion r18 path-state world model trained under ramped stochastic observation "
+    "The r18 path-state world model trained under ramped stochastic observation "
     "occlusion: in training mode each obs token is independently removed (zeroed + "
     "key-padded — the frozen instrument's exact masked-slot semantics, verified "
     "bit-identical) with probability ramping to occ_p, so occluded-evidence prediction — "
     "including the mutation->read imagination condition — becomes an in-distribution "
     "training regime for the SAME trunk the instrument measures. Eval forward is the "
-    "champion bit-for-bit; zero new trainable parameters; loss/head/batcher untouched."
+    "bit-for-bit identical to the r18 forward; zero new trainable parameters; loss/head/batcher untouched."
 )
 
 

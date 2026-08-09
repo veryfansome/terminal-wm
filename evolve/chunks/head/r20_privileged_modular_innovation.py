@@ -20,16 +20,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from evolve.chunks.head import r18_transition_forwardmodel_consistency as CHAMP
+from evolve.chunks.head import r18_transition_forwardmodel_consistency as BASE
 
 
 NAME = "r20_privileged_modular_innovation"
 DESCRIPTION = (
-    "Champion R18 head plus a read-only dual-execution imagination student: compare the "
-    "champion's counterfactual [prefix, read] prediction with its exact masked "
+    "The R18 head plus a read-only dual-execution imagination student: compare the "
+    "r18 head's counterfactual [prefix, read] prediction with its exact masked "
     "[prefix, mutation, PAD, read] state, then add a mutation-command-routed mixture of "
     "independent residual experts. A truth-gated full-history prediction is privileged "
-    "training-only supervision. Fully observed fitness forward and champion aux stay exact; "
+    "training-only supervision. Fully observed fitness forward and base aux stays exact; "
     "native obs-missing suffix supplies measurement path b."
 )
 
@@ -339,9 +339,9 @@ def _dual_execution(orig_forward, net, tok, row, mutation, read):
 def wrap(net, D, **params):
     """Install the private module and a branch dead on ordinary even-length streams."""
     champ_params = {
-        key: value for key, value in params.items() if key in CHAMP._DEFAULTS
+        key: value for key, value in params.items() if key in BASE._DEFAULTS
     }
-    cfg = CHAMP.wrap(net, D, **champ_params)
+    cfg = BASE.wrap(net, D, **champ_params)
     p = dict(_DEFAULTS)
     p.update({key: value for key, value in params.items() if key in _DEFAULTS})
     cfg.update(p)
@@ -407,7 +407,7 @@ def wrap(net, D, **params):
 def _private_loss(cfg, batch, net):
     cache = cfg.get("_cache")
     cfg["_cache"] = None
-    if cache is None or not CHAMP._interleave_layout_ok(batch):
+    if cache is None or not BASE._interleave_layout_ok(batch):
         return 0.0
     if cfg.get("_disabled_private", True):
         return 0.0
@@ -503,26 +503,26 @@ def aux_loss(head_state, batch, net, device):
     """Run the R18 auxiliary first, preserving its RNG stream exactly."""
     if head_state is None:
         return 0.0
-    champion = CHAMP.aux_loss(head_state, batch, net, device)
+    base_term = BASE.aux_loss(head_state, batch, net, device)
     cfg = head_state
     if cfg.get("_disabled_private", True):
-        return champion
+        return base_term
     cfg["_imag_step"] = int(cfg.get("_imag_step", 0)) + 1
     step = cfg["_imag_step"]
     if step % max(1, int(cfg["imag_every"])) != 0:
         cfg["_cache"] = None
-        return champion
+        return base_term
     ramp = _smoothstep(
         (step - float(cfg["imag_ramp_start"]))
         / max(1.0, float(cfg["imag_ramp_len"]))
     )
     if ramp <= 0.0 or float(cfg["imag_weight"]) <= 0.0:
         cfg["_cache"] = None
-        return champion
+        return base_term
     private = _private_loss(cfg, batch, net)
     if isinstance(private, float):
-        return champion
-    return champion + float(cfg["imag_weight"]) * ramp * private
+        return base_term
+    return base_term + float(cfg["imag_weight"]) * ramp * private
 
 
 def leak_safe(mod, params):
@@ -534,9 +534,9 @@ def leak_safe(mod, params):
     """
     params = params or {}
     champ_params = {
-        key: value for key, value in params.items() if key in CHAMP._DEFAULTS
+        key: value for key, value in params.items() if key in BASE._DEFAULTS
     }
-    if not CHAMP.leak_safe(mod, champ_params):
+    if not BASE.leak_safe(mod, champ_params):
         return False
     p = dict(_DEFAULTS)
     p.update({key: value for key, value in params.items() if key in _DEFAULTS})

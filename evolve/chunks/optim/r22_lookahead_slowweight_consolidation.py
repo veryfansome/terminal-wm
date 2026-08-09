@@ -51,11 +51,11 @@ import torch
 
 NAME = "r22_lookahead_slowweight_consolidation"
 DESCRIPTION = (
-    "Lookahead slow-weight consolidation (Zhang et al. 2019, Alg.1) wrapped around the champion "
+    "Lookahead slow-weight consolidation (Zhang et al. 2019, Alg.1) wrapped around the carried optimizer "
     "inner optimizer (Muon addressing + AdamW warmup-hold-cosine-floor + spectral-capped (D,D) "
     "readout, all verbatim): every la_k inner steps phi += alpha*(theta_k - phi), fast reset to "
     "phi, final step returns phi. Prop.2 variance reduction (same mean, strictly smaller variance "
-    "fixed point) targets the low-SNR content-delivery params. la_alpha=1.0 recovers the champion "
+    "fixed point) targets the low-SNR content-delivery params. la_alpha=1.0 recovers the unwrapped optimizer "
     "optimizer bit-for-bit (verified strict superset)."
 )
 
@@ -170,7 +170,7 @@ class _MultiSched:
         return [lr for s in self.scheds for lr in s.get_last_lr()]
 
 
-def _incumbent_lambda(steps, warmup_frac, hold_frac, floor_ratio):
+def _schedule_lambda(steps, warmup_frac, hold_frac, floor_ratio):
     warm = max(20, int(warmup_frac * steps)); hold = int(hold_frac * steps)
     decay_start = warm + hold; decay_len = max(1, steps - decay_start)
 
@@ -243,7 +243,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30, floo
     dd = [p for p in params if p.ndim == 2 and p.shape[0] == D and p.shape[1] == D]
     rest = [p for p in params if id(p) not in key_ids]
 
-    lr_lambda = _incumbent_lambda(steps, warmup_frac, hold_frac, floor_ratio)
+    lr_lambda = _schedule_lambda(steps, warmup_frac, hold_frac, floor_ratio)
 
     def _wrap(inner, sched):
         return _Lookahead(inner, params, steps, la_k=la_k, la_alpha=la_alpha), sched

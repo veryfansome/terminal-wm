@@ -73,11 +73,11 @@ D = 768
 
 NAME = "r18_pathstate_latent_transition_worldmodel"
 DESCRIPTION = (
-    "Champion r13 trunk + a per-path LATENT-TRANSITION world-model memory: the value "
+    "The r13 trunk + a per-path LATENT-TRANSITION world-model memory: the value "
     "written to a path slot is a command-conditioned affine EDIT of the slot's current "
     "retrieved content (f(s_pre,cmd), a learned RSSM-style transition), overwritten by the "
     "delta rule and read back as the current post-mutation content; injected via a zero-init "
-    "(D,D) readout so it is exactly the champion at init. Distinct from additive path-delta "
+    "(D,D) readout so it is exactly the r18 function at init. Distinct from additive path-delta "
     "(r17) and typed-slot transport (#6): a learned content transition operator, co-designed "
     "with a forward-model head aux and a spectral-capped readout optim."
 )

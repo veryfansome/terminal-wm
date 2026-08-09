@@ -66,7 +66,7 @@ import torch.nn.functional as F
 
 NAME = "r17_mutation_counterfactual_twin_margin"
 DESCRIPTION = (
-    "Champion free-energy precision-weighted focal-listwise L2 contrastive backbone PLUS a "
+    "The free-energy precision-weighted focal-listwise L2 contrastive backbone PLUS a "
     "mutation-counterfactual twin margin: per row, mine the single nearest NON-DUPLICATE target "
     "(the pre-mutation / cross-system counterfactual twin the v3 retrieval eval decides against), "
     "gate by a band-pass mutation-presence weight so the pressure lands only on rows that HAVE a "

@@ -70,7 +70,7 @@ WANTS_CTX = True
 
 NAME = "r23_command_residual_contrastive"
 DESCRIPTION = (
-    "Champion r12 anti-retrieval ring loss (verbatim base) PLUS a within-command residual contrastive: "
+    "The r12 anti-retrieval ring loss (verbatim base) PLUS a within-command residual contrastive: "
     "strip the leave-one-out exact-command-conditional mean (the command-decodable component, via "
     "ctx['cmd']) from prediction and target and require each sibling row to retrieve its OWN content "
     "residual against its exact-command group in the eval's squared-L2 geometry. Command-decode "

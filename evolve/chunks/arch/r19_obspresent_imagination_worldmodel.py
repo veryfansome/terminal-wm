@@ -92,7 +92,7 @@ DESCRIPTION = (
     "the learned transition operator f(s,cmd)=s*(1+gamma)+beta be COMPOSED without an obs — the "
     "imagined command writes to its path slot using its current retrieved content s_pre in place "
     "of the missing obs, and its paired obs slot contributes nothing (obs_present decoupled from "
-    "valid_cmd across every obs branch). Bit-for-bit the R18 champion when no type-2 slots exist; "
+    "valid_cmd across every obs branch). Bit-for-bit the R18 stack when no type-2 slots exist; "
     "strictly causal (the write depends only on s_pre + the command, never on future/absent obs)."
 )
 

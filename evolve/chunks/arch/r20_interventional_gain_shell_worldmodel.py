@@ -17,11 +17,11 @@ from evolve.chunks.arch.r18_pathstate_latent_transition_worldmodel import (
 
 NAME = "r20_interventional_gain_shell_worldmodel"
 DESCRIPTION = (
-    "Champion R18 path-state model plus a 12.5K-parameter operation-conditioned "
+    "The R18 path-state model plus a 12.5K-parameter operation-conditioned "
     "intervention calibrator. On [prefix,c_m,PAD,c_r], it replaces the fixed mutation "
     "write coefficient with alpha=sigmoid(logit(w)+g(c_m,c_r,w)) and applies a bounded "
     "beta correction toward the standardized observation-radius shell at c_r. Fully "
-    "observed fitness forwards are exactly the inherited champion forward."
+    "observed fitness forwards are exactly the inherited R18 forward."
 )
 
 
@@ -37,7 +37,7 @@ class R20InterventionalGainShell(R18PathStateLatentTransition):
         self.imag_shell_max = float(imag_shell_max)
         self._imag_mode = None
 
-        # Do not move the champion/global initialization RNG stream.
+        # Do not move the inherited/global initialization RNG stream.
         rng_state = torch.get_rng_state()
         try:
             hidden = max(8, int(imag_calib_hidden))
@@ -84,7 +84,7 @@ class R20InterventionalGainShell(R18PathStateLatentTransition):
         return out, alpha, beta
 
     def _transition_reads(self, x_cmd, obs_tok, valid_cmd, valid_obs, n_cmd, n_pair):
-        # Every fitness stream is even and paired, so this is the exact champion path
+        # Every fitness stream is even and paired, so this is the exact inherited R18 path
         # without a device synchronization or calibrator graph.
         if n_cmd == n_pair:
             return super()._transition_reads(

@@ -3,16 +3,16 @@
 upgraded on source-present windows, plus this round's measured map of which state
 completions do NOT work (three refuted sibling families, probed at equal protocol).
 
-THE PARENT (kept verbatim): the r20 native imagination write — the record's only
-FULL-SCALE-measured (b)-path gain (dedup Δb +0.0334 vs the plain champion, every genuine
-family non-negative) — with C8's evidence gate g = evid/(evid+c) that pins the
-history-masked arm to the plain champion exactly (empty memory ⇒ g == 0 ⇒ no write).
+THE PARENT (kept verbatim): the r20 native imagination write — measured at full scale
+(dedup Δb +0.0334 vs the plain r18 path-state arch, every genuine family non-negative) —
+with C8's evidence gate g = evid/(evid+c) that pins the history-masked arm to the plain
+r18 arch exactly (empty memory ⇒ g == 0 ⇒ no write).
 
 THE ONE CHANGE (measured): at a valid-cmd/masked-obs pair m, C8 executes the trained
 transition on the tr-memory blend, f(s_pre_tr, c_m). That input is the R20-finding-6
 OFF-distribution point: the head aux (`r18_transition_forwardmodel_consistency`)
 supervises the operator as f(RAW same-path pre-observation, c_m) ≈ the future same-path
-read — and the record's (a)-path measured raw-obs inputs far better than memory content
+read — and the (a)-path measurements found raw-obs inputs far better than memory content
 through this operator (endhist-pre 0.404 vs mem-pre 0.148). When the plan-time prefix
 CONTAINS an observed same-path touch of c_m (the aux's own mining rule: latest p < m
 with cmd-cosine > 0.60 — measured coverage ~20.6% of genuine windows; per family:
@@ -27,10 +27,10 @@ estimators — the associative memory blend and the episodic latest same-path ob
 — averaged before the trained dynamics: estimator fusion of two priors, applied at the
 exact operating point the aux trains.
 
-MEASURED (mini champion-stack protocol, the round's shared one — d=128/L2, 700 steps,
+MEASURED (mini r18-stack protocol, the shared one — d=128/L2, 700 steps,
 CPU, train-image windows, node+postgres held out, n=2336/1273 dedup; paired
 function-swap on identical trained weights, so deltas are exact; TRAIN-image probes
-only — honest bounds, not a promotion claim): paired Δb vs C8, seeds 0/1/2 — full
+only — honest bounds): paired Δb vs C8, seeds 0/1/2 — full
 slice +0.0020/+0.0006/+0.0006 (3/3 positive, mean +0.0011); dedup +0.0016/−0.0002/
 +0.0012 (mean +0.0009, worst seed −0.0002); matched rows (dedup) +0.0077/−0.0010/
 +0.0058 (mean +0.0042); per-family dedup means echo> +0.0053, prod> +0.0011, mv
@@ -39,12 +39,12 @@ response is ordered and replicates: dedup means 0.25 → +0.0004, 0.5 → +0.000
 1.0 → −0.0005 (full-replace also seed-unstable: echo> +0.008 s0 / −0.0112 s1) — an
 interior optimum, the signature of genuine two-estimator fusion, not retrieval
 override. The aggregate effect at mini scale is small and honestly bounded; the
-write's promotion case remains the parent's full-scale-anchored +0.0334, with this
-fusion as a floors-safe refinement and src_blend=0.0 recovering C8 bit-exactly as
-the designed full-scale ablation.
+parent write's own full-scale measurement is +0.0334, with this fusion as a
+floors-safe refinement and src_blend=0.0 recovering C8 bit-exactly as the designed
+full-scale ablation.
 
 REFUTED SIBLINGS (same protocol, recorded so later rounds do not re-walk them):
-(1) writing f(s_pre_tr, c_m) into the FILE/PATH delta memories (the champion's primary
+(1) writing f(s_pre_tr, c_m) into the FILE/PATH delta memories (the r18 arch's primary
     render pathway): −0.0185/−0.0112 dedup (2 seeds) — the FiLM/mix render is trained on
     observed-manifold memory values only (R20 finding 6 reproduced at a second site);
 (2) value-independence of that failure (3 seeds): trans-of-source −0.0007 / raw-copy
@@ -54,16 +54,16 @@ REFUTED SIBLINGS (same protocol, recorded so later rounds do not re-walk them):
 (3) fusing z_{m-1} (last obs) into the write's pre on ALL rows: −0.0010 dedup, prod>
     −0.0097 — the unconditional last observation misleads produced-file redirects.
 
-FITNESS PATH — bit-identical training to the champion, C8's own chain, unchanged:
+FITNESS PATH — bit-identical training to the r18 arch, C8's own chain, unchanged:
 zero new parameters (blend/threshold/gate are plain floats; state_dict, init-RNG stream,
 gradients, Muon/spectral-cap optimizer routing identical); even-length streams have no
-valid-cmd/masked-obs pair, the has_imag mask guard (champion's own per-pair masks; no
+valid-cmd/masked-obs pair, the has_imag mask guard (the r18 arch's own per-pair masks; no
 key_pad statistics, no PAD-value read) skips every added op, and the forward is the
-champion's verbatim (this class overrides only `_transition_reads` + a raw-token stash
+r18 arch's verbatim (this class overrides only `_transition_reads` + a raw-token stash
 in `forward`); measured even-stream pred AND h max|Δ| = 0.0. The identical genome shape
-(champion head + inert-write arch, bit-identical training) measured pod fitness 0.4245
-vs champion 0.4247. IMAG_hist: no observed history ⇒ no match AND g == 0 ⇒ predictions
-value-identical to the plain champion (measured max|Δ| = 0.0) — ΔIMAG_HA = Δb
+(r18 head + inert-write arch, bit-identical training) measured pod fitness 0.4245
+vs the r18 arch's 0.4247. IMAG_hist: no observed history ⇒ no match AND g == 0 ⇒
+predictions value-identical to the plain r18 arch (measured max|Δ| = 0.0) — ΔIMAG_HA = Δb
 one-for-one. PAD-value invariance exactly 0.0 (measured). (a)-path co-report unchanged
 (`_memory_spre` calls `_transition_reads` without the stash ⇒ exact C8 behavior).
 
@@ -100,9 +100,9 @@ DESCRIPTION = (
 class R21SourceFusedImagWritePathState(R18PathStateLatentTransition):
     """Overrides `_transition_reads` (C8's gated scan + matched-row source fusion) and
     wraps `forward` only to stash the raw command tokens for the aux-faithful
-    `transition_from_emb` call (the champion forward body runs verbatim via super()).
+    `transition_from_emb` call (the r18 forward body runs verbatim via super()).
     All knobs are plain Python floats — the state_dict and init-RNG stream are
-    bit-identical to the champion arch."""
+    bit-identical to the r18 arch."""
 
     def __init__(self, imag_gate_c=0.25, src_thresh=0.60, src_blend=0.5, **params):
         super().__init__(**params)
@@ -133,7 +133,7 @@ class R21SourceFusedImagWritePathState(R18PathStateLatentTransition):
         evid = x_cmd.new_zeros(B, 1)
         c = float(self.imag_gate_c)
 
-        # ---- masked-pair presence (champion's own per-pair masks; False on every
+        # ---- masked-pair presence (the r18 arch's own per-pair masks; False on every
         # even-length training/fitness stream -> the scan below is C8's ops verbatim).
         if n_pair:
             imag_pair = valid_cmd[:, :n_pair] & ~valid_obs

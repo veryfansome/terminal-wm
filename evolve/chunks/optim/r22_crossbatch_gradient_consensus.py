@@ -31,7 +31,7 @@ import math
 import torch
 NAME="r22_crossbatch_gradient_consensus"
 DESCRIPTION=(
-    'Incumbent Muon-on-addressing plus AdamW/warmup-hold-cosine-floor and transition '
+    'Muon-on-addressing plus AdamW/warmup-hold-cosine-floor and transition '
     'spectral cap, with a bounded slow-gradient consensus filter on large non-addressing '
     'matrices: a bias-corrected cross-batch gradient EMA is RMS-matched and convex-mixed '
     'into each current gradient after a delayed ramp.'

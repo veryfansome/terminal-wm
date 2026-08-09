@@ -88,23 +88,23 @@ from evolve.chunks.arch.r18_pathstate_latent_transition_worldmodel import (
 
 NAME = "r20_contentcond_transition_imagwrite"
 DESCRIPTION = (
-    "Champion r18 arch with the transition operator's functional form upgraded from command-only "
+    "The r18 arch with the transition operator's functional form upgraded from command-only "
     "affine to CONTENT-CONDITIONED: delta = affine(s_pre, cmd) + cap*tanh(MLP([rms(s_pre); "
-    "cmd_feat])/cap), MLP zero-init (exact champion function at init), trained by the champion's "
+    "cmd_feat])/cap), MLP zero-init (exact r18 function at init), trained by the r18 stack's "
     "own main loss + forward-model head aux — targeting the measured +0.057 operator-form "
     "headroom (brief finding 7) that every endpoint corrector works around; plus the r20 "
-    "parameter-free imagination write (adopted, attributed) so the net natively forwards the "
+    "parameter-free imagination write (reused, attributed) so the net natively forwards the "
     "obs-missing endpoint layout (measurement path b). Bounded residual, unchanged interfaces, "
     "Muon/spectral-cap routing verified safe."
 )
 
 
 class R20ContentCondTransitionImagWrite(R18PathStateLatentTransition):
-    """Champion subclass. Overrides `_transition` (content-conditioned residual, zero-init) and
-    `_transition_reads` (the adopted imagination write). Everything else — trunk, memories,
-    gates, FiLM, `transition_from_emb` (which now routes through the richer `_transition`) — is
-    inherited verbatim. New modules are constructed AFTER the full champion __init__ so champion
-    parameters draw the identical init-RNG stream."""
+    """r18 path-state subclass. Overrides `_transition` (content-conditioned residual,
+    zero-init) and `_transition_reads` (the reused imagination write). Everything else — trunk,
+    memories, gates, FiLM, `transition_from_emb` (which now routes through the richer
+    `_transition`) — is inherited verbatim. New modules are constructed AFTER the full r18
+    __init__ so the r18 parameters draw the identical init-RNG stream."""
 
     def __init__(self, *args, tr2_hidden=192, tr2_cap=2.0, **kwargs):
         super().__init__(*args, **kwargs)
@@ -118,9 +118,9 @@ class R20ContentCondTransitionImagWrite(R18PathStateLatentTransition):
         torch.nn.init.zeros_(self.tr2_out.bias)
 
     def _transition(self, s_pre, cmd_feat):
-        """Content-conditioned transition: champion affine + bounded zero-init residual on
-        [rms-normalized current content; command feature]. Exact champion function at init.
-        NOTE: f now depends on s_pre nonlinearly, so the champion docstring's diagonal-linear-
+        """Content-conditioned transition: r18 affine + bounded zero-init residual on
+        [rms-normalized current content; command feature]. Exact r18 function at init.
+        NOTE: f now depends on s_pre nonlinearly, so the r18 docstring's diagonal-linear-
         scan equivalence no longer applies even in principle (the shipped sequential loop never
         used it)."""
         base = super()._transition(s_pre, cmd_feat)
@@ -130,10 +130,10 @@ class R20ContentCondTransitionImagWrite(R18PathStateLatentTransition):
         return base + res
 
     def _transition_reads(self, x_cmd, obs_tok, valid_cmd, valid_obs, n_cmd, n_pair):
-        """Champion scan + the r20 imagination write (adopted verbatim from
+        """r18 scan + the r20 imagination write (taken verbatim from
         r20_imagwrite_pathstate_worldmodel): a valid-cmd/masked-obs pair writes
         w_i*(f(s_pre, cmd) - s_pre); identically dead on even-length fully-observed streams
-        (the fitness path), where this reduces bit-for-bit to the champion scan at init."""
+        (the fitness path), where this reduces bit-for-bit to the r18 scan at init."""
         B = x_cmd.size(0)
         dtype = x_cmd.dtype
         p = self._unit(self.tr_path(x_cmd))                          # [B,n_cmd,key_d]
@@ -157,7 +157,7 @@ class R20ContentCondTransitionImagWrite(R18PathStateLatentTransition):
                 wi = w[:, i].unsqueeze(-1) * 0.0
                 active = x_cmd.new_zeros(B, 1)
                 imag = x_cmd.new_zeros(B, 1)
-            v_i = (1.0 - wi) * obs_i + wi * delta                    # champion write value
+            v_i = (1.0 - wi) * obs_i + wi * delta                    # r18 write value
             corr = (v_i - s_pre) * active \
                 + (w[:, i].unsqueeze(-1) * (delta - s_pre)) * imag   # imagination write
             mem = decay * mem + torch.bmm(pi.unsqueeze(2), corr.unsqueeze(1))

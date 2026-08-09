@@ -9,15 +9,15 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from evolve.chunks.head import r18_transition_forwardmodel_consistency as CHAMP
+from evolve.chunks.head import r18_transition_forwardmodel_consistency as BASE
 
 NAME = 'r21_evidencegated_imagwrite_algebraic_observer_head'
-DESCRIPTION = ('Champion r18 transition consistency plus a private zero-init bounded '
+DESCRIPTION = ('The r18 transition consistency plus a private zero-init bounded '
                'masked-endpoint observer whose only additive evidence is prefix-pair '
                'cross-attention and a raw-observation copy readout. The same module runs '
                'in both history arms and is algebraically zero for empty history. Source-'
                'free endpoint pairs train duplicate-masked L2-InfoNCE plus MSE; ordinary '
-               'even-length forwards are bit-identical to the champion.')
+               'even-length forwards are bit-identical to the r18 forward.')
 
 _DEFAULTS = {
     'imag_heads': 4, 'imag_dk': 64, 'imag_dv': 64, 'imag_width': 192,
@@ -228,7 +228,7 @@ def _private_loss(cfg, batch, net):
 
 
 def wrap(net, D, **params):
-    cfg = CHAMP.wrap(net, D, **params)
+    cfg = BASE.wrap(net, D, **params)
     private = dict(_DEFAULTS)
     private.update(params)
     cfg.update(private)
@@ -266,24 +266,24 @@ def wrap(net, D, **params):
 
 
 def aux_loss(state, batch, net, device):
-    champion = CHAMP.aux_loss(state, batch, net, device)
+    base_term = BASE.aux_loss(state, batch, net, device)
     if state is None or state.get('_imag_disabled', True):
-        return champion
-    if not CHAMP._interleave_layout_ok(batch):
-        return champion
+        return base_term
+    if not BASE._interleave_layout_ok(batch):
+        return base_term
     state['_observer_step'] = int(state.get('_observer_step', 0)) + 1
     step = state['_observer_step']
     if step % int(state['imag_every']) != 0:
-        return champion
+        return base_term
     ramp = _smoothstep((step - int(state['imag_ramp_start'])) /
                        max(1.0, float(state['imag_ramp_steps'])))
     if ramp <= 0 or float(state['imag_aux_weight']) <= 0:
-        return champion
-    return champion + float(state['imag_aux_weight']) * ramp * _private_loss(state, batch, net)
+        return base_term
+    return base_term + float(state['imag_aux_weight']) * ramp * _private_loss(state, batch, net)
 
 
 def leak_safe(mod, params):
-    if not CHAMP.leak_safe(mod, params):
+    if not BASE.leak_safe(mod, params):
         return False
     p = dict(_DEFAULTS)
     p.update(params or {})

@@ -12,11 +12,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from evolve.chunks.head import r18_transition_forwardmodel_consistency as CHAMP
+from evolve.chunks.head import r18_transition_forwardmodel_consistency as BASE
 
 NAME = "r20_bounded_native_innovation_observer"
 DESCRIPTION = (
-    "Champion r18 transition consistency plus a private zero-init bounded innovation "
+    "The r18 transition consistency plus a private zero-init bounded innovation "
     "observer for odd [prefix,c_m,PAD,c_r] forwards. TRAIN triples supervise duplicate-"
     "masked Euclidean retrieval and an MSE anchor; shared native predictions and hidden "
     "states are detached, and ordinary even-stream forwards are exactly untouched."
@@ -179,7 +179,7 @@ def _private_loss(cfg, batch, net):
     cmd = tok[selected, 0::2, :][:, :maxn]
     obs = tok[selected, 1::2, :][:, :maxn]
     valid = cmd_mask[selected]
-    rows, earlier, mutation, read, weight = CHAMP._mine_triples(
+    rows, earlier, mutation, read, weight = BASE._mine_triples(
         cmd,
         obs,
         valid,
@@ -247,7 +247,7 @@ def _private_loss(cfg, batch, net):
 
 
 def wrap(net, D, **params):
-    cfg = CHAMP.wrap(net, D, **params)
+    cfg = BASE.wrap(net, D, **params)
     private = dict(_PRIVATE_DEFAULTS)
     private.update(params)
     cfg.update(private)
@@ -300,27 +300,27 @@ def wrap(net, D, **params):
 
 def aux_loss(head_state, batch, net, device):
     cfg = head_state
-    champion = CHAMP.aux_loss(cfg, batch, net, device)
+    base_term = BASE.aux_loss(cfg, batch, net, device)
     if cfg is None or cfg.get("_imag_disabled", True):
-        return champion
-    if not CHAMP._interleave_layout_ok(batch):
-        return champion
+        return base_term
+    if not BASE._interleave_layout_ok(batch):
+        return base_term
     cfg["_observer_step"] = int(cfg.get("_observer_step", 0)) + 1
     step = cfg["_observer_step"]
     if step % int(cfg["imag_every"]) != 0:
-        return champion
+        return base_term
     start = int(cfg["imag_ramp_start"])
     ramp = _smoothstep(
         (step - start) / max(1.0, float(cfg["imag_ramp_steps"]))
     )
     if ramp <= 0.0 or float(cfg["imag_aux_weight"]) <= 0.0:
-        return champion
+        return base_term
     private = _private_loss(cfg, batch, net)
-    return champion + float(cfg["imag_aux_weight"]) * ramp * private
+    return base_term + float(cfg["imag_aux_weight"]) * ramp * private
 
 
 def leak_safe(mod, params):
-    if not CHAMP.leak_safe(mod, params):
+    if not BASE.leak_safe(mod, params):
         return False
     p = dict(_PRIVATE_DEFAULTS)
     p.update(params or {})

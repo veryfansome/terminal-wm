@@ -59,12 +59,12 @@ import torch.nn as nn
 
 NAME = "r20_masked_window_imagination_consistency"
 DESCRIPTION = (
-    "Champion r18 forward-model-consistency aux VERBATIM + a masked-window imagination "
+    "The r18 forward-model-consistency aux VERBATIM + a masked-window imagination "
     "aux: mines same-path endpoint (k -> nearest later touch j) pairs in-batch (weighted "
     "by the arch's own detached mutation gate), and trains the co-designed arch's "
     "`imaginer` (cross-attention over raw plan-time prefix pairs queried by the two "
     "endpoint commands) to predict z_obs_j with an eval-geometry L2-InfoNCE + MSE anchor. "
-    "Imagination gradients touch only imaginer params; eval forward untouched; champion-"
+    "Imagination gradients touch only imaginer params; eval forward untouched; base-pion-"
     "equivalent on archs without `imaginer`."
 )
 

@@ -1,15 +1,15 @@
 """
-R20 arch: CHAMPION + AN ENDPOINT-IMAGINATION CHANNEL — the r18 per-path latent-
-transition champion arch VERBATIM, plus a dedicated MASKED-WINDOW JEPA imaginer
+R20 arch: PATH-STATE TRUNK + AN ENDPOINT-IMAGINATION CHANNEL — the r18 per-path
+latent-transition arch VERBATIM, plus a dedicated MASKED-WINDOW JEPA imaginer
 that natively forwards an OBS-MISSING suffix (measurement path (b)).
 
-THE R20 TARGET (measured): the champion is a strong one-step predictor (0.4251)
-but cannot IMAGINE — compose a mutation's consequence for a later first read with
-no observation feedback (imag margin -0.105 vs the lexical floor). The frozen-
+THE R20 TARGET (measured): the r18 path-state arch is a strong one-step predictor
+(0.4251) but cannot IMAGINE — compose a mutation's consequence for a later first read
+with no observation feedback (imag margin -0.105 vs the lexical floor). The frozen-
 embedding probe proved the signal exists and is leak-robust: cross-attention over
-the RAW plan-time prefix queried by the TWO endpoint commands (c_m, c_r) beats the
-trained command-only ceiling by +0.16-0.30 on every mutation family (differential
-survives content-dedup, +0.18). The champion's own operator fails there for three
+the RAW plan-time prefix queried by the TWO endpoint commands (c_m, c_r) scores
++0.16-0.30 above the trained command-only ceiling on every mutation family
+(differential survives content-dedup, +0.18). The r18 operator fails there for three
 mechanism-level reasons: (1) it was aux-supervised on raw-obs pre and collapses on
 its own memory content (train/compose distribution mismatch); (2) it never sees the
 READ command c_r, so it cannot produce the read-specific view; (3) it composes from
@@ -32,26 +32,26 @@ MECHANISM — a self-contained `imaginer` module with STATIONARY inputs:
 NATIVE OBS-MISSING FORWARD (measurement path (b), leak-free): a pair i is IMAGINED
 when its command is valid but its observation slot is key_pad-masked. That never
 occurs in training / fitness streams (pairs pad together), so this branch is INERT
-there — the fitness forward is the champion's, bit-for-bit given the same weights.
+there — the fitness forward is the r18 arch's, bit-for-bit given the same weights.
 On the declared imagination layout
     [cmd_0, obs_0, ..., cmd_{m-1}, obs_{m-1}, cmd_m, PAD-obs, cmd_r]
 the prediction at the cmd_r position is OVERRIDDEN with the imaginer output
 computed from (fully-observed prefix pairs < m, raw c_m, raw c_r) only. The PAD
 obs VALUE is never read (only its mask bit), so perturbing it moves nothing
-(Delta == 0.0); the champion's memories gate the pad out exactly as before.
+(Delta == 0.0); the r18 memories gate the pad out exactly as before.
 
 TRAINING: the co-designed head `r20_masked_window_imagination_consistency` mines
 mutation->read windows in-batch (fit split only) and trains the imaginer with an
 L2-InfoNCE (eval geometry) + MSE anchor. Imaginer gradients touch ONLY imaginer
 params — the trunk's training is untouched (no post-hoc fine-tune, no trunk
 destabilization; the r19 lesson). Hypothesis-tested end-to-end on TRAIN-image
-windows: heuristically mined pool + this exact module beat the lexical floor by
-+0.166 aggregate (every genuine family positive), history-ON minus trained
+windows: heuristically mined pool + this exact module scored +0.166 aggregate above
+the lexical floor (every genuine family positive), history-ON minus trained
 history-OFF +0.309.
 
-Champion machinery retained verbatim (r13 trunk, verb-quotient filebind, path
+r13/r18 machinery retained verbatim (r13 trunk, verb-quotient filebind, path
 memory, FiLMs, transition memory, chunkwise delta solver, transition_from_emb).
-The imaginer is constructed LAST in __init__, so every champion parameter draws
+The imaginer is constructed LAST in __init__, so every inherited r18 parameter draws
 the identical init RNG stream. Strictly causal; NaN-safe.
 
 Refs: I-JEPA (arXiv:2301.08243); V-JEPA 2 action-conditioned predictor
@@ -69,13 +69,13 @@ D = 768
 
 NAME = "r20_endpoint_imagination_worldmodel"
 DESCRIPTION = (
-    "r18 latent-transition champion arch verbatim + a dedicated endpoint-imagination "
+    "r18 latent-transition arch verbatim + a dedicated endpoint-imagination "
     "channel: a masked-window JEPA imaginer (multi-head cross-attention over the raw "
     "plan-time prefix pairs, queried by the raw mutation and read command embeddings, "
     "composed by an MLP) that natively forwards an obs-missing suffix — at a command "
     "position preceded by a valid-cmd/masked-obs pair, the prediction is the imaginer's "
     "output from (prefix < m, c_m, c_r) alone. Inert on fully-observed streams (fitness "
-    "forward = champion bit-for-bit); trained only by the co-designed r20 head aux."
+    "forward = bit-for-bit identical to the r18 forward); trained only by the co-designed r20 head aux."
 )
 
 
@@ -196,20 +196,20 @@ class R20EndpointImaginationWorldModel(nn.Module):
         self.verb_codebook = nn.Parameter(torch.randn(self.n_verb, self.key_d) * 0.2)
         self.ctx_proj = nn.Linear(self.d, self.ctx_d)
 
-        # -- path-state memory (champion channel, unchanged).
+        # -- path-state memory (r13 trunk channel, unchanged).
         self.path_read = nn.Linear(self.d, self.key_d, bias=False)
         self.path_write = nn.Linear(self.d, self.key_d, bias=False)
 
         self.write_gate = nn.Linear(2 * self.d, 1)
 
-        # -- FiLM view transform (champion channel, unchanged).
+        # -- FiLM view transform (r13 trunk channel, unchanged).
         fh = max(16, int(film_hidden))
         self.film_in = nn.Linear(self.d + self.ctx_d, fh)
         self.film_out = nn.Linear(fh, 2 * D)
         nn.init.zeros_(self.film_out.weight)
         nn.init.zeros_(self.film_out.bias)
 
-        # -- causal system-identity summary + zero-init system FiLM (champion channel).
+        # -- causal system-identity summary + zero-init system FiLM (r13 trunk channel).
         self.sys_sal = nn.Linear(self.d, 1)
         self.sys_val = nn.Linear(self.d, self.sys_d)
         sh = max(16, int(sysfilm_hidden))
@@ -246,8 +246,8 @@ class R20EndpointImaginationWorldModel(nn.Module):
         nn.init.constant_(self.fuse_gate.bias, -1.0)
         nn.init.constant_(self.direct_gate.bias, -2.0)
 
-        # -- R20 NEW: endpoint-imagination module. Constructed LAST so every champion
-        # parameter above consumes the identical init-RNG stream as the r18 champion.
+        # -- R20 NEW: endpoint-imagination module. Constructed LAST so every inherited
+        # parameter above consumes the identical init-RNG stream as the r18 arch.
         self.imaginer = _Imaginer(
             dk=int(imag_dk), dv=int(imag_dv), heads=int(imag_heads),
             qf_d=int(imag_qf), hid=int(imag_hid),
@@ -400,10 +400,11 @@ class R20EndpointImaginationWorldModel(nn.Module):
         read_i = p_i^T mem_{i-1} (strictly-earlier writes -> obs_i affects reads>i only, causal).
 
         NOTE (2026-07-26 speed review): a batched closed-form solve of this scan was implemented
-        and verified numerically equivalent (leakage-clean, <1.1e-6 on pred/reads). It was NOT
-        adopted: the diagonal (per-channel) gate forces a per-channel [B,D,C,C] solve that cannot
-        share across the D output channels (unlike r9/r17's scalar-beta delta), so at the actual
-        train config (bs64, L16, N<=8) it is ~0.6x the loop's speed and a wash on the full arch
+        and verified numerically equivalent (leakage-clean, <1.1e-6 on pred/reads). It is NOT
+        the version that ships: the diagonal (per-channel) gate forces a per-channel [B,D,C,C]
+        solve that cannot share across the D output channels (unlike r9/r17's scalar-beta
+        delta), so at the actual train config (bs64, L16, N<=8) it is ~0.6x the loop's speed
+        and a wash on the full arch
         (0.386 vs 0.374 s/step full stack). The <=16-step Python loop is cheaper here and was
         never the arch bottleneck; the head-aux vectorization (r18 head) is what removed the
         timeout. Kept sequential for simplicity/speed."""
@@ -570,7 +571,7 @@ class R20EndpointImaginationWorldModel(nn.Module):
         # A pair i is IMAGINED when its command is valid but its observation slot is
         # key_pad-masked. Never true in training / fitness / leakage-guard streams
         # (pairs pad together there), so this branch is INERT and the forward above is
-        # the champion's bit-for-bit. On the declared measurement layout
+        # the r18 arch's bit-for-bit. On the declared measurement layout
         # [prefix, cmd_m, PAD-obs, cmd_r] it fires at cmd_r: the prediction there is
         # OVERRIDDEN with imaginer(fully-observed prefix pairs < m, raw c_m, raw c_r).
         # The PAD obs VALUE is never read (only its mask bit) -> perturbing it moves

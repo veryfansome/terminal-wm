@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from evolve.chunks.head import r18_transition_forwardmodel_consistency as CHAMP
+from evolve.chunks.head import r18_transition_forwardmodel_consistency as BASE
 
 
 NAME = 'r20_predictive_state_counterfactual_renderer'
@@ -149,7 +149,7 @@ def _native_endpoint(cfg, net, tok, key_pad, pred, hidden, transition_reads):
 
 def wrap(net, D, **params):
     '''Preserve the R18 aux, register the renderer, and install the native route.'''
-    cfg = CHAMP.wrap(net, D, **params)
+    cfg = BASE.wrap(net, D, **params)
     for key, value in _IMAG_DEFAULTS.items():
         cfg.setdefault(key, value)
     cfg['_imag_step'] = 0
@@ -210,7 +210,7 @@ def _imagination_loss(cfg, batch, net):
     cache = cfg.get('_cache')
     cfg['_cache'] = None
     cfg['_tr_reads'] = None
-    if cache is None or not CHAMP._interleave_layout_ok(batch):
+    if cache is None or not BASE._interleave_layout_ok(batch):
         return 0.0
 
     tok, hidden, transition_reads = cache
@@ -332,21 +332,21 @@ def _imagination_loss(cfg, batch, net):
 def aux_loss(head_state, batch, net, device):
     '''R18 consistency plus the single-pass endpoint predictive-state loss.'''
     cfg = head_state
-    champion_loss = CHAMP.aux_loss(cfg, batch, net, device)
+    base_loss = BASE.aux_loss(cfg, batch, net, device)
     if cfg is None or cfg.get('_disabled', True):
-        return champion_loss
+        return base_loss
     if float(cfg.get('imag_weight', 0.0)) <= 0.0:
-        return champion_loss
+        return base_loss
 
     cfg['_imag_step'] = int(cfg.get('_imag_step', 0)) + 1
     progress = cfg['_imag_step'] / max(1.0, float(cfg['imag_ramp_steps']))
-    ramp = CHAMP._smoothstep(progress)
+    ramp = BASE._smoothstep(progress)
     if ramp <= 0.0:
-        return champion_loss
+        return base_loss
     imagination = _imagination_loss(cfg, batch, net)
     if isinstance(imagination, float):
-        return champion_loss
-    return champion_loss + float(cfg['imag_weight']) * ramp * imagination
+        return base_loss
+    return base_loss + float(cfg['imag_weight']) * ramp * imagination
 
 
 def leak_safe(mod, params):
@@ -357,7 +357,7 @@ def leak_safe(mod, params):
     positions <=2m, plus c_m and c_r. The missing observation value is masked and
     is never used. Future observations and mined z_r occur only as aux labels.
     '''
-    if not CHAMP.leak_safe(CHAMP, params or {}):
+    if not BASE.leak_safe(BASE, params or {}):
         return False
     p = dict(_IMAG_DEFAULTS)
     p.update(params or {})

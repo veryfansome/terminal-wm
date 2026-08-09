@@ -1,6 +1,6 @@
 '''R22 architecture: causal variance-fingerprint FiLM.
 
-The champion forward is retained verbatim. A new channel computes a shrunk
+The r18 path-state forward is retained verbatim. A new channel computes a shrunk
 per-coordinate variance over strictly earlier valid observation embeddings and
 uses only that second-order statistic to calibrate command predictions. It does
 not retain observation identity, order, or mean and cannot retrieve/copy a
@@ -17,8 +17,8 @@ no-evidence prior. For command i:
     correction = rho * [mult_cap*tanh(a)*pred + shift_cap*tanh(b)]
 
 W_down and W_out have no biases, so an empty prefix always emits exactly zero.
-W_out is zero-initialized, making the complete model exactly the champion at
-initialization while allowing the ordinary main loss to recruit the channel.
+W_out is zero-initialized, making the complete model exactly the r18 path-state
+model at initialization while allowing the ordinary main loss to recruit the channel.
 The correction is RMS-capped and applied only at valid command positions.
 Cumulative moments are shifted by one pair, so observation j affects commands
 strictly after j. Invalid observations, including the imagination PAD slot, are
@@ -39,7 +39,7 @@ D = 768
 
 NAME = 'r22_causal_variance_fingerprint_film'
 DESCRIPTION = (
-    'Champion r18 path-state arch plus a causal second-order system fingerprint: '
+    'The r18 path-state arch plus a causal second-order system fingerprint: '
     'the shrunk diagonal variance of strictly earlier raw observations drives a '
     'bias-free, low-rank, bounded FiLM on command predictions. Individual values, '
     'their order, and their mean are discarded; the decoder is zero-initialized, '

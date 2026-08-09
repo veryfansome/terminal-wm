@@ -72,12 +72,12 @@ from evolve.chunks.arch.r18_pathstate_latent_transition_worldmodel import (
 
 NAME = "r20_imagwrite_pathstate_worldmodel"
 DESCRIPTION = (
-    "Champion r18 path-state latent-transition arch + a PARAMETER-FREE imagination write: a "
+    "The r18 path-state latent-transition arch + a PARAMETER-FREE imagination write: a "
     "pair with a valid command but a masked (key_pad) observation writes w_i*(f(s_pre,cmd)-"
     "s_pre) into its path slot, so the net natively forwards obs-missing mutation suffixes "
-    "(measurement path b) and composes the read through the champion's own trained machinery. "
+    "(measurement path b) and composes the read through the r18 stack's own trained machinery. "
     "Identically dead on even-length fully-observed streams: fitness training/eval, "
-    "state_dict, init RNG, gradients and optimizer routing are bit-identical to the champion "
+    "state_dict, init RNG, gradients and optimizer routing are bit-identical to the r18 forward "
     "— the imagination is an emergent eval-time capability of the already-trained operator, "
     "not a new training pressure."
 )

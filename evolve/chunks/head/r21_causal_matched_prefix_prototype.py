@@ -11,11 +11,11 @@ import math
 
 import torch
 
-from evolve.chunks.head import r18_transition_forwardmodel_consistency as CHAMP
+from evolve.chunks.head import r18_transition_forwardmodel_consistency as BASE
 
 NAME = "r21_causal_matched_prefix_prototype"
 DESCRIPTION = (
-    "Champion r18 transition consistency plus a parameter-free causal episodic "
+    "The r18 transition consistency plus a parameter-free causal episodic "
     "read on native masked endpoints: match c_r to a strictly earlier valid "
     "(command, observation) pair, blend its raw observation into the native "
     "prediction under an RMS cap, and return native exactly when no history "
@@ -136,7 +136,7 @@ def _correct(native, prototype, blend, max_resid_rms):
 
 
 def wrap(net, D, **params):
-    cfg = CHAMP.wrap(net, D, **params)
+    cfg = BASE.wrap(net, D, **params)
     private = dict(_DEFAULTS)
     private.update({k: params[k] for k in _DEFAULTS if k in params})
     cfg.update(private)
@@ -186,11 +186,11 @@ def wrap(net, D, **params):
 
 def aux_loss(head_state, batch, net, device):
     # Retain the shared transition-consistency objective exactly.
-    return CHAMP.aux_loss(head_state, batch, net, device)
+    return BASE.aux_loss(head_state, batch, net, device)
 
 
 def leak_safe(mod, params):
-    if not CHAMP.leak_safe(mod, params):
+    if not BASE.leak_safe(mod, params):
         return False
     p = dict(_DEFAULTS)
     p.update(

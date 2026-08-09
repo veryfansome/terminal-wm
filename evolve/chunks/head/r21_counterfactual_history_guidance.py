@@ -20,11 +20,11 @@ import math
 
 import torch
 
-from evolve.chunks.head import r18_transition_forwardmodel_consistency as CHAMP
+from evolve.chunks.head import r18_transition_forwardmodel_consistency as BASE
 
 NAME = 'r21_counterfactual_history_guidance'
 DESCRIPTION = (
-    'Champion r18 transition consistency plus parameter-free counterfactual-history '
+    'The r18 transition consistency plus parameter-free counterfactual-history '
     'guidance on the frozen odd masked-endpoint layout. The same trunk predicts with '
     'the supplied prefix and with positions before c_m intervention-masked; a '
     '0.2-RMS-capped conditional-minus-no-history latent is added to the conditional '
@@ -111,7 +111,7 @@ def _guided(native, no_history, gain, cap):
 
 
 def wrap(net, D, **params):
-    cfg = CHAMP.wrap(net, D, **params)
+    cfg = BASE.wrap(net, D, **params)
     private = dict(_DEFAULTS)
     private.update({k: params[k] for k in _DEFAULTS if k in params})
     cfg.update(private)
@@ -154,11 +154,11 @@ def wrap(net, D, **params):
 
 
 def aux_loss(head_state, batch, net, device):
-    return CHAMP.aux_loss(head_state, batch, net, device)
+    return BASE.aux_loss(head_state, batch, net, device)
 
 
 def leak_safe(mod, params):
-    if not CHAMP.leak_safe(mod, params):
+    if not BASE.leak_safe(mod, params):
         return False
     p = dict(_DEFAULTS)
     p.update({k: (params or {})[k] for k in _DEFAULTS if k in (params or {})})

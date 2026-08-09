@@ -1,8 +1,8 @@
 """R21 arch: EVIDENCE-GATED IMAGINATION WRITE — the r20 native imagination-write
-(the only mechanism in the record with a MEASURED FULL-SCALE (b)-path gain: dedup
-b-margin +0.2827 vs the plain champion's +0.2493, Δb = +0.0334, every genuine family
-non-negative, six independent R20 trainings agreeing at +0.03–0.04) with its ONE
-measured defect repaired: the write may no longer execute from a vacuous state.
+(measured at full scale: dedup b-margin +0.2827 vs the plain r18 path-state arch's
++0.2493, Δb = +0.0334, every genuine family non-negative, six independent R20
+trainings agreeing at +0.03–0.04) with its ONE measured defect repaired: the write
+may no longer execute from a vacuous state.
 
 THE DEFECT (localized by Candidate 1's R21 BLOCK): on the instrument's history-masked
 arm the transition memory is EMPTY, so the imagined write w*(f(s_pre,c_m)-s_pre)
@@ -13,14 +13,14 @@ the differential (C1 ΔIMAG_HA −0.0262) and breached both redirect family floo
 THE REPAIR (this file): the imagined correction is scaled by an EVIDENCE GATE
     g_i = evid_i / (evid_i + c),   evid_i = Σ_{j<i} ||observed_corr_j||²
 the accumulated squared mass of the memory's OBSERVED (real-obs) writes strictly
-before i. No key_pad statistic is read beyond the champion's own active/imag masks;
+before i. No key_pad statistic is read beyond the r18 arch's own active/imag masks;
 the same code runs identically in both instrument arms. With any observed history
 evid saturates g -> ~1 (measured on 2336 real TRAIN-image windows with trained
 nets, 2 seeds: evid >= 1510 at every imagination step, so g >= 0.99983 at c=0.25;
 b-arm prediction delta vs the ungated write mean 3.9e-5 / max 1.2e-3 on ~27-norm
 vectors; b_top1 identical to 4 decimals, pooled and per-family); with NO observed
 history evid == 0 exactly, so g == 0, the write is ALGEBRAICALLY zero, memory stays
-empty, and the history-masked forward is value-identical to the plain champion's
+empty, and the history-masked forward is value-identical to the plain r18 arch's
 (measured max|Δ| = 0.0 across all windows on both seeds, while the ungated write
 moves the same predictions by up to 1.48 — the contamination channel, removed
 exactly). This is the
@@ -37,14 +37,15 @@ training/fitness streams are even-length with pairs both-valid or both-padded, s
 imag mask is identically False and the gated term contributes exact zeros; ZERO new
 parameters (the gate constant is a plain float attribute) -> state_dict, init-RNG
 stream, gradients, optimizer routing (Muon keys + the (D,D) spectral-cap signature) are
-bit-identical to the champion; verified even-stream forward max|Δ| = 0.0 (pred AND h)
+bit-identical to the r18 arch; verified even-stream forward max|Δ| = 0.0 (pred AND h)
 against the verbatim r18 class, and the r20 imagwrite genome measured pod fitness
-0.4245 vs champion 0.4247 (|Δ| = 0.0002, within run noise) on this identical training.
+0.4245 vs the r18 arch's 0.4247 (|Δ| = 0.0002, within run noise) on this identical
+training.
 The (a)-path operator instrument reads `_transition_reads` on a fully-observed prefix
 layout with no masked-obs pair, so it is untouched (verified max|Δ| = 0.0).
 
 LEAK-FREE: the masked pair's obs VALUE is never read (the obs term is gated by the
-champion's own active mask; evid accumulates only active-gated observed corrections;
+r18 arch's own active mask; evid accumulates only active-gated observed corrections;
 key_pad excludes the slot from attention) — PAD-value perturbation Δ == 0.0 exactly.
 
 Refs: Kalman innovation gain under prior information; MBPO "When to Trust Your Model"
@@ -63,23 +64,23 @@ from evolve.chunks.arch.r18_pathstate_latent_transition_worldmodel import (
 
 NAME = "r21_evidencegated_imagwrite_algebraic_observer_arch"
 DESCRIPTION = (
-    "Champion r18 path-state arch + the r20 parameter-free imagination write, with the "
+    "The r18 path-state arch + the r20 parameter-free imagination write, with the "
     "imagined correction scaled by an evidence gate g = evid/(evid+c), evid = accumulated "
     "squared mass of strictly-earlier OBSERVED memory writes. With observed history g "
     "saturates to ~1 (b-arm write preserved, measured); with none g == 0 exactly, so the "
-    "history-masked forward is value-identical to the plain champion (no empty-memory "
+    "history-masked forward is value-identical to the plain r18 forward (no empty-memory "
     "command-decode hallucination — the channel that lifted C1's IMAG_hist and broke its "
     "redirect family floors). Even-length fitness streams are bit-identical to the "
-    "champion: zero new parameters, same init RNG, same gradients, same optimizer routing."
+    "r18 forward: zero new parameters, same init RNG, same gradients, same optimizer routing."
 )
 
 
 class R21EvidenceGatedImagWrite(R18PathStateLatentTransition):
     """Subclass overriding ONLY `_transition_reads` (the evidence-gated imagination-write
-    branch); every other champion method — trunk, memories, gates, `_transition`,
+    branch); every other r18 method — trunk, memories, gates, `_transition`,
     `transition_from_emb`, forward — is inherited verbatim. `imag_gate_c` is a plain
     Python float (NOT a Parameter/buffer): the state_dict and init-RNG stream are
-    bit-identical to the champion arch."""
+    bit-identical to the r18 arch."""
 
     def __init__(self, imag_gate_c=0.25, **params):
         super().__init__(**params)
@@ -117,7 +118,7 @@ class R21EvidenceGatedImagWrite(R18PathStateLatentTransition):
                 wi = w[:, i].unsqueeze(-1) * 0.0
                 active = x_cmd.new_zeros(B, 1)
                 imag = x_cmd.new_zeros(B, 1)
-            v_i = (1.0 - wi) * obs_i + wi * delta                    # champion write value
+            v_i = (1.0 - wi) * obs_i + wi * delta                    # r18 write value
             observed_corr = (v_i - s_pre) * active
             # R21 EVIDENCE GATE: exact 0 with no strictly-earlier observed write
             # (0/(0+c) == 0.0), saturates to ~1 under any real observed history.

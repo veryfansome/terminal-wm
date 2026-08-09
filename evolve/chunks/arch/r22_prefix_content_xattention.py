@@ -1,38 +1,39 @@
 """R22 arch: NATIVE FULL-RANK PREFIX-CONTENT CROSS-ATTENTION CHANNEL — the frozen-probe
-computation (the record's strongest positive capability measurement: cross-attention over
-the plan-time prefix queried by the endpoint commands, +0.16-0.30 over the trained
-command-only ceiling on every genuine family, differential +0.181 dedup, R20 findings 2/5)
-transplanted INTO the champion trunk as a zero-init native channel, trained by the
-untouched main loss inside the single pass.
+computation (measured in the R20 probes: cross-attention over the plan-time prefix
+queried by the endpoint commands, +0.16-0.30 over the trained command-only ceiling on
+every genuine family, differential +0.181 dedup, R20 findings 2/5) transplanted INTO the
+r18 path-state trunk as a zero-init native channel, trained by the untouched main loss
+inside the single pass.
 
-THE MEASURED GAP THIS FILLS (R22 inventor-7 diagnostics, canonical full-scale champion
-checkpoints s0/s1, protocol validated against the round's CA* baseline 0.5611/0.5614):
-the champion's realized masked-endpoint outcome TRACKS cross-position prefix-content
+THE MEASURED GAP THIS FILLS (R22 inventor-7 diagnostics, canonical full-scale r18
+checkpoints s0/s1, protocol validated against the CA* reference measurement
+0.5611/0.5614): the r18 stack's realized masked-endpoint outcome TRACKS cross-position
+prefix-content
 availability (train-window CA* on mv 0.850 where answer-similar content exists at
 non-same-path prefix positions vs 0.300 where it does not; mkdir b_top1 0.993 vs 0.718),
 and on the PRIOR-ONLY windows that dominate the lowest-CA family (76% of mv) the OWN
 prefix's raw observation set still carries a +0.228 mean-cosine content differential
 toward the answer over a presence-matched donor prefix (prod> +0.197, echo> +0.247,
-ln +0.230, mkdir +0.018). Yet the champion has NO full-rank positional route to that
+ln +0.230, mkdir +0.018). Yet the r18 arch has NO full-rank positional route to that
 evidence: every 768-d content path into the prediction is a SLOT-STORE read keyed by a
 single command projection (file/path/transition delta memories, prev-obs copy), while
 positional attention exists only inside the d=176 transformer whose content must exit
 through a rank-176 head; and the only dedicated system-evidence channel is a diagonal
-style FiLM from a 64-d summary that the round's decomposition measured CA-ADVERSE
+style FiLM from a 64-d summary that the R22 decomposition measured CA-ADVERSE
 (no_syscond raises train-window CA* on both seeds: +0.018/+0.034).
 
-MECHANISM (one channel; the champion forward is executed VERBATIM first, then the
+MECHANISM (one channel; the r18 forward is executed VERBATIM first, then the
 channel adds a gated residual to the command-position predictions):
     keys    k_j = xk(h_out[obs position j])          # position-contextual, path-aware (causal h)
     query   q_i = xq(h_out[cmd position i])          # at the masked-endpoint read: has attended c_m,c_r
     attn    a_ij = softmax_j<i( q_i . k_j / sqrt(dk) )   # strictly-earlier VALID pairs only
     value   v_j = raw z_obs_j                        # the probe-exact 768-d frozen value space
     out_i   pred_cmd_i += sigmoid(x_gate([h_i, rms(o_i)])) * x_out(o_i),  o_i = sum_j a_ij v_j
-x_out is a ZERO-INIT (768,768) square readout -> the arch is the champion function
+x_out is a ZERO-INIT (768,768) square readout -> the arch is the r18 function
 bit-for-bit at init, and the co-designed optimizer's routing captures the new channel by
-the champion's own signatures: xq/xk are (64,176) addressing projections (join the Muon
+the r18 arch's own signatures: xq/xk are (64,176) addressing projections (join the Muon
 orthogonalized-momentum group), x_out is a (D,D) square content readout (joins the
-spectral-norm-capped group) -- the exact rails the champion stack already trains under.
+spectral-norm-capped group) -- the exact rails the r18 stack already trains under.
 Sharp attention retrieves specific cross-position content (the mv-source / moved-file /
 link-target evidence the read command's slot key cannot reach); diffuse attention
 aggregates a query-conditioned SYSTEM-CONTENT prototype (the +0.23 prior-only
@@ -58,7 +59,7 @@ writes; this has no conditional branch and trains from step ~0); the R21 detache
 observers (private losses + gated overrides, measured subsumed; this has no private
 loss, no detachment, no override -- the main loss owns it); r13 syscond (64-d diagonal
 STYLE conditioning; this is full-rank CONTENT aggregation injected outside the style
-transform); the champion's own memories (single-command-keyed slot stores; this is
+transform); the r18 arch's own memories (single-command-keyed slot stores; this is
 positional attention with values in the raw obs space).
 """
 
@@ -75,11 +76,11 @@ D = 768
 
 NAME = "r22_prefix_content_xattention"
 DESCRIPTION = (
-    "Champion r18 path-state arch + ONE new native channel: a single-head full-rank "
+    "The r18 path-state arch + ONE new native channel: a single-head full-rank "
     "cross-attention over the strictly-earlier prefix OBSERVATIONS (keys/queries from the "
     "causal hidden states, values = raw 768-d obs embeddings — the frozen-probe computation "
     "in-trunk), injected into the command-position predictions through a zero-init (D,D) "
-    "readout and a sigmoid gate, AFTER the sysfilm styling. Champion bit-for-bit at init; "
+    "readout and a sigmoid gate, AFTER the sysfilm styling. Bit-for-bit identical to the r18 forward at init; "
     "Muon captures the new (64,176) addressing pair, the spectral cap the new (D,D) readout."
 )
 
@@ -92,7 +93,7 @@ class R22PrefixContentXAttention(R18PathStateLatentTransition):
         # co-designed optimizer routes them into the Muon orthogonalized-momentum group.
         self.xq = nn.Linear(self.d, self.xattn_dim, bias=False)
         self.xk = nn.Linear(self.d, self.xattn_dim, bias=False)
-        # (D, D) square content readout, ZERO-INIT -> exact champion function at init; the
+        # (D, D) square content readout, ZERO-INIT -> exact r18 function at init; the
         # co-designed optimizer's spectral cap targets this signature (norm-calibration rail).
         self.x_out = nn.Linear(D, D)
         nn.init.zeros_(self.x_out.weight)
@@ -101,7 +102,7 @@ class R22PrefixContentXAttention(R18PathStateLatentTransition):
         nn.init.constant_(self.x_gate.bias, float(xattn_gate_bias))
 
     def forward(self, tok_emb, types, key_pad):
-        pred, h_out = super().forward(tok_emb, types, key_pad)  # champion forward VERBATIM
+        pred, h_out = super().forward(tok_emb, types, key_pad)  # r18 forward VERBATIM
         B, L, _ = tok_emb.shape
         if L < 3:
             return pred, h_out

@@ -14,7 +14,7 @@ from evolve.chunks.arch.r18_pathstate_latent_transition_worldmodel import (
 
 NAME = "r20_native_imagwrite_observer_worldmodel"
 DESCRIPTION = (
-    "Champion r18 path-state transition model plus a parameter-free native imagination "
+    "The r18 path-state transition model plus a parameter-free native imagination "
     "write for valid-command/masked-observation pairs. Fully observed training and fitness "
     "streams are unchanged; an obs-missing mutation can update memory before a later read."
 )
