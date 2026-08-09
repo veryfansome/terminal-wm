@@ -97,7 +97,29 @@ REPORT_NATIVE_WM_OVER_CHANCE = 0.10
 # than a positional lookup does has discovered nothing. Every arm here is a pure function of the
 # command strings, so the band is genome-INDEPENDENT — subtracting it is a constant shift that
 # leaves the ranking of candidates untouched and makes zero mean "no better than the best shortcut".
-ANALYTIC_ARMS = ("h_first", "h_last", "h_lastmv", "at_name", "deepest")
+#
+# WHICH ARMS HAVE TO BE IN THE BAND, AND WHY THE OTHERS DO NOT.
+# The role swap re-encodes ONLY the mv command strings and splices them at the mv positions. It
+# leaves untouched: the exposure observations, the previous observation, the name index, and — given
+# that the partner must itself be a mover — the SET of contents that move. So three of the
+# instrument's arms cancel structurally, per window, and need no accounting:
+#   copy_prev  reads the previous observation, unchanged            -> identical pick both arms
+#   centroid   reads the exposure bank, unchanged                   -> identical pick both arms
+#   elim       is 1/|movers|, and the mover set is unchanged        -> identical value both arms
+# (elim's invariance is a CONSEQUENCE of the mover-partner rule. With a non-mover partner the swap
+# would move a content into or out of the mover set and elim would stop cancelling — one more thing
+# that rule buys.)
+#
+# The arms that do NOT cancel are the ones that read WHERE in the chain something happened, because
+# that is exactly what the swap permutes: the positional markers, and the depth-bounded backward
+# tracers. A tracer that solves a window natively resolves to the SWAPPED content under the swap,
+# scoring one minus zero — so on any window shallow enough for it, it scores maximally. It is
+# silent here only because every scored window is deeper than its cap, which is a property of the
+# current slice and not a property of the metric. Listing it explicitly means a future slice change
+# cannot quietly stop accounting for it.
+BOUNDED_TRACE_CAPS = (1, 2)   # hop caps whose backward trace is realizable at the frozen knobs
+ANALYTIC_ARMS = (("h_first", "h_last", "h_lastmv", "at_name", "deepest")
+                 + tuple(f"trace_h{c}" for c in BOUNDED_TRACE_CAPS))
 
 
 def _cell_key(row):
@@ -120,6 +142,19 @@ def _arm_hit(marks, arm, routed):
     return float(v == routed)
 
 
+def _trace_arm(w, cap, native):
+    """A backward trace through the recorded mv pairs, capped at `cap` hops.
+
+    It resolves a window whose depth is within the cap, and otherwise falls back to the name. On
+    the NATIVE chain it therefore answers `routed`; on the SWAPPED chain the recorded commands are
+    different and the same trace answers the swapped content, which is never `routed`. So a window
+    it can solve contributes one to the native arm and zero to the swap arm.
+    """
+    if w["depth"] <= cap:
+        return 1.0 if native else 0.0
+    return float(w["name"] == w["routed"])           # falls back to the name, which cancels
+
+
 def analytic_band(win_by_id, swap, W):
     """comp_ca as each analytic non-tracker would score it, on the identical frozen slice."""
     band = {}
@@ -128,8 +163,12 @@ def analytic_band(win_by_id, swap, W):
         for i in W:
             w, s = win_by_id[i], swap[i]
             routed = w["routed"]
-            tot += (_arm_hit(_native_marks(w), arm, routed)
-                    - _arm_hit(s["alt_marks"], arm, routed))
+            if arm.startswith("trace_h"):
+                cap = int(arm[len("trace_h"):])
+                tot += _trace_arm(w, cap, True) - _trace_arm(w, cap, False)
+            else:
+                tot += (_arm_hit(_native_marks(w), arm, routed)
+                        - _arm_hit(s["alt_marks"], arm, routed))
         band[arm] = tot / len(W)
     return band
 
