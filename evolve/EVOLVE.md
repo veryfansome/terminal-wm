@@ -91,3 +91,22 @@ shallow-only lift reads very differently from a flat one), `public.native_wm` ag
 `public.chance` (is the net off chance at all), and `public.wm_health_top1_sameverb` (is it a
 working world model). `private.gate_report` carries the honest capability reading; it is a report,
 never a target.
+
+### Slot count must cover the axes
+`evolve sample` assigns a slot's axis as `sorted(axes)[slot_index % len(axes)]`, and the slot index
+restarts at zero every round. With seven axes, **a round with fewer than seven slots never touches
+the tail of that sorted list at all** — not "less often", never. Sorted order here is:
+
+    arch, batcher, head, objective, optim, stream, target
+
+So `evolve sample --k 4` works arch/batcher/head/objective forever and leaves optim, stream and
+target untouched. Use `--k 7` (or a multiple) when you want the whole surface worked, and if you
+deliberately run a narrower round, say in the round report which axes were not offered a slot —
+silent coverage gaps read as "the search tried everything and nothing helped".
+
+### Why two registry impls are in `inventor_files`
+Ten arch impls import the path-state trunk and eight head impls import the forward-model
+consistency head. A jail only copies the parent's own impl for the axis being mutated plus the
+per-axis baselines, so an inventor mutating a descendant would otherwise be handed source with an
+import it cannot resolve or read. Those two modules are therefore granted to every jail. If a new
+shared base module appears, add it here in the same commit.

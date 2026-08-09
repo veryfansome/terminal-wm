@@ -146,6 +146,17 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
             "core-style, deep enough and role-swappable. A comp_ca over an empty slice is not a "
             "small number, it is no measurement at all.")
 
+    # The exchange must be two-sided on EVERY probed window. A one-sided exchange (partner never
+    # moved) is farmable by any positional heuristic — see the note in cups_probe.alt_chain. The
+    # partner draw now enforces this, so this is a rail against that enforcement regressing, not
+    # a condition we hope holds.
+    if alt["partner_was_mover_frac"] not in (None, 1.0):
+        raise ValueError(
+            f"cups_ca: role-swap partner was a non-mover in "
+            f"{1 - alt['partner_was_mover_frac']:.1%} of probed windows. The exchange-symmetry "
+            f"argument this metric rests on requires BOTH sides of the swap to be movers; a "
+            f"one-sided exchange lets a first/last/deepest-mover heuristic score positive.")
+
     # The two arms must be talking about the same windows. Asserted rather than assumed: at the
     # frozen knobs the only role-swap dropouts are N==2 windows, which W excludes anyway, so this
     # should be vacuous — and if it ever stops being vacuous we need to know immediately.

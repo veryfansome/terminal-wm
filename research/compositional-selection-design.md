@@ -44,6 +44,20 @@ standardization frame fails loudly instead of recording noise.
   attends to move tokens, but under the routed↔partner exchange it mimics a tracker on
   routed-marker windows and anti-mimics on the symmetric partner windows. Drawn exchangeably, its
   expectation is zero.
+
+  **This holds only if the partner is itself a mover, and enforcing that is load-bearing.** The
+  routed content is always a mover, so if the partner is not, the exchange is one-sided: routed's
+  move positions transfer to the partner and nothing comes back. A positional heuristic then flips
+  from routed to the partner under the swap and scores `+1` on that window, and the windows that
+  would cancel it — where the partner is the native marker and the swap hands the marker to routed,
+  scoring `−1` — cannot occur, because a non-mover is never the native marker. The bias is
+  systematic and positive, i.e. exactly farmable by the family this metric exists to exclude.
+
+  The instrument inherited from the predecessor did **not** enforce this: in its recorded reference
+  run the partner was a non-mover in roughly half of all probed windows. That was tolerable while
+  the role-swap was a diagnostic probe; it is not tolerable now that the differential is the
+  selection target. `cups_probe.alt_chain` now draws the partner from movers only, and `cups_ca`
+  refuses to return a number if any probed window had a one-sided exchange.
 - **History-ignorer or memorizer** — native and swap agree, so approximately zero.
 - **Genuine tracker** — native picks the routed content, swap follows the partner. Positive.
 
@@ -90,21 +104,31 @@ the swap arm's requires depth at least two and silently drops windows that had n
 `cups_ca` therefore intersects the two arms' **per-window rows by window id**, asserts the rows
 agree on every window property, and means the differences unrounded.
 
-## 5. What the reference run actually says
+## 5. What the reference run says — and what it does not
 
 Recomputed from the predecessor's recorded pack run (its strongest genome, three seeds, full step
-budget), using the definition above:
+budget):
 
-| seed | n | native pick rate | swap stayed | **comp_ca** |
+| seed | n | native pick rate | swap stayed | comp_ca *(old draw)* |
 |---|---|---|---|---|
-| 0 | 78 | 0.3077 | 0.2949 | **+0.0128** |
-| 1 | 78 | 0.3077 | 0.1923 | **+0.1154** |
-| 2 | 78 | 0.2821 | 0.1923 | **+0.0898** |
+| 0 | 78 | 0.3077 | 0.2949 | +0.0128 |
+| 1 | 78 | 0.3077 | 0.1923 | +0.1154 |
+| 2 | 78 | 0.2821 | 0.1923 | +0.0898 |
 
-mean **+0.073**, seed sd **0.053**. The same net's capability gate reads **−0.198** — a clear
-no-go. That divergence is the design's central claim showing up in data: the gate and the
-differential are different functionals, and a genome can be far below the analytic ceiling in
-absolute terms while still carrying a non-zero tracking differential.
+mean +0.073, seed sd 0.053, against a capability gate reading of −0.198 on the same net.
+
+**These comp_ca values are not valid under the current definition and must not be used as a
+baseline.** They were computed from a run whose role-swap drew a non-mover partner in about half of
+all probed windows (§2), which biases a positional heuristic systematically positive. How much of
+that +0.073 was tracking and how much was the one-sided-exchange artifact is unknown and cannot be
+recovered from the recorded aggregates — the run would have to be repeated under the corrected
+draw. Treat the reference genome's comp_ca as **unmeasured**.
+
+What survives from that run is the *structural* observation, which does not depend on the partner
+draw: the gate and the differential are different functionals, so a genome can sit far below the
+analytic ceiling in absolute terms and still be a candidate for a non-zero tracking differential.
+The seed spread and the slice size below also survive, since they are properties of the window
+population rather than of the metric.
 
 Three consequences worth stating plainly, because they shape what the first rounds can conclude:
 

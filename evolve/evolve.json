@@ -40,7 +40,9 @@
    "inventor_files": [
     "evolve/genome.py",
     "evolve/harness.py",
-    "realenv/seq_worldmodel.py"
+    "realenv/seq_worldmodel.py",
+    "evolve/chunks/arch/r18_pathstate_latent_transition_worldmodel.py",
+    "evolve/chunks/head/r18_transition_forwardmodel_consistency.py"
    ],
    "jail_notes": "Scoring trains one net per seed on a capability-pack data root of real shell trajectories and measures it on windows held out by IMAGE, so a mechanism only earns anything by transferring to systems it never trained on. Training is a fixed step budget on frozen encoder embeddings; a mechanism that cannot finish inside it is not ready, so profile speed as well as correctness. You cannot run the real harness from here — write the impl so it is correct by construction, and state any performance claim as unmeasured rather than extrapolating from a miniature run, because miniature probes in this project have inverted rank in both directions."
   }

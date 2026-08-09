@@ -473,14 +473,29 @@ def alt_chain(net, ctx, target_mod, device, percep_name, seed=20260806, max_wind
         # credit a purely name-keyed model with "follow"); on the diagonal (routed == name)
         # any c' != routed is safe. N==2 off-diagonal windows have no valid partner — skipped
         # and counted (the exposure_swap diagonal-exclusion pattern).
+        # The partner MUST itself be a mover. This is the condition the exchange-symmetry
+        # argument actually needs, and it was not enforced while alt_chain was only a
+        # diagnostic probe (a recorded reference run drew a non-mover partner in roughly half
+        # of all probed windows). It matters now because this differential is the SELECTION
+        # target, and a one-sided exchange is farmable:
+        #   routed is always a mover (the slice requires depth >= 1), so if the partner never
+        #   moved, routed's move positions transfer to it and NOTHING comes back. A positional
+        #   heuristic — first mover, last mover, deepest — then flips from routed to the
+        #   partner under the swap, scoring native_hit = 1 and swap_stayed = 0, i.e. +1. The
+        #   windows that were supposed to cancel it (where the PARTNER is the native marker
+        #   and the swap hands the marker to routed, scoring -1) cannot exist, because a
+        #   non-mover is never the native positional marker.
+        # With both sides movers the exchange is genuinely symmetric and the -1 windows are
+        # exactly as likely as the +1 windows, which is what makes the expectation zero.
         cand2 = [k for k in range(w["N"])
-                 if k != w["routed"] and (k != w["name"] or w["name"] == w["routed"])]
+                 if k != w["routed"] and (k != w["name"] or w["name"] == w["routed"])
+                 and len(pos[k]) > 0]
         if not cand2:
             name_skip += 1
             continue
         rng = _random.Random(seed + i)
         c2 = rng.choice(cand2)
-        partner_mover += int(len(pos[c2]) > 0)
+        partner_mover += int(len(pos[c2]) > 0)          # now 1 by construction; kept as a rail
         sched2 = {}
         for kd in pos[w["routed"]]:
             sched2[kd] = c2
