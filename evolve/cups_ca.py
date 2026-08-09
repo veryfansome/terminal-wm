@@ -192,8 +192,17 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     native = {r["id"]: r for r in cap["rows"]}
     swap = {r["id"]: r for r in alt["rows"]}
 
-    W = [i for i in eligible_ids(cap["rows"], cells) if i in swap]
-    dropped = [i for i in eligible_ids(cap["rows"], cells) if i not in swap]
+    _elig = eligible_ids(cap["rows"], cells)
+    W = [i for i in _elig if i in swap]
+    dropped = [i for i in _elig if i not in swap]
+    # Windows whose only non-routed mover IS the queried name have no legal role-swap partner and
+    # leave the slice. Measured on the real inner slice that is about a fifth of it — sizeable, and
+    # a re-mint could make it most of it, so rail on the fraction rather than on the comment being
+    # right. A slice gutted this way still returns a plausible-looking number.
+    if _elig and len(dropped) / len(_elig) > 0.35:
+        raise ValueError(
+            f"cups_ca: {len(dropped)}/{len(_elig)} eligible windows have no legal role-swap "
+            f"partner. Too much of the slice is gone for the remainder to mean anything.")
     if not W:
         raise ValueError(
             "cups_ca: the eligible slice W is EMPTY — no window is simultaneously earnable, "

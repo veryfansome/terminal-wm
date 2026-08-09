@@ -67,7 +67,7 @@
   "cloud/**"
  ],
  "eval": {
-  "setup": null,
+  "setup": "${TWM_PYTHON:-python3} -m eval.preflight",
   "setup_timeout_s": 1800,
   "gate_timeout_s": 1200,
   "smoke": "${TWM_PYTHON:-python3} -m eval.smoke {genome}",
