@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# Data roots live OUTSIDE this repo and are reached by absolute path through TWM_CUPS_ROOT.
+# Nothing under data/ is tracked — not even the manifests. A half-present clone (manifests
+# tracked, shards gitignored) is worse than an absent one: the integrity stamps resolve and then
+# the loader dies deep inside a paid run. The eval's preflight asserts the shards exist instead.
+data/
+
+# Encoder checkpoints ("eyes") are pulled from the pinned HF repo, never committed.
+enc/
+ckpt/
+
+# The engine owns these. genomes.jsonl is the archive and IS tracked (it is the record); the
+# private per-candidate breakdowns are deliberately not.
+evolve/archive/private/
+evolve/.cache/
+
+# per-candidate scratch from the pack lane
+.results/
+cloud/podresults/
