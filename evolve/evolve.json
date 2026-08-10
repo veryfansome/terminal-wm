@@ -96,7 +96,7 @@
   ]
  },
  "fitness": {
-  "noise_floor": null,
+  "noise_floor": 0.0227,
   "noise_runs": 5,
   "noise_meta": null,
   "selection_env": null,
@@ -124,7 +124,7 @@
  },
  "budget": {
   "max_generations": 40,
-  "max_full_evals": 30,
+  "max_full_evals": 90,
   "stop_after_stale_rounds": 8
  }
 }
