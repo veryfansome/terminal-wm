@@ -21,6 +21,9 @@
 #   pull      <podId>             rsync the pod's cloud/podresults/ down into this repo
 #   terminate <podId>             TERMINATE THE POD — this is what stops billing
 #   status    <podId> | list
+#   reap                          list every pod on the account against the ids this machine
+#                                 recorded at deploy time, so a launch that was interrupted before
+#                                 it could report an id still shows up instead of billing unnoticed
 #   datacenters | volumes | create-volume <name> <gb> <dc>    (network-volume path; unused by
 #                                 default — the box pulls its data roots from HuggingFace)
 #
@@ -199,6 +202,8 @@ _deploy_rest() {
 # wheel at all. allowedCudaVersions only biases placement, so the launch loop below still VERIFIES
 # with nvidia-smi and re-rolls if the field was ignored for that host class.
 ALLOWED_CUDA="${RUNPOD_ALLOWED_CUDA:-12.6,12.7,12.8,12.9,13.0}"
+# Deploy ledger: every pod id this machine has created, appended the moment the API returns it.
+LEDGER="${RUNPOD_LEDGER:-$HOME/.runpod-pods.log}"
 _deploy_rest_novol() {
     local pubkey; pubkey=$(_pubkey | tr -d '\n')
     log "deploying ${GPU_COUNT}x '$GPU_TYPE' ($CLOUD), disk=${DISK_GB}GB, allowedCuda=[$ALLOWED_CUDA]"
@@ -213,6 +218,10 @@ _deploy_rest_novol() {
     r=$(rest POST /pods "$body")
     id=$(echo "$r" | jq -r '.id // empty')
     [ -n "$id" ] || { echo "$r" | jq -r '.error // .message // .' >&2; die "deploy (REST no-volume) failed"; }
+    # Record the id the instant it exists, BEFORE anything else can fail or be interrupted. A
+    # deploy that returns has already created a billing resource; if the caller dies between here
+    # and printing the id, the only trace left is this file. `reap` reads it.
+    mkdir -p "$(dirname "$LEDGER")" && echo "$(date -u +%FT%TZ) $id" >> "$LEDGER"
     echo "$id"
 }
 
@@ -427,6 +436,25 @@ cmd_pull() {
     echo "$dest"
 }
 
+cmd_reap() {
+    # Every pod this account has, against the ids this machine recorded at deploy time. An
+    # interrupted launch is the common way to end up with a running pod nobody is holding: the
+    # deploy call succeeds, the caller dies before reporting, and the box bills quietly. Anything
+    # listed as UNTRACKED or as tracked-but-forgotten is a candidate for termination — this only
+    # ever REPORTS, so deciding what dies stays with a person.
+    local live tracked
+    live=$(gql 'query{ myself{ pods{ id name desiredStatus } } }' \
+           | jq -r '.data.myself.pods[]? | "\(.id) \(.name) \(.desiredStatus)"')
+    tracked=$( [ -f "$LEDGER" ] && awk '{print $2}' "$LEDGER" || true )
+    [ -n "$live" ] || { log "no pods on this account"; return 0; }
+    echo "$live" | while read -r id name st; do
+        if echo "$tracked" | grep -qx "$id"; then echo "  tracked   $id  $name  $st"
+        else echo "  UNTRACKED $id  $name  $st"; fi
+    done
+    echo
+    log "terminate anything you do not recognise:  $0 terminate <podId>"
+}
+
 cmd_terminate() {
     local id="${1:?terminate <podId>}"
     log "terminating $id"
@@ -448,5 +476,6 @@ case "$CMD" in
     push-raw) cmd_push_raw "$@";; campaign) cmd_campaign "$@";;
     pull) cmd_pull "$@";;
     terminate) cmd_terminate "$@";; status) cmd_status "$@";; list) cmd_list "$@";;
+    reap) cmd_reap "$@";;
     *) die "unknown command: $CMD";;
 esac
