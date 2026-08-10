@@ -1,0 +1,33 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "mse",
+   "params": {}
+  },
+  "arch": {
+   "impl": "baseline_transformer",
+   "params": {}
+  },
+  "optim": {
+   "impl": "baseline_adamw",
+   "bs": 64,
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "baseline_uniform",
+   "params": {}
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "head": {
+   "impl": "baseline_passthrough",
+   "params": {}
+  }
+ }
+}

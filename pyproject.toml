@@ -1,0 +1,19 @@
+[project]
+name = "terminal-wm"
+version = "0.1.0"
+description = "A shell world model over real Docker filesystems, evolved against a compositional-depth objective."
+requires-python = ">=3.12"
+dependencies = [
+    # Three direct dependencies. torch runs the sequence world model and all training; transformers
+    # loads the frozen text encoder ("the eye") that turns shell text into embeddings; huggingface_hub
+    # pulls the pinned encoder checkpoint and the data roots, which live outside this repo.
+    # Docker is NOT a dependency: this repo consumes already-minted data roots and never mints.
+    "torch>=2.13",
+    "transformers>=5.14",
+    "huggingface_hub>=0.34",
+]
+
+[tool.uv]
+# An application, not an installable library: code runs as `uv run python -m eval.adapter ...` from
+# the repo root with the packages on sys.path, so uv manages only the dependency environment.
+package = false
