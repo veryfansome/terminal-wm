@@ -228,8 +228,32 @@ def _diagnostics(pred_obs, cands, idxs):
 
 
 @torch.no_grad()
+def assert_slice_matches_table(knobs):
+    """The slice and the band must agree with the cap the ceiling table was built at.
+
+    The eligible slice is defined by that table, and the table's ceilings encode "not solved by a
+    backward trace capped at gauntlet_h hops". Two things therefore have to hold, and neither is
+    checkable from the cells alone: the band must account for traces up to exactly that cap, and the
+    depth floor must sit above it. A re-mint at a deeper cap would otherwise admit windows a listed
+    trace arm solves, which is the one regime where such an arm scores maximally and silently.
+    """
+    if not knobs or "gauntlet_h" not in knobs:
+        return
+    cap = int(knobs["gauntlet_h"])
+    if max(BOUNDED_TRACE_CAPS) != cap:
+        raise ValueError(
+            f"the ceiling table was built with a backward trace capped at {cap} hops, but the "
+            f"analytic band accounts for caps {BOUNDED_TRACE_CAPS}. They must match, or the band "
+            f"stops pricing a strategy the slice admits.")
+    if DEPTH_MIN <= cap:
+        raise ValueError(
+            f"DEPTH_MIN={DEPTH_MIN} is not above the table's trace cap of {cap}: the slice would "
+            f"admit windows that a {cap}-hop trace resolves, and such a window scores +1 for that "
+            f"trace rather than contributing nothing.")
+
+
 def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
-                        seed=20260806, ceiling_table=None, swap_cache=None):
+                        seed=20260806, ceiling_table=None, swap_cache=None, knobs=None):
     """comp_ca for ONE trained net on ONE (root, split). Returns unrounded per-seed values.
 
     The scored scalar is the raw differential. `analytic_band` travels with it as a reference —
@@ -239,6 +263,7 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     `ceiling_table` is passed through to cups_probe purely so its own reported aggregates keep
     their frozen-ceiling columns; comp_ca itself never reads a ceiling value arithmetically.
     """
+    assert_slice_matches_table(knobs)
     cap = CP.measure(net, ctx, target_mod, device, ceiling_table=ceiling_table)
     # swap_cache is the prebuilt role-swap synthesis: net-independent, so a campaign builds it
     # once rather than reloading the encoder per candidate.

@@ -104,7 +104,8 @@ def main(argv):
     root, eye = preflight()                              # raises on environment problems
 
     gen = json.load(open(genome_path))
-    cells = json.load(open(CEILING_TABLE))["cells"]
+    table = json.load(open(CEILING_TABLE))
+    cells, knobs = table["cells"], table.get("knobs") or {}
     device = M.pick_device()
     steps = int(_env("TWM_STEPS") or gen.get("chunks", {}).get("optim", {}).get("steps") or 4000)
 
@@ -181,7 +182,7 @@ def main(argv):
         tm = getattr(net, "target_module", None)
         tmod = copy.deepcopy(tm).cpu() if tm is not None else target_mod
         ca = CA.measure_trained_net(net, ctx, tmod, device, eye, cells,
-                                    ceiling_table=cells, swap_cache=swap_cache)
+                                    ceiling_table=cells, swap_cache=swap_cache, knobs=knobs)
 
         # World-model health on the same net: plain next-observation retrieval against same-verb
         # foils on the pack's own val split. No baseline arms, no content-cell tables — this is a
