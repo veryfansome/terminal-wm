@@ -103,22 +103,18 @@ REPORT_NATIVE_WM_OVER_CHANCE = 0.10
 # partner to movers shrinks that but does not remove it, because the routed content is not
 # uniformly distributed over the movers.
 #
-# The band is REPORTED, never subtracted. Subtracting it was tried and is wrong: at this slice size
-# the in-sample maximum is max-of-NOISE over about three effective directions. Re-measured on the
-# train split, which is five times larger and equally valid here because every arm is a pure
-# function of the command strings, h_first falls from about +0.13 to +0.01 while only `deepest`
-# survives as genuinely nonzero. Subtracting the in-sample max therefore removes roughly four times
-# the real effect, via an arm whose true value is near zero.
-#
-# Nor is the population value a substitute: a committed lookup fitted without ever touching the
-# scored split still beats the band by about +0.11 on the held-out split. A fixed shortcut's
-# REALIZED value on a slice this size swings by about +/-0.12, so the in-sample max is biased up,
-# the population value under-covers, and neither is a bound. No point estimate can carry the
-# meaning "zero means no better than a shortcut", so the metric does not pretend to.
-#
-# What the band is good for is INTERPRETATION, and it is free: every arm is genome-independent, so
-# the whole band is a per-split constant that cannot reorder any candidate. It is emitted next to
-# every score as the reference a reader needs.
+# The band is REPORTED beside the score, never folded into it. No point estimate of it bounds what
+# a shortcut can earn, in either direction:
+#   - On one split the largest arm is an extreme value over a few noisy directions. Measured on the
+#     training split, which carries five times as many windows and is equally valid because the arms
+#     never touch the model, h_first reads about +0.01 against about +0.17 on the scored split,
+#     while only `deepest` holds steady across splits. Subtracting a per-split maximum would remove
+#     several times the only stable effect, through an arm whose value is near zero.
+#   - Nor is the larger-sample value a substitute: a committed lookup keyed on the OBSERVABLE cell,
+#     fitted without ever touching a scored split, realizes more on a held-out slice than the band
+#     prices it at.
+# So the band exists for INTERPRETATION, and it is free: every arm is genome-independent, making the
+# whole band a per-split constant that cannot reorder any candidate.
 #
 # WHICH ARMS HAVE TO BE IN THE BAND, AND WHY THE OTHERS DO NOT.
 # The role swap re-encodes ONLY the mv command strings and splices them at the mv positions. It
@@ -310,7 +306,7 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
 
     idxs = [swap[i]["i"] for i in W]
     # Both arms, not just the native one: comp_ca is a DIFFERENCE, so a collapsed role-swap bank
-    # corrupts it exactly as badly as a collapsed native bank, and it was previously unchecked.
+    # corrupts it exactly as badly as a collapsed native bank.
     diag = _diagnostics(cap["pred_obs"], ctx["cands"], idxs)
     diag_swap = _diagnostics(alt["pred_obs"], ctx["cands"], idxs)
     for nm, pb in (("native", cap["pred_obs"]), ("swap", alt["pred_obs"])):

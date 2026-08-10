@@ -67,7 +67,7 @@ predictions value-identical to the plain r18 arch (measured max|Δ| = 0.0) — �
 one-for-one. PAD-value invariance exactly 0.0 (measured). (a)-path co-report unchanged
 (`_memory_spre` calls `_transition_reads` without the stash ⇒ exact C8 behavior).
 
-Refs: forward-model consistency at matched train/compose distributions (the R20 §6
+Refs: forward-model consistency at matched train/compose distributions (the R20
 mismatch, repaired at its cause); Dyna — imagined transitions update the same state
 structures as real experience (Sutton 1991, SIGART 2(4)); Kalman fusion of independent
 priors / innovation gain under evidence; MBPO trust-region model use (arXiv:1906.08253);

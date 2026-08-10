@@ -4,7 +4,7 @@ provenance is the env var + the derived root's perception stamp, NOT this docstr
 root requires is the cwd-OUT-native `e5-nocwd` checkpoint (HF `veryfansome/terminal-jepa-encoders`,
 subfolder `e5-nocwd`).
 
-FAIL-CLOSED, NO DEFAULT: this module used to fall back to `/root/enc/e5-ft`, which is the
+FAIL-CLOSED, NO DEFAULT. A fallback to `/root/enc/e5-ft` would be wrong here: that is the
 cwd-IN-tuned eye — the WRONG eye for a cwd-OUT render. That substitution is silent and corrupts
 every encoded frame, so an unset TJ_FT_ENCODER now raises at import instead."""
 import os

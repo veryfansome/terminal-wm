@@ -121,13 +121,13 @@ def encode_split(path, model, tok, device, bs=96):
 
 
 def _v3_cache_guard(data_root):
-    """Universal fail-closed staleness guard (dockerfs3 §13.2). Fires ONLY when a cache_meta.json
+    """Universal fail-closed staleness guard. Fires ONLY when a cache_meta.json
     sits beside the root — which is true for v3 derived roots and NOTHING else, so v1/v2 roots are
     byte-untouched. Self-contained (no evolve import; realenv stays evolve-free): requires
     cache_format==3 and that the root's current summary.json still hashes to the built_summary_sha
     recorded at encode time. A re-mint into an occupied path rewrites summary.json -> the emb-seq
     caches are stale -> this RAISES, so every caller (harness AND the direct realenv/sanity
-    callers) is protected, making §13.2's 'impossible by construction' invariant actually hold."""
+    callers) is protected, making the 'impossible by construction' invariant actually hold."""
     import hashlib
     cm_path = pathlib.Path(data_root) / "cache_meta.json"
     if not cm_path.exists():
@@ -380,7 +380,7 @@ def _rank_stats(pred, true, foil_idx, blk=1024):
 
 
 def _inject_forced(f_h, forced):
-    """Replace the FIRST m same-verb foil slots with pre-registered forced foils (§8.1 UD-4(b)
+    """Replace the FIRST m same-verb foil slots with pre-registered forced foils (UD-4(b)
     counterfactual injection). `forced` [N,m] holds indices INTO `true` (same index space as f_h);
     −1 = no forced foil for that slot (keep the sampled foil). Only the same-verb arm is injected;
     the random arm stays pure. Returns a fresh tensor — `f_h` is untouched."""
@@ -403,7 +403,7 @@ def retrieval(pred, true, verbs, n_foils=63, rounds=4, seed=0, forced_foils=None
     tensor (values index into `true`; −1 = none). When given, the surviving forced indices REPLACE
     the first m of the n_foils SAMPLED same-verb foils in EVERY round, before _rank_stats (which is
     unchanged). The random-foil arm is never injected. Indices must already be in `true`'s space —
-    content_retrieval owns the full→subset seam translation (§8.1)."""
+    content_retrieval owns the full→subset seam translation."""
     N = true.shape[0]
     gen = torch.Generator().manual_seed(seed)
     t1s = mrrs = t1r = mrrr = 0.0
@@ -446,7 +446,7 @@ def content_retrieval(pred, true, verbs, content=("ls", "cat"), seed=0, forced_f
     content subset.
 
     forced_foils (default None = the exact historical path, byte-identical): an [N,m] index tensor
-    of counterfactual foils in FULL-array step positions. content_retrieval owns the §8.1 SUBSET-SEAM
+    of counterfactual foils in FULL-array step positions. content_retrieval owns the SUBSET-SEAM
     TRANSLATION: (a) row-subset forced_foils to the content rows `ii`; (b) remap each forced VALUE
     from full-array position to CONTENT-SUBSET position; (c) DROP any forced target outside the
     content subset (its embedding is absent from the subset `true`), counting it in `cf_dropped`

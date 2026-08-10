@@ -1,21 +1,21 @@
-"""cups_probe — the cups-pack instrument (research/cups-pack-design.md v2 §2–§3).
+"""cups_probe — the cups-pack instrument (see research/compositional-selection-design.md).
 
-Scoring is an N-way FORCED-FOIL classification (the v2 review's foil-pool critical): the model's
+Scoring is an N-way FORCED-FOIL classification: the model's
 prediction at the test-read position is scored by nearest-neighbor among the window's OWN N
 exposure-obs embeddings — chance = 1/N by construction, identical for the WM and every arm.
 
-Arms (all computed, no training — the §3 ceiling, pinned by the 2026-08-06 review):
-  at_name      — predict exposure[name_idx] (C1's success mode; chance 1/N in treatment by the
-                 stem⊥chain construction — the transpose oracle)
+Arms (all computed, no training — the analytic ceiling):
+  at_name      — predict exposure[name_idx]; chance 1/N in treatment, by the stem-perpendicular
+                 chain construction
   copy_prev    — nearest exposure to the previous obs embedding
   h1 / gauntlet_H / h_last / h_first — the analytic heuristic gauntlet: a backward trace of the
                  test path through the recorded mv (src,dst) pairs capped at k hops solves
-                 exactly the depth<=k windows (verified realizable, review round 1), so
+                 exactly the depth<=k windows (verified realizable), so
                  h_k = truth if depth<=k else the at_name fallback; h_last = the exposure whose
                  slot is the LAST slot-src mentioned across the mv commands; h_first = the
-                 exposure whose slot is the FIRST mv's src (the depth-0 positional marker the
-                 review's critical finding measured at ~0.90 on deep windows pre-decorrelation).
-  elim         — the elimination oracle (§3, definition pinned 2026-08-06): eliminate exposures
+                 exposure whose slot is the FIRST mv's src — a depth-0 positional marker, and the
+                 strongest of them on this data.
+  elim         — the elimination oracle: eliminate exposures
                  that never moved (their first-move srcs are textually recognizable slot paths),
                  then guess uniformly over the movers — fractional per-window value 1/|movers|.
   centroid     — nearest exposure to the mean of the window's N exposure embeddings (the
@@ -27,8 +27,8 @@ Probes:
                   strings synthesized in the window's own path vocabulary, encoded at probe time via
                   the perception impl): a tracker's prediction follows the alternative routed answer
                   (operator attribution). Requires --encoder support in the caller.
-Stratified reporting: per (N, depth) cells + pooled marginals; the gate slices are assembled by the
-caller per the frozen prereg. Never selection.
+Stratified reporting: per (N, depth) cells + pooled marginals; the caller assembles the slices it
+wants. The absolute gate quantities computed here are measurements, never selection targets.
 """
 import json
 import pathlib
@@ -41,11 +41,11 @@ from evolve.splits import split_val
 from realenv import seq_worldmodel as M
 
 D = M.D
-SWITCH_MIN = 5      # min windows for an (N,depth) cell to switch independently (§6 open number)
+SWITCH_MIN = 5      # min windows for an (N,depth) cell to switch independently (an open number)
 
 
 def harvest_cups_windows(seqs):
-    """Windows from encoded seqs (IW.load_windows attaches raw steps): one per cups_test step,
+    """Windows from encoded seqs (_load_standardized_seqs attaches the raw steps): one per cups_test step,
     carrying the exposure slots' step indices (by cups_slot), the mv step indices + parsed
     src/dst, the ctx steps, and the stamped metadata."""
     wins = []
@@ -73,7 +73,7 @@ def harvest_cups_windows(seqs):
             # slot paths in slot-index order (from the exposure commands), then a TEXTUAL
             # chain replay — the one authority for the positional-marker fields the ceiling
             # arms need (h_first / h_last / h_lastmv / elim / deepest) AND the stamp-equality
-            # asserts the design promises (review round 2: stamps were taken on faith).
+            # stamp-equality asserts: the stamps are checked here rather than trusted.
             slots = [steps[expose[k]]["cmd"].split()[1] for k in range(n)]
             slot_of = {p: k for k, p in enumerate(slots)}
             loc = {k: slots[k] for k in range(n)}
@@ -192,11 +192,11 @@ def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None):
                for k in ("wm",) + ARMS + ("chance",)}
         out["n"] = len(rs)
         out["arm_max"] = round(max(out[a] for a in ARMS), 4)
-        # the SWITCHING ceiling (review round 2: max-of-means is not sound — an adversary may
+        # the SWITCHING ceiling. max-of-means is not sound — an adversary may
         # pick a different arm per window from OBSERVABLE features): partition the slice by
         # the observable (N, depth) cell, take the best arm-mean per cell, mass-weight.
         # Cells below SWITCH_MIN windows pool into their per-N marginal (then a remainder
-        # group) before switching — review round 3: a singleton cell's best-mean IS the
+        # group) before switching, because a singleton cell's best-mean IS the
         # per-row oracle max, the over-strong ceiling round 2 prohibited. Dominates arm_max
         # by construction; this is the gate-bearing ceiling.
         cells, smalls, groups = {}, {}, []
@@ -214,7 +214,7 @@ def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None):
         sw = sum(len(g) * max(sum(r_[a] for r_ in g) / len(g) for a in ARMS)
                  for g in groups) / len(rs)
         out["switch_max"] = round(sw, 4)
-        # CROSS-FIT switching ceiling (freeze review 2026-08-07, critical C1): the in-sample
+        # CROSS-FIT switching ceiling: the in-sample
         # per-group best-mean is max-of-means UPWARD-biased (~+0.035 at n=142), silently
         # eating the gate band. Split each group in half by a seeded shuffle; choose the arm
         # on one half, EVALUATE it on the other, both directions, eval-mass-weighted —
@@ -239,7 +239,7 @@ def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None):
                 best = max(ARMS, key=lambda a: sum(r_[a] for r_ in pick_h) / len(pick_h))
                 xf_num += sum(r_[best] for r_ in eval_h)
         out["switch_max_xfit"] = round(xf_num / len(rs), 4)
-        # the FROZEN-TABLE ceiling (freeze review C1/F1, final form): an exact analytic
+        # the FROZEN-TABLE ceiling: an exact analytic
         # per-(N,depth)-cell population ceiling computed offline from the planner at the
         # frozen knobs (benchmarks/cupsA_ceiling_table.json) applied to the REALIZED cell
         # masses — the gate margin then carries wm sampling noise ONLY (no in-sample
@@ -271,16 +271,15 @@ def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None):
             # never serialize it.
             "pred_obs": pred_obs,
             "pooled": agg(lambda r: True),
-            # the §3 pre-designated PRIMARY slice, verbatim: N in {4,5}, relay depth >= 2
-            # (round 1: the depth>gauntlet_h narrowing was a prereg mismatch; round 2: the
-            # explicit N-set replaces the open-ended >=4, and the gate ceiling is switch_max,
+            # the pre-designated PRIMARY slice: N in {4,5}, relay depth >= 2
+            # (an explicit N-set rather than an open-ended >=4, and the gate ceiling is switch_max,
             # under which h_H saturates the depth<=H CELLS — the primary margin is genuinely
             # earnable only where the analytic family runs out).
             "deep": agg(lambda r: r["N"] in (4, 5) and r["depth"] >= 2),
-            # the earnable-stratum aggregate the §6-F gate references (freeze review C4: the
+            # the earnable-stratum aggregate the capability gate references (the
             # instrument previously had no pooled N-in-{4,5} d>=3 slice)
             "d3plus": agg(lambda r: r["N"] in (4, 5) and r["depth"] >= 3),
-            # the EARNABLE slice (freeze review, final gate design): the table cells where a
+            # the EARNABLE slice: the table cells where a
             # non-tracking strategy is NOT saturated (ceiling < 0.99 — knob-robust rule);
             # saturated cells contribute only dilution to a margin. Gate-bearing = the CORE
             # style earnable slice with the frozen-table margin. None when no table given.
@@ -296,8 +295,8 @@ def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None):
                                and r["style"] == "core"),
             # style split (census freeze): the GATE-BEARING slice is deep_style_core — the
             # model trains on core-style boards only, so held-out-style windows measure style
-            # TRANSFER, reported separately (freeze review F4: mixing them into the gate
-            # conflated tracking with style generalization)
+            # TRANSFER, reported separately — mixing them into the gate
+            # would conflate tracking with style generalization
             "deep_style_core": agg(lambda r: r["N"] in (4, 5) and r["depth"] >= 2
                                    and r["style"] == "core"),
             "deep_style_heldout": agg(lambda r: r["N"] in (4, 5) and r["depth"] >= 2
@@ -343,7 +342,7 @@ def exposure_swap(net, ctx, target_mod, device, seed=20260806, ceiling_table=Non
             diag += 1
             continue
         own, don = ctx["cands"][i], ctx["cands"][donors[i]]
-        # FULL-DONOR bank (binding-round V4-1, dated §2 amendment): the 2x2 bank FORCED an
+        # FULL-DONOR bank: the 2x2 bank FORCED an
         # arm-mimic's wrong-slot predictions onto some bank entry, spilling ~0.1-0.25 of its
         # mass onto don[routed] and falsifying the probe null. With EVERY donor exposure in
         # the bank, a wrong-slot mimic prediction lands on its OWN donor entry (counted as
@@ -374,7 +373,7 @@ def exposure_swap(net, ctx, target_mod, device, seed=20260806, ceiling_table=Non
                 "donor_other": round(c["don_o"] / m, 4) if m else None}
     out = _rep(cnt)
     out["n_diagonal_skipped"] = diag
-    # freeze reviews C5/F4 + re-verification R2-1: pooled depths are 2-hop-clearable and the
+    # pooled depths are 2-hop-clearable and the
     # deep_core slice is still ~43% depth<=2 — the GATE reads the core EARNABLE slice (where
     # the resolver contributes 0 and the analytic arm family caps at ~0.52); deep_core and
     # pooled stay reported.
@@ -480,7 +479,7 @@ def build_swap_cache(ctx, percep_name, device, seed=20260806, max_windows=None):
             pos[c].append(kd)
         assert loc[w["routed"]] == tloc, f"chain replay mismatch on {w['id']}"
         # role-swap: partner c' != routed takes routed's positions (and vice versa).
-        # c' also != name_idx (review round 2: routing the NAME-keyed content to tloc would
+        # c' also != name_idx: routing the NAME-keyed content to tloc would
         # credit a purely name-keyed model with "follow"); on the diagonal (routed == name)
         # any c' != routed is safe. N==2 off-diagonal windows have no valid partner — skipped
         # and counted (the exposure_swap diagonal-exclusion pattern).
@@ -586,9 +585,9 @@ def alt_chain(net, ctx, target_mod, device, percep_name=None, seed=20260806, max
              "follow": int(picks[i] == r2),
              "alt_marks": alt_marks[i]}
             for i, r2 in sorted(alts.items())]
-    # deep = the §3 PRIMARY slice (N in {4,5}, depth >= 2); alt-depth == stamped depth by the
+    # deep = the PRIMARY slice (N in {4,5}, depth >= 2); alt-depth == stamped depth by the
     # role-swap construction, so this slice's alternatives are genuinely deep. The GATE reads
-    # the core-style deep slice (freeze review C5/F4); both are reported.
+    # the core-style deep slice; both are reported.
     deep = [i for i in alts if wins[i]["N"] in (4, 5) and wins[i]["depth"] >= 2]
     deep_core = [i for i in deep if wins[i]["style"] == "core"]
     earn_core = [i for i in deep_core if ceiling_table is not None and ceiling_table.get(
@@ -661,7 +660,7 @@ def load_cups_context(data, split, model, device=None, stats_data=None):
     ctx["seqs"] = seqs
     ctx["data_root"] = data          # for alt_chain's perception-stamp guard
     # the cmd standardization frame (for probe-time alt-chain encodes): recompute exactly as
-    # IW.load_windows did — the stats root's raw train cache
+    # the loader above does — the stats root's raw train cache
     stats_train = H._cached_encode(stats_data or data, "train", model, device)
     _mo, _so, mc, sc = M.standardize_stats(stats_train)
     ctx["cmd_stats"] = (mc, sc)

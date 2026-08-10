@@ -7,7 +7,7 @@ Also owns the two seams the training path needs on the way in:
   - `_cached_encode`: the fail-closed encode gate (bench_versions + cache_meta.json + the
     embedding cache itself must all be present; a missing cache RAISES rather than silently
     re-encoding the root with a possibly-wrong encoder).
-  - `_strip_target_only`: the §8.2 strip seam that hides target-only aux keys from genome code.
+  - `_strip_target_only`: the strip seam that hides target-only aux keys from genome code.
 """
 
 import pathlib
@@ -22,7 +22,7 @@ D = M.D
 
 
 def _cached_encode(data_root, split, model, device):
-    """Harness-owned wrapper around M.cached_encode (§13.2 layering: the fail-closed gate consults
+    """Harness-owned wrapper around M.cached_encode (layering: the fail-closed gate consults
     evolve-side concepts — bench_versions + cache_meta.json — so realenv stays evolve-free). On a
     v3-policy root it REQUIRES the root-level cache_meta.json + perception stamp to match
     expectations and RAISES otherwise (a stamp-less/stale v3 cache can never be scored); v1/v2 roots
@@ -44,7 +44,7 @@ def _cached_encode(data_root, split, model, device):
 
 
 def _strip_target_only(seqs):
-    """§8.2 strip seam. The two places genome stream code receives seq dicts (stream.collate,
+    """The strip seam. The two places genome stream code receives seq dicts (stream.collate,
     stream.flatten_predictions) and the batcher's fit all receive a per-sequence shallow COPY with
     the target-only keys (exit_cls, z_delta) REMOVED — so the v3 aux channels are structurally
     invisible to genome code. Identity pass-through (returns the SAME list) when no seq carries
@@ -78,7 +78,7 @@ def _train(genome, fit, device, loss_fn, seed, steps, target_mod, stream, head=N
     net = net.to(device)
     make_opt, bs = G.load_optim(genome)
     opt, sched = make_opt(net.parameters(), steps)
-    # §8.2 strip seam: the batcher and stream.collate only ever see the stripped fit (target-only
+    # strip seam: the batcher and stream.collate only ever see the stripped fit (target-only
     # keys removed). Identity pass-through for v1/v2 (no such keys) -> bit-identical.
     fit_stripped = _strip_target_only(fit)
     aux_live = fit_stripped is not fit   # v3 aux channels present -> plumbing active (but dormant)
@@ -96,7 +96,7 @@ def _train(genome, fit, device, loss_fn, seed, steps, target_mod, stream, head=N
             raise ValueError("batcher contract violation (len/bounds)")
         b = stream.collate([fit_stripped[i] for i in idx], device)
         if aux_live:
-            # DORMANT v3.1 aux-target plumbing (§8.2): the harness-held ORIGINAL (unstripped) seq
+            # DORMANT aux-target plumbing: the harness-held ORIGINAL (unstripped) seq
             # dicts for this batch, indexed by the batcher's indices — the attach point for
             # multi-channel aux targets (exit_cls/z_delta). No sanctioned consumer in v3.0.
             _aux_originals = [fit[i] for i in idx]  # noqa: F841

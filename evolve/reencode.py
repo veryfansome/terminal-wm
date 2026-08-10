@@ -31,7 +31,7 @@ def load_perception(name):
 
 
 def _content_sha(mod):
-    """sha256 of a perception impl's source file (the perception stamp's content_sha, §13.1)."""
+    """sha256 of a perception impl's source file (the perception stamp's content_sha)."""
     return hashlib.sha256(pathlib.Path(mod.__file__).read_bytes()).hexdigest()
 
 
@@ -57,7 +57,7 @@ def _checkpoint_tree_sha(model_name):
 
 def _write_cache_meta(src, out):
     """Root-level cache_meta.json {cache_format:3, bench_version, policy_sha, classes_sha,
-    built_summary_sha} — the fail-closed format guard (§13.1/§13.2). Written ONLY when the SRC
+    built_summary_sha} — the fail-closed format guard. Written ONLY when the SRC
     root is v3-policy; v1/v2 rebuilds write no cache_meta.json, so their byte behavior (and
     scoring) is unchanged. `built_summary_sha` is the sha256 of the OUT summary.json at build
     time — the universal staleness key that seq_worldmodel.cached_encode re-checks so EVERY
@@ -75,7 +75,7 @@ def _write_cache_meta(src, out):
 
 def load_perception_for_root(root):
     """Resolve the perception impl a DERIVED root was built with, from its summary.json perception
-    stamp {perception:{impl,model,content_sha}} (§10.3/§13.1) — used to render/encode the SST &
+    stamp {perception:{impl,model,content_sha}} — used to render/encode the SST &
     within_traj_mut predicted texts in the root's OWN embedding space. Fail-closed on a v3-policy
     root that lacks the stamp (its SST/wtm precompute could not otherwise be render-parity-correct).
     Back-compat: a stamp-less v1/v2 root (e.g. the pre-stamp data/dockerfs-e5) falls back to the
@@ -88,7 +88,7 @@ def load_perception_for_root(root):
         return load_perception(stamp["impl"])
     if BV.is_v3_policy(root):
         raise ValueError(f"{root}: v3-policy root without a perception stamp — cannot resolve the "
-                         f"root's render/pool recipe for SST/wtm precompute (fail-closed, §10.3)")
+                         f"root's render/pool recipe for SST/wtm precompute (fail-closed)")
     # stamp-less v1/v2 root: the historical default recipe (all pre-stamp e5 roots used it)
     return load_perception("enc_e5_base")
 
@@ -194,7 +194,7 @@ def main(argv=None):
 
     # bench-version identity MUST travel with derived roots (review-B2 blocker: a missing summary
     # silently resolves as v1 and disengages v2 classes). Copy the src summary and ADD the
-    # perception stamp (harmless/additive on v1/v2; the SST/wtm resolver reads it, §10.3). The
+    # perception stamp (harmless/additive on v1/v2; the SST/wtm resolver reads it). The
     # cache_format-3 guard is written ONLY for v3-policy src roots (v1/v2 byte behavior unchanged).
     _s = pathlib.Path(args.src) / "summary.json"
     summ = json.loads(_s.read_text()) if _s.exists() else {}

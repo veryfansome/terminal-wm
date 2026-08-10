@@ -31,7 +31,7 @@ def is_v3_policy(data_root):
 
 
 def require_v3_cache(data_root):
-    """Fail-closed staleness gate for a v3-policy root (§13.2): the root-level cache_meta.json must
+    """Fail-closed staleness gate for a v3-policy root: the root-level cache_meta.json must
     exist and carry {cache_format: 3, bench_version, policy_sha, classes_sha} consistent with the
     root's summary.json, AND summary.json must carry the perception stamp {perception:{impl,model,
     content_sha}}. Any absence/mismatch RAISES — a v3 root scored against a v2-era or partial cache
@@ -39,16 +39,16 @@ def require_v3_cache(data_root):
     root = pathlib.Path(data_root)
     summ = root / "summary.json"
     if not summ.exists():
-        raise ValueError(f"{data_root}: v3-policy root with no summary.json (fail-closed, §13.2)")
+        raise ValueError(f"{data_root}: v3-policy root with no summary.json (fail-closed)")
     js = json.loads(summ.read_text())
     cm_path = root / "cache_meta.json"
     if not cm_path.exists():
         raise ValueError(f"{data_root}: v3-policy root missing cache_meta.json — refusing to load a "
-                         f"stamp-less v3 cache (fail-closed, §13.2)")
+                         f"stamp-less v3 cache (fail-closed)")
     cm = json.loads(cm_path.read_text())
     if cm.get("cache_format") != 3:
         raise ValueError(f"{data_root}: cache_meta.json cache_format={cm.get('cache_format')!r} != 3 "
-                         f"(fail-closed, §13.1)")
+                         f"(fail-closed)")
     for fld in ("bench_version", "policy_sha", "classes_sha"):
         cv, jv = cm.get(fld), js.get(fld)
         # B1: reject FALSY stamps, not only mismatched — a pre-B1 root (or a hand-edited cache)
@@ -56,11 +56,11 @@ def require_v3_cache(data_root):
         # exactly the gap that let an unstamped v3 root reach scoring. A v3 root MUST pin all three.
         if not cv or not jv:
             raise ValueError(f"{data_root}: v3 {fld} is empty (cache_meta={cv!r}, summary={jv!r}) "
-                             f"— a v3 root MUST carry a non-empty {fld} (fail-closed, §13.2)")
+                             f"— a v3 root MUST carry a non-empty {fld} (fail-closed)")
         if cv != jv:
             raise ValueError(f"{data_root}: cache_meta.json {fld}={cv!r} != summary.json "
-                             f"{jv!r} — stale/mismatched v3 cache (fail-closed, §13.2)")
+                             f"{jv!r} — stale/mismatched v3 cache (fail-closed)")
     if not ((js.get("perception") or {}).get("content_sha")):
         raise ValueError(f"{data_root}: v3-policy root lacking the perception stamp "
-                         f"{{perception:{{impl,model,content_sha}}}} (fail-closed, §10.3/§13.1)")
+                         f"{{perception:{{impl,model,content_sha}}}} (fail-closed)")
     return cm

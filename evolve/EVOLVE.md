@@ -44,8 +44,7 @@ The search scores, selects parents, and breeds; every round's output is N scored
 ## Project specifics (terminal-wm)
 
 ### Before anything scores
-The eval needs three things that are NOT in this repo and cannot be, because the engine scores in a
-git-less export of HEAD and injects no environment:
+The eval needs three things that are NOT in this repo and cannot be, because the engine scores in a git-less export of HEAD and injects no environment:
 
 | env var | what it points at |
 |---|---|
@@ -53,69 +52,31 @@ git-less export of HEAD and injects no environment:
 | `TJ_FT_ENCODER` | absolute path to the pinned encoder checkpoint. There is deliberately no default — the old one was the wrong eye, and substituting it corrupts every embedding silently |
 | `TWM_PYTHON` | absolute interpreter with torch. The clone is a bare export; do not build a venv per candidate |
 
-Optional: `TWM_EYE_TREE_SHA` to assert the encoder's identity at preflight, `TWM_STEPS` to shorten
-training for a wiring test only.
+Optional: `TWM_EYE_TREE_SHA` to assert the encoder's identity at preflight, `TWM_STEPS` to shorten training for a wiring test only.
 
-`eval/adapter.py::preflight` checks all of this **before** any candidate code runs and raises, so an
-environment problem surfaces as a broken run instead of being recorded as some candidate's null.
+`eval/adapter.py::preflight` checks all of this **before** any candidate code runs and raises, so an environment problem surfaces as a broken run instead of being recorded as some candidate's null.
 
 ### The tiers
-`proxy` is one seed, `full` is three — both at the **same step count**. The tier never shortens
-training. A step-reduced proxy has been measured to invert the ranking of exactly the
-slow-converging memory and architecture mechanisms this objective is about, and the deepest one
-timed out at proxy. `eval/adapter.py` ignores `{mode}` when choosing the step budget so
-this cannot drift back in.
+`proxy` is one seed, `full` is three — both at the **same step count**. The tier never shortens training. A step-reduced proxy has been measured to invert the ranking of exactly the slow-converging memory and architecture mechanisms this objective is about, and the deepest one timed out at proxy. `eval/adapter.py` ignores `{mode}` when choosing the step budget so this cannot drift back in.
 
 ### The noise floor is deliberately unset
-Do **not** fix it with `evolve doctor --measure-noise`. Given a genome and a seed this eval is
-essentially deterministic, so repeated runs measure reproducibility, not uncertainty — the floor
-would come back near zero and license treating noise as signal. The real uncertainty is
-seed-to-seed: on the reference genome the per-seed spread is the same order as the value itself, on
-a slice of fewer than a hundred windows. Derive the floor from the spread of three-seed means over
-*disjoint* seed triples, then hand-write it into `fitness.noise_floor` with `noise_meta` left null
-(the engine then refuses to clobber it and will not nag).
+Do **not** fix it with `evolve doctor --measure-noise`. Given a genome and a seed this eval is essentially deterministic, so repeated runs measure reproducibility, not uncertainty — the floor would come back near zero and license treating noise as signal. The real uncertainty is seed-to-seed: on the reference genome the per-seed spread is the same order as the value itself, on a slice of fewer than a hundred windows. Derive the floor from the spread of three-seed means over *disjoint* seed triples, then hand-write it into `fitness.noise_floor` with `noise_meta` left null (the engine then refuses to clobber it and will not nag).
 
 ### Recombination is the point
-On the next-observation margin these mechanisms were previously ranked by, the whole visible band
-across the top performers was narrower than the same-genome re-run spread — rank carried almost no
-information, mechanism family did. The starting population in `evolve/genomes/` is therefore chosen
-for family coverage rather than for inherited rank, and it deliberately includes families that
-ranking never rewarded — in particular a content-conditioned transition operator, where the widely
-used alternative conditions on the command only and therefore provably cannot express a
-content-dependent composition. `search.op_probs` weights `cross` above the plugin default for the
-same reason.
+On a next-observation margin, the whole visible band across the top performers of this mechanism set is narrower than the same-genome re-run spread — rank carries almost no information there, mechanism family does. The starting population in `evolve/genomes/` is therefore chosen for family coverage rather than for inherited rank, and it deliberately includes families that ranking never rewarded — in particular a content-conditioned transition operator, where the widely used alternative conditions on the command only and therefore provably cannot express a content-dependent composition. `search.op_probs` weights `cross` above the plugin default for the same reason.
 
 ### Reading a result
-`combined_score` is `comp_ca`. Also look at `public.per_depth` (where the signal lives — a
-shallow-only lift reads very differently from a flat one), `public.native_wm` against
-`public.chance` (is the net off chance at all), and `public.wm_health_top1_sameverb` (is it a
-working world model). `private.gate_report` carries the honest capability reading; it is a report,
-never a target.
+`combined_score` is `comp_ca`. Also look at `public.per_depth` (where the signal lives — a shallow-only lift reads very differently from a flat one), `public.native_wm` against `public.chance` (is the net off chance at all), and `public.wm_health_top1_sameverb` (is it a working world model). `private.gate_report` carries the honest capability reading; it is a report, never a target.
 
 ### Slot count must cover the axes
-`evolve sample` assigns a slot's axis as `sorted(axes)[slot_index % len(axes)]`, and the slot index
-restarts at zero every round. With seven axes, **a round with fewer than seven slots never touches
-the tail of that sorted list at all** — not "less often", never. Sorted order here is:
+`evolve sample` assigns a slot's axis as `sorted(axes)[slot_index % len(axes)]`, and the slot index restarts at zero every round. With seven axes, **a round with fewer than seven slots never touches the tail of that sorted list at all** — not "less often", never. Sorted order here is:
 
-    arch, batcher, head, objective, optim, stream, target
+arch, batcher, head, objective, optim, stream, target
 
-So `evolve sample --k 4` works arch/batcher/head/objective forever and leaves optim, stream and
-target untouched. Use `--k 7` (or a multiple) when you want the whole surface worked, and if you
-deliberately run a narrower round, say in the round report which axes were not offered a slot —
-silent coverage gaps read as "the search tried everything and nothing helped".
+So `evolve sample --k 4` works arch/batcher/head/objective forever and leaves optim, stream and target untouched. Use `--k 7` (or a multiple) when you want the whole surface worked, and if you deliberately run a narrower round, say in the round report which axes were not offered a slot — silent coverage gaps read as "the search tried everything and nothing helped".
 
 ### Why two registry impls are in `inventor_files`
-Ten arch impls import the path-state trunk and eight head impls import the forward-model
-consistency head. A jail only copies the parent's own impl for the axis being mutated plus the
-per-axis baselines, so an inventor mutating a descendant would otherwise be handed source with an
-import it cannot resolve or read. Those two modules are therefore granted to every jail. If a new
-shared base module appears, add it here in the same commit.
+Ten arch impls import the path-state trunk and eight head impls import the forward-model consistency head. A jail only copies the parent's own impl for the axis being mutated plus the per-axis baselines, so an inventor mutating a descendant would otherwise be handed source with an import it cannot resolve or read. Those two modules are therefore granted to every jail. If a new shared base module appears, add it here in the same commit.
 
 ### Reading a score
-`combined_score` is `comp_ca`, the raw paired differential. `public.analytic_band` prints what each
-analytic non-tracker scores on the same windows and `public.best_analytic_arm` names the largest.
-Read the score AGAINST that band — it is deliberately not subtracted, because at this slice size the
-in-sample maximum is mostly noise (on the five-times-larger train split the leading arm collapses by
-an order of magnitude) while a committed lookup can still beat it, so no single number bounds a
-shortcut. If the band shifts between runs, the slice or the mint changed and nothing is comparable
-across the change.
+`combined_score` is `comp_ca`, the raw paired differential. `public.analytic_band` prints what each analytic non-tracker scores on the same windows and `public.best_analytic_arm` names the largest. Read the score AGAINST that band — it is deliberately not subtracted, because at this slice size the in-sample maximum is mostly noise (on the five-times-larger train split the leading arm collapses by an order of magnitude) while a committed lookup can still beat it, so no single number bounds a shortcut. If the band shifts between runs, the slice or the mint changed and nothing is comparable across the change.
