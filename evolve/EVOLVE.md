@@ -112,8 +112,10 @@ import it cannot resolve or read. Those two modules are therefore granted to eve
 shared base module appears, add it here in the same commit.
 
 ### Reading a score
-`combined_score` is `comp_ca_margin` — the differential minus the best analytic non-tracker measured
-on the identical slice. Zero means the candidate did no better than a depth-zero positional lookup.
-`public.analytic_band` prints every arm's own value and `public.best_analytic_arm` names the binding
-one; if that band shifts between runs, the slice or the mint changed and nothing is comparable
-across the change. `public.comp_ca` is the raw differential before the band is removed.
+`combined_score` is `comp_ca`, the raw paired differential. `public.analytic_band` prints what each
+analytic non-tracker scores on the same windows and `public.best_analytic_arm` names the largest.
+Read the score AGAINST that band — it is deliberately not subtracted, because at this slice size the
+in-sample maximum is mostly noise (on the five-times-larger train split the leading arm collapses by
+an order of magnitude) while a committed lookup can still beat it, so no single number bounds a
+shortcut. If the band shifts between runs, the slice or the mint changed and nothing is comparable
+across the change.

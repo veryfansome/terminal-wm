@@ -20,8 +20,9 @@ WHY THIS IS HARD TO FAKE
   routed<->partner exchange it mimics a tracker on routed-marker windows and anti-mimics on the
   symmetric partner windows, so its EXPECTATION is zero — but only over an exchangeable
   population, and the scored slice is one frozen realization of a deliberately chain-biased mint.
-  Measured there, a first-mover lookup scores clearly positive. That is why the scored scalar is
-  comp_ca_margin: the differential MINUS the best analytic non-tracker on the same slice.
+  Measured there, a first-mover lookup scores positive. So the band of analytic arms is measured
+  on every run and REPORTED beside the score — it is not subtracted, because at this slice size no
+  point estimate of it is a bound in either direction. See the band note below.
   A history-ignorer or memorizer has native ~ swap, so ~zero.
   A genuine multi-hop tracker follows the chain: native picks routed, swap follows the partner, so
   the difference is positive.
@@ -52,16 +53,26 @@ from evolve import cups_probe as CP
 # window and the frozen ceiling table, never of the net. Identical for every candidate, which is
 # what makes the differential comparable across the population.
 #
-# At the frozen mint knobs this is already a depth>=3 slice: of the ceiling table's 100 cells only
-# 15 are earnable, of which exactly 8 have N in {4,5}, and every one of those 8 has depth 3 or 4.
-# DEPTH_MIN is therefore inert at these knobs; it is kept explicit so a re-mint cannot silently
-# widen the slice to shallow windows an analytic heuristic can already solve.
-SLICE_N = (4, 5)
+# Of the ceiling table's cells only fifteen are earnable, and every one of them has depth 3 or 4,
+# so the ceiling filter and the depth floor largely coincide at these knobs. Both are kept explicit:
+# they encode different intentions, and a re-mint can pull them apart.
+# N includes 3: the table has four earnable N=3 cells in the same ceiling band and with the same
+# depth profile, worth about +44% more windows at no cost. N in {4,5} is the pre-designated primary
+# slice for the CAPABILITY GATE, and this is the search signal, explicitly not the gate — widening
+# here leaves that pre-registration untouched. N=2 stays out: the pick is two-way, and off-diagonal
+# N=2 windows have no legal role-swap partner by construction.
+SLICE_N = (3, 4, 5)
 SLICE_STYLE = "core"          # the model trains on core-style boards; held-out style measures
                               # style TRANSFER and is reported separately, never scored
 CEILING_EARNABLE_LT = 0.99    # cells at or above this are saturated for non-trackers: a margin
                               # there is unearnable and contributes only dilution
-DEPTH_MIN = 2
+# DEPTH_MIN must sit ABOVE the bounded-trace cap, or a scored window is solvable by a trace and
+# contributes a free +1. It is pinned to the ceiling table's own gauntlet_h at measurement time
+# rather than hardcoded, so a re-mint at a different cap cannot desync the slice from the band.
+# It cannot go higher either: earnability needs some other mover to match routed's depth, i.e.
+# R >= 2*depth + (m-2), so the frozen r_grid caps earnable depth at 4 and a depth floor of 5
+# empties the slice.
+DEPTH_MIN = 3
 
 DEPTH_BANDS = (("d2", 2, 2), ("d3", 3, 3), ("d4plus", 4, 99))
 
@@ -92,11 +103,22 @@ REPORT_NATIVE_WM_OVER_CHANCE = 0.10
 # partner to movers shrinks that but does not remove it, because the routed content is not
 # uniformly distributed over the movers.
 #
-# So the honest scalar is a MARGIN over the best analytic non-tracker, exactly as the project's
-# other metric is a margin over honest baselines: a mechanism that lifts the differential no more
-# than a positional lookup does has discovered nothing. Every arm here is a pure function of the
-# command strings, so the band is genome-INDEPENDENT — subtracting it is a constant shift that
-# leaves the ranking of candidates untouched and makes zero mean "no better than the best shortcut".
+# The band is REPORTED, never subtracted. Subtracting it was tried and is wrong: at this slice size
+# the in-sample maximum is max-of-NOISE over about three effective directions. Re-measured on the
+# train split, which is five times larger and equally valid here because every arm is a pure
+# function of the command strings, h_first falls from about +0.13 to +0.01 while only `deepest`
+# survives as genuinely nonzero. Subtracting the in-sample max therefore removes roughly four times
+# the real effect, via an arm whose true value is near zero.
+#
+# Nor is the population value a substitute: a committed lookup fitted without ever touching the
+# scored split still beats the band by about +0.11 on the held-out split. A fixed shortcut's
+# REALIZED value on a slice this size swings by about +/-0.12, so the in-sample max is biased up,
+# the population value under-covers, and neither is a bound. No point estimate can carry the
+# meaning "zero means no better than a shortcut", so the metric does not pretend to.
+#
+# What the band is good for is INTERPRETATION, and it is free: every arm is genome-independent, so
+# the whole band is a per-split constant that cannot reorder any candidate. It is emitted next to
+# every score as the reference a reader needs.
 #
 # WHICH ARMS HAVE TO BE IN THE BAND, AND WHY THE OTHERS DO NOT.
 # The role swap re-encodes ONLY the mv command strings and splices them at the mv positions. It
@@ -105,10 +127,9 @@ REPORT_NATIVE_WM_OVER_CHANCE = 0.10
 # instrument's arms cancel structurally, per window, and need no accounting:
 #   copy_prev  reads the previous observation, unchanged            -> identical pick both arms
 #   centroid   reads the exposure bank, unchanged                   -> identical pick both arms
-#   elim       is 1/|movers|, and the mover set is unchanged        -> identical value both arms
-# (elim's invariance is a CONSEQUENCE of the mover-partner rule. With a non-mover partner the swap
-# would move a content into or out of the mover set and elim would stop cancelling — one more thing
-# that rule buys.)
+#   elim       is 1/|movers|, and the swap trades one mover for another -> same cardinality
+# (elim cancels on cardinality alone, so it would cancel with any partner. What the mover-partner
+# rule actually buys is a two-sided exchange for the POSITIONAL arms; the rail below enforces it.)
 #
 # The arms that do NOT cancel are the ones that read WHERE in the chain something happened, because
 # that is exactly what the swap permutes: the positional markers, and the depth-bounded backward
@@ -215,10 +236,8 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
                         seed=20260806, ceiling_table=None, swap_cache=None):
     """comp_ca for ONE trained net on ONE (root, split). Returns unrounded per-seed values.
 
-    The scored scalar is comp_ca_margin = comp_ca - max(analytic_band): the differential's margin
-    over the best depth-zero shortcut measured on the identical slice. The band is a pure function
-    of the command strings, so it is the same constant for every candidate — it does not reorder
-    anything, it makes zero mean "no better than a positional lookup".
+    The scored scalar is the raw differential. `analytic_band` travels with it as a reference —
+    what each analytic non-tracker scores on these same windows — but is never subtracted.
 
     `cells` is the flat {"N,depth,m,R": ceiling} dict (the ceiling table's ["cells"]).
     `ceiling_table` is passed through to cups_probe purely so its own reported aggregates keep
@@ -331,13 +350,11 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     win_by_id = {w["id"]: w for w in ctx["wins"]}
     band = analytic_band(win_by_id, swap, W)
     best_arm = max(band, key=lambda a: band[a])
-    comp_ca_margin = comp_ca - band[best_arm]
 
     return {
-        # THE scalar the search maximizes: the differential's margin over the best analytic
-        # non-tracker on this exact slice. Zero means "no better than a depth-zero shortcut".
-        "comp_ca_margin": comp_ca_margin,
-        "comp_ca": comp_ca,                 # the raw differential, before the band is removed
+        # THE scalar the search maximizes: the raw paired differential. The analytic band travels
+        # beside it as a reference, never subtracted from it — see the note above.
+        "comp_ca": comp_ca,
         "analytic_band": band,
         "best_analytic_arm": best_arm,
         "n": len(W),

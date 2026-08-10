@@ -26,11 +26,10 @@ and it never feeds back into selection.
 
 ## What is scored
 
-`combined_score = comp_ca_margin` — one scalar, defined in `evolve/cups_ca.py`:
+`combined_score = comp_ca` — one scalar, defined in `evolve/cups_ca.py`:
 
 ```
-comp_ca        = mean over the eligible windows of ( native_hit - swap_stayed )
-comp_ca_margin = comp_ca - the best analytic non-tracker's own comp_ca on the same windows
+comp_ca = mean over the eligible windows of ( native_hit - swap_stayed )
 ```
 
 A window exposes N contents at N locations, silently moves them around in a chain, then reads one
@@ -42,9 +41,11 @@ over the same board, same destinations, same depth, only the move commands re-en
 The point is what cancels. A model that keys on the *name* being asked about predicts identically
 under both chains, so its per-window difference is exactly zero — structurally, not on average, and
 verified so on the real slice. A model that keys on chain position cancels only in expectation, and
-the scored slice is one frozen realization where a first-mover lookup does score positive — which is
-why the band of analytic non-trackers is measured on every run and subtracted. Zero means *no better
-than the best depth-zero shortcut*.
+the scored slice is one frozen realization where a first-mover lookup does score positive. So the
+band of analytic non-trackers is measured on every run and **reported beside the score**. It is not
+subtracted: at this slice size the in-sample maximum is largely noise, and a committed lookup can
+beat it, so no point estimate of the band is a bound. Read a score against the band, don't expect
+the number to have the band already removed.
 
 **The capability gate is not the objective.** The pack also has an honest absolute measurement —
 the pick rate against a frozen analytic per-cell ceiling. That is the yardstick, and the search

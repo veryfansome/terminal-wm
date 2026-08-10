@@ -45,8 +45,8 @@ standardization frame fails loudly instead of recording noise.
   over an exchangeable population, and the scored slice is one frozen realization.** Measured on the
   real inner slice, `at_name` and `h_last` cancel to exactly zero as designed, while a first-mover
   lookup scores about `+0.10`. The mint biases the chains, so the routed content is not uniform over
-  the movers and exchangeability never fully holds. This is why the scored scalar is
-  `comp_ca_margin` — the differential minus the best analytic non-tracker on the same slice (§3a).
+  the movers and exchangeability never fully holds. So the band of analytic arms is reported
+  alongside every score rather than folded into it (§3a).
 
   **This holds only if the partner is itself a mover, and enforcing that is load-bearing.** The
   routed content is always a mover, so if the partner is not, the exchange is one-sided: routed's
@@ -78,43 +78,48 @@ and leaves `comp_ca` unmoved, so a search that climbs `comp_ca` cannot thereby c
 gate reading is carried in `private` on every measurement as a report. It is never an input to
 selection.
 
-## 3a. The scored scalar is a margin
-
-```
-comp_ca_margin = comp_ca − max over analytic arms of that arm's own comp_ca
-```
+## 3a. The analytic band is reported, not subtracted
 
 The analytic arms — predict the name, the first mover, the last move's source, the last mover, the
-deepest — are pure functions of the command strings. So each one has its own comp_ca on the frozen
-slice, computable with no net at all, and that band is **the same constant for every candidate**.
-Subtracting the largest therefore reorders nothing; it fixes the *meaning* of zero. A candidate at
-`comp_ca_margin ≈ 0` has done no better than a depth-zero positional lookup, which is precisely the
-conclusion the raw differential would have hidden.
+deepest, and a backward trace capped at one or two hops — are pure functions of the command strings.
+Each has its own comp_ca on the frozen slice, computable with no net at all, so the whole band is
+**the same constant for every candidate** and cannot reorder anything.
 
-This is the same discipline the world-model margin already uses: score the gap over honest
-baselines, because a mechanism that lifts the metric and the baselines equally has discovered
-nothing.
+It was briefly subtracted, to make zero mean "no better than a shortcut". That is wrong at this
+slice size, in both directions at once:
 
-Measured, with no model involved, on both splits (each 62 windows, disjoint images):
+- **The in-sample maximum is mostly noise.** Roughly three of the arms are effectively independent,
+  so their maximum is an extreme-value statistic. Recomputed on the train split — five times larger,
+  and equally valid because the arms never touch the model — the leading arm falls by about an order
+  of magnitude, and only `deepest` remains distinguishable from zero. Subtracting the in-sample max
+  removes several times the real effect, through an arm whose true value is near zero.
+- **The population value is not a bound either.** A committed lookup keyed on the *observable* cell,
+  fitted without ever touching the scored split, still beats the band on the holdout. A fixed
+  shortcut's realized value on a slice this size swings by more than the band itself.
+
+Biased up one way, under-covering the other: no point estimate carries the meaning the subtraction
+was claiming. So the band travels beside the score as the reference a reader needs, and the scored
+scalar stays the raw differential.
+
+Measured, with no model involved, on the scored slice of each split (89 inner, 96 final, disjoint
+images):
 
 | arm | inner | final |
 |---|---|---|
 | `at_name` | +0.0000 | +0.0000 |
-| `h_first` | **+0.1290** | **+0.0806** |
-| `h_last` | +0.0000 | −0.1290 |
-| `h_lastmv` | −0.0484 | +0.0806 |
-| `deepest` | +0.0323 | +0.0081 |
+| `trace_h1`, `trace_h2` | +0.0000 | +0.0000 |
+| `h_first` | +0.1685 | +0.0312 |
+| `h_last` | −0.0899 | −0.0938 |
+| `h_lastmv` | +0.0337 | +0.1354 |
+| `deepest` | +0.0337 | +0.0417 |
 
-`at_name` is exactly zero on both, as the construction promises. Everything else **moves a lot
-between two equal-sized draws from the same generator** — `h_last` swings by 0.13, `h_lastmv`
-changes sign. That is window-sampling variation exhibited by a deterministic quantity, which makes
-it a clean lower bound on how much a *model's* comp_ca on 62 windows can move for reasons that have
-nothing to do with the model.
-
-Two consequences. First, this is why the band is recomputed per split and per run rather than
-pinned: a number carried across splits with the wrong band subtracted is meaningless. Second, and
-usefully, subtracting each split's own band is what makes an inner and a final number comparable at
-all — the largest split-to-split artefact is removed by construction.
+`at_name` and both trace arms are exactly zero on both splits, as the construction promises — the
+first because the name index is untouched by the swap, the traces because every scored window is
+deeper than their cap. The positional arms **swing hard between two draws from the same generator**:
+`h_first` moves by 0.14 and `h_lastmv` nearly quadruples. A deterministic quantity moving that much
+between equal-sized draws is the clearest available evidence that these arms are noise rather than a
+stable shortcut advantage — which is the direct argument for reporting the band instead of
+subtracting it, and for recomputing it per split rather than pinning a number.
 
 ## 4. The eligible slice W
 
@@ -226,6 +231,25 @@ next-observation retrieval, computed on the same net for free.
 
 Frames are never pooled. The pack root is its own comparability frame, and a number from another
 root, eye or environment is not comparable to one from this lane without a measured offset.
+
+## 7a. What this mint can and cannot support
+
+Earnability requires some other content to match or exceed the routed content's depth, which works
+out to `R >= 2·depth + (m−2)`. With the frozen move-count grid topping out at 8, that caps earnable
+depth at **4**: every earnable cell is depth 3 or 4, a depth floor of 5 empties the slice, and the
+windows deeper than 4 all have a saturated ceiling.
+
+The consequence is worth stating bluntly. A backward trace capped at four hops scores **exactly
++1.0** on every non-empty slice these knobs can produce, and a three-hop trace scores about +0.7.
+The only thing keeping the scored slice out of reach of that family is the cap of two hops that the
+ceiling table was built at — a choice, not a fact about the data. Nothing in the code can fix this;
+it is a property of the mint.
+
+So: this is a sound objective to *search* on — the ranking signal is a paired differential on a
+frozen slice, and climbing it still requires composing the chain — but it is not a basis for an
+external claim. The escape is a re-mint with the move-count grid extended far enough that deeper
+windows become earnable, at which point the slice can move above the trace family rather than
+alongside it.
 
 ## 8. Changing any of this
 

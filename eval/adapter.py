@@ -6,9 +6,7 @@ Invoked by the evolve engine, once per seed, as:
 
 It trains ONE net on the cups pack root and emits {results_dir}/metrics.json:
 
-    combined_score = comp_ca_margin   (evolve/cups_ca.py — the compositional-depth
-                                       differential, minus the best analytic non-tracker
-                                       measured on the same windows)
+    combined_score = comp_ca   (evolve/cups_ca.py — the compositional-depth differential)
 
 Everything else the net can tell us rides along in `public` (what inventors get to see) and
 `private` (recorded, never briefed). One net per (genome, seed): the compositional metric and
@@ -200,10 +198,10 @@ def main(argv):
 
     pd = ca["per_depth"]
     feedback = (
-        f"comp_ca_margin {ca['comp_ca_margin']:+.4f} "
-        f"(raw differential {ca['comp_ca']:+.4f} minus the best analytic non-tracker, "
-        f"{ca['best_analytic_arm']} at {ca['analytic_band'][ca['best_analytic_arm']]:+.4f}) "
-        f"over n={ca['n']} deep earnable windows "
+        f"comp_ca {ca['comp_ca']:+.4f} over n={ca['n']} deep earnable windows "
+        f"(for reference, the strongest analytic non-tracker on the same windows, "
+        f"{ca['best_analytic_arm']}, sits at "
+        f"{ca['analytic_band'][ca['best_analytic_arm']]:+.4f}) "
         f"(d2 n={pd['d2']['n']}, d3 n={pd['d3']['n']}, d4+ n={pd['d4plus']['n']}); "
         f"native picks {ca['native_wm']:.3f} vs chance {g['chance']:.3f}; "
         f"under role-swap the same pick is held {ca['swap_stayed']:.3f} and follows the swapped "
@@ -211,10 +209,9 @@ def main(argv):
         f"{health['top1_sameverb']:.3f}.")
 
     write(results_dir, {
-        "combined_score": ca["comp_ca_margin"],
+        "combined_score": ca["comp_ca"],
         "correct": True,
         "public": {
-            "comp_ca_margin": ca["comp_ca_margin"],
             "comp_ca": ca["comp_ca"],
             "analytic_band": ca["analytic_band"],
             "best_analytic_arm": ca["best_analytic_arm"],
