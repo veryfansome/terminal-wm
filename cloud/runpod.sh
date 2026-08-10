@@ -405,8 +405,9 @@ campaign running detached on $id.
   follow it:      $0 ssh $id     then:  tmux attach -t $TMUX_SESSION   (detach again with ctrl-b d)
   or tail the log: ssh $SSH_OPTS -p $port root@$ip 'tail -f $POD_REPO_LIT/$logfile'
 
-when it finishes, on the box, fold each genome into an ingestable record:
+when it finishes, fold each genome into an ingestable record on the box ($0 ssh $id):
   ./cloud/pack_lane.sh score evolve/genomes/<name>.json <candidate-id>
+(the per-seed work is already cached, so that step only aggregates)
 
 then bring everything home and STOP THE BILLING:
   $0 pull $id
