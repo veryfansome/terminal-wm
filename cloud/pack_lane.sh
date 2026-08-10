@@ -2,6 +2,7 @@
 # The pack lane — everything GPU-heavy, on a rented box.
 #
 #   pack_lane.sh prepare                     one-time: pull the eye + the pack root, pin, encode
+#   pack_lane.sh prepare-cdh                 one-time: the second capability pack (reported only)
 #   pack_lane.sh publish                     upload the encoded root so other boxes pull, not re-encode
 #   pack_lane.sh campaign <genome.json>...   measure many genomes in one pass, saturating the box
 #   pack_lane.sh score <genome.json> <id>    fold one genome's seeds into an ingestable record
@@ -84,6 +85,51 @@ PY
   say "PREPARE OK — $ENC_ROOT is scoreable. Pin the embedding_sha above as TWM_ROOT_SHA."
 }
 
+prepare_cdh() {
+  # The second capability pack, reported for every candidate and never scored.
+  #
+  # The published root carries the embeddings and the stamps but NOT the raw step records, and the
+  # harvest needs those to find the navigation blocks. So this pulls what is published and expects
+  # the raw records to be supplied once via TWM_CDH_RAW; after that, publish the completed root and
+  # everything downstream is a plain pull. The loader asserts sequence count, image and shape agree
+  # between the records and the embeddings, so a mismatched pairing fails loudly rather than
+  # measuring nonsense.
+  : "${TWM_CDH_ARM:=treat}"
+  local enc="$TWM_DATA/dockerfs3-cdhB-${TWM_CDH_ARM}-nocwd"
+  mkdir -p "$TWM_DATA"
+
+  say "pulling the encoded cd-history root ($TWM_CDH_ARM)"
+  uv run python - <<PY
+from huggingface_hub import snapshot_download
+snapshot_download('veryfansome/terminal-jepa-dockerfs', repo_type='dataset',
+                  allow_patterns=['dockerfs3-cdhB-${TWM_CDH_ARM}-nocwd/*'], local_dir='$TWM_DATA')
+PY
+
+  if [ ! -f "$enc/val.jsonl" ]; then
+    if [ -z "${TWM_CDH_RAW:-}" ]; then
+      say "MISSING RAW RECORDS. $enc has embeddings but no train/val.jsonl."
+      say "Set TWM_CDH_RAW to a directory holding the matching raw records and re-run, then"
+      say "publish the completed root so this step becomes a pull:"
+      say "  TWM_CDH_RAW=<dir> $0 prepare-cdh && uv run python -m cloud.publish_root $enc"
+      return 1
+    fi
+    say "completing the root from $TWM_CDH_RAW"
+    cp "$TWM_CDH_RAW/train.jsonl" "$TWM_CDH_RAW/val.jsonl" "$enc/"
+  fi
+
+  say "verifying records and embeddings correspond"
+  TWM_CDH_ROOT="$enc" uv run python - <<PY
+import os
+from evolve import cups_probe as CP
+from realenv import seq_worldmodel as M
+# the loader's own asserts are the verification: sequence count, image and shape must all agree
+seqs = CP._load_standardized_seqs(os.environ["TWM_CDH_ROOT"], "inner", os.environ["TWM_EYE"],
+                                  M.pick_device())
+print(f"ok — {len(seqs)} sequences, records and embeddings agree")
+PY
+  say "CDH PREPARE OK — export TWM_CDH_ROOT=$enc"
+}
+
 publish() {
   # Encode ONCE, publish, let every other box PULL the same bytes. Re-encoding per box is cheap in
   # wall-clock but not free in meaning: the eye is pinned, the tensors it produces are not, and a
@@ -161,10 +207,11 @@ campaign() {
 }
 
 case "${1:-}" in
-  prepare)  prepare ;;
-  publish)  publish ;;
-  score)    score "$2" "$3" ;;
-  campaign) shift; campaign "$@" ;;
-  *) echo "usage: pack_lane.sh prepare | publish | campaign <genome.json>... | score <genome.json> <id>" >&2
+  prepare)     prepare ;;
+  prepare-cdh) prepare_cdh ;;
+  publish)     publish ;;
+  score)       score "$2" "$3" ;;
+  campaign)    shift; campaign "$@" ;;
+  *) echo "usage: pack_lane.sh prepare | prepare-cdh | publish | campaign <genome.json>... | score <genome.json> <id>" >&2
      exit 2 ;;
 esac

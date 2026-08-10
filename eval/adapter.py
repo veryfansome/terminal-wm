@@ -37,7 +37,7 @@ import traceback
 
 import torch
 
-from evolve import cups_ca as CA, cups_probe as CP, genome as G, harness as H
+from evolve import cdh_probe as CDH, cups_ca as CA, cups_probe as CP, genome as G, harness as H
 from realenv import seq_worldmodel as M
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -151,12 +151,16 @@ def main(argv):
                     f"but this run is {(root, eye, split)} — a context from another frame would "
                     f"silently score in that frame")
             train_full, ctx, swap_cache = blob["train_full"], blob["ctx"], blob["swap"]
+            cdh_ctx = blob.get("cdh")
         else:
             train_full = H._cached_encode(root, "train", eye, device)
             mo, so, mc, sc = M.standardize_stats(train_full)
             M.apply_stats(train_full, mo, so, mc, sc)
             ctx = CP.load_cups_context(root, split, eye, device, stats_data=root)
             swap_cache = None
+            cdh_root = _env("TWM_CDH_ROOT")
+            cdh_ctx = (CDH.load_cdh_context(cdh_root, split, eye, device, redir_only=True,
+                                            stats_data=root) if cdh_root else None)
         if ctx is None:
             raise RuntimeError(f"no cups windows in the {split} split of {root}")
     except Exception as e:
@@ -185,6 +189,17 @@ def main(argv):
         flat = stream.flatten_predictions(net, H._strip_target_only(ctx["seqs"]), device)
         pred_obs = tmod.to_obs(flat["pred"], flat["prev"]) if tmod is not None else flat["pred"]
         health = M.retrieval(pred_obs, flat["true"], flat["verbs"], seed=seed)
+
+        # A SECOND capability, read off the SAME net and never scored: does this model route a read
+        # through the navigation history that actually happened? Its windows were standardized in
+        # this net's own frame when the lane context was built, so this measures the net on inputs
+        # of the kind it was trained on. It is a transfer reading — the net trained on one pack and
+        # is asked about another — and it is here so a skill's trajectory stays visible across the
+        # whole search rather than only while it happens to be the objective.
+        cdh = None
+        if cdh_ctx is not None:
+            cdh = {"nav": CDH.nav_probe(net, cdh_ctx, tmod, device),
+                   "gate": CDH.masked_s1(net, cdh_ctx, cdh_ctx["fit_ceiling"], tmod, device)}
     except Exception as e:
         return fail(results_dir, f"exception:{type(e).__name__}",
                     f"{e}\n{traceback.format_exc()[-2000:]}")
@@ -206,7 +221,9 @@ def main(argv):
         f"native picks {ca['native_wm']:.3f} vs chance {g['chance']:.3f}; "
         f"under role-swap the same pick is held {ca['swap_stayed']:.3f} and follows the swapped "
         f"content {ca['swap_follow']:.3f}. Next-obs retrieval health "
-        f"{health['top1_sameverb']:.3f}.")
+        f"{health['top1_sameverb']:.3f}."
+        + (f" Command-history routing on the other capability pack, reported not scored: "
+           f"{cdh['nav']['nav_differential_unmasked_matched']:+.3f}." if cdh else ""))
 
     write(results_dir, {
         "combined_score": ca["comp_ca"],
@@ -223,6 +240,8 @@ def main(argv):
             "swap_follow": ca["swap_follow"],
             "chance": g["chance"],
             "wm_health_top1_sameverb": health["top1_sameverb"],
+            # reported, never scored — see the note at the measurement site
+            "cdh_routing": (cdh["nav"]["nav_differential_unmasked_matched"] if cdh else None),
             "steps": steps, "seed": seed, "split": split, "mode": mode,
         },
         # keyed by seed: the engine dict-MERGES private across seeds, so an unkeyed block would
@@ -234,6 +253,7 @@ def main(argv):
             "role_swap_seed": ca["role_swap_seed"],
             "gate_report": ca["gate_report"],
             "wm_health": health,
+            "cdh": cdh,
             "root": root, "eye": eye,
         }},
         "text_feedback": feedback,

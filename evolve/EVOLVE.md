@@ -51,6 +51,8 @@ The eval needs three things that are NOT in this repo and cannot be, because the
 | `TWM_CUPS_ROOT` | absolute path to the **encoded** pack root (`…-nocwd`), built once by `cloud/pack_lane.sh prepare` |
 | `TJ_FT_ENCODER` | absolute path to the pinned encoder checkpoint. There is deliberately no default — the old one was the wrong eye, and substituting it corrupts every embedding silently |
 | `TWM_PYTHON` | absolute interpreter with torch. The clone is a bare export; do not build a venv per candidate |
+| `TWM_CONTEXT` | optional: a prebuilt lane context (`cloud/build_context.py`). Workers memory-map it instead of each deriving the splits, window layouts and role-swap chains |
+| `TWM_CDH_ROOT` | optional: the second capability pack's root. When set, every candidate also carries a command-history routing reading — reported, never scored |
 
 Optional: `TWM_EYE_TREE_SHA` to assert the encoder's identity at preflight, `TWM_STEPS` to shorten training for a wiring test only.
 
@@ -80,3 +82,8 @@ Ten arch impls import the path-state trunk and eight head impls import the forwa
 
 ### Reading a score
 `combined_score` is `comp_ca`, the raw paired differential. `public.analytic_band` prints what each analytic non-tracker scores on the same windows and `public.best_analytic_arm` names the largest. Read the score AGAINST that band — it is deliberately not subtracted, because at this slice size the in-sample maximum is mostly noise (on the five-times-larger train split the leading arm collapses by an order of magnitude) while a committed lookup can still beat it, so no single number bounds a shortcut. If the band shifts between runs, the slice or the mint changed and nothing is comparable across the change.
+
+### The second capability pack
+Setting `TWM_CDH_ROOT` adds a command-history routing reading to every candidate: on the same trained net, does the prediction for a read depend on the navigation that actually preceded it, or would a different navigation history have produced the same answer? It appears as `public.cdh_routing` and in full under `private.cdh`.
+
+It is **reported and never scored**. Two reasons it is worth carrying anyway. It keeps a skill's trajectory visible across the whole search rather than only while that skill happens to be the objective, and those readings are what make a training blend across packs tunable later. Note what it currently measures: the net trains on one pack and is asked about another, so this is a *transfer* reading. Its windows are standardized in the training root's frame when the lane context is built, so the net is at least being fed inputs of the kind it saw.

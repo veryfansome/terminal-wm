@@ -35,12 +35,15 @@ The point is what cancels. A model that keys on the *name* being asked about pre
 | `evolve/genome.py` | resolves a genome's impl names to modules, and the structural gate |
 | `evolve/harness.py` | the training closure — `_train` and the fail-closed encode. Nothing scores here. |
 | `evolve/cups_probe.py` | the pack instrument: the N-way forced-foil measurement, the analytic ceiling arms, and the role-swap probe |
+| `evolve/cdh_probe.py` | a second capability pack — does a read route through the navigation history that actually happened. Reported for every candidate, never scored. |
 | `evolve/cups_ca.py` | **the objective** — `comp_ca`, built by intersecting the two arms per window |
 | `eval/adapter.py` | the fitness oracle the engine calls: one net per seed, one `metrics.json` |
 | `eval/smoke.py`, `eval/guard_leakage.py` | the pre-eval gates every candidate pays |
 | `evolve/evolve.json` | the contract (engine-owned format) |
 | `evolve/genomes/` | the starting population |
-| `cloud/pack_lane.sh` | the GPU lane: pull + pin the eye, encode the root, score, ingest |
+| `cloud/build_context.py` | derives the shared lane context once — standardized splits, window layouts, role-swap chains — so no candidate re-pays it |
+| `cloud/runner.py` | runs (genome, seed) jobs concurrently against that shared context |
+| `cloud/pack_lane.sh` | the GPU lane: pull + pin the eye, encode the root, measure, ingest |
 | `research/compositional-selection-design.md` | why the objective is shaped this way |
 
 ## Rules
