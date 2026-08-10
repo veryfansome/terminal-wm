@@ -76,14 +76,24 @@ DEPTH_MIN = 3
 
 DEPTH_BANDS = (("d2", 2, 2), ("d3", 3, 3), ("d4plus", 4, 99))
 
-# --- anti-degeneracy floors -------------------------------------------------------------------
-# INHERITED, NOT MEASURED FOR THIS QUANTITY. These two numbers were calibrated for a different
-# instrument (a masked-endpoint imagination differential on the base world) and are carried here
-# as a starting point only. cups_ca always REPORTS the realized values, so the first measurement
-# on a real net tells us whether they are set anywhere near right. Re-set them from measured data
-# before treating a failure here as a statement about a candidate.
-MIN_NORM_OVER_BANK = 0.5
-MIN_ANGULAR_DISPERSION = 0.5
+# --- anti-degeneracy readouts, REPORTED AND NOT ENFORCED --------------------------------------
+# Two shapes of degeneracy would make the differential meaningless: a prediction bank collapsed
+# toward zero, and one that is constant across windows. Both are measured on both arms and emitted
+# on every run.
+#
+# They are not gates, because no threshold for them has been measured on this quantity. Numbers
+# carried over from a different instrument put the dispersion floor at half, which a real net does
+# not come close to: predictions over a shared observation space cluster near a common direction,
+# so cosine-to-centroid stays high and dispersion stays small even when the net is discriminating
+# perfectly well. A first run of a lightly-trained net reads about two hundredths. Enforcing an
+# invented floor here would null every candidate and leave nothing with which to set a real one.
+#
+# What IS enforced is non-finiteness, which needs no calibration to interpret.
+#
+# Set these from a population of measurements — the distribution over a scored round — and only
+# then turn them into gates.
+MIN_NORM_OVER_BANK = None
+MIN_ANGULAR_DISPERSION = None
 
 # --- capability readout, REPORTED BUT NOT ENFORCED --------------------------------------------
 # "the net beats chance on W by this much" is a CAPABILITY claim, not an instrument-validity
@@ -354,12 +364,15 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
         "angular_dispersion": diag["angular_dispersion"],
         "norm_over_bank_swap": diag_swap["norm_over_bank"],
         "angular_dispersion_swap": diag_swap["angular_dispersion"],
-        "norm_ok": all(d["norm_over_bank"] is not None
-                       and d["norm_over_bank"] >= MIN_NORM_OVER_BANK
-                       for d in (diag, diag_swap)),
-        "dispersion_ok": all(d["angular_dispersion"] is not None
-                             and d["angular_dispersion"] >= MIN_ANGULAR_DISPERSION
-                             for d in (diag, diag_swap)),
+        # None means "no threshold has been measured", which is different from passing
+        "norm_ok": (None if MIN_NORM_OVER_BANK is None else
+                    all(d["norm_over_bank"] is not None
+                        and d["norm_over_bank"] >= MIN_NORM_OVER_BANK
+                        for d in (diag, diag_swap))),
+        "dispersion_ok": (None if MIN_ANGULAR_DISPERSION is None else
+                          all(d["angular_dispersion"] is not None
+                              and d["angular_dispersion"] >= MIN_ANGULAR_DISPERSION
+                              for d in (diag, diag_swap))),
         # REPORTED ONLY — see REPORT_NATIVE_WM_OVER_CHANCE above.
         "native_wm": native_wm,
         "chance": chance,

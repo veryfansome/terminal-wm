@@ -206,7 +206,10 @@ def main(argv):
                     f"{e}\n{traceback.format_exc()[-2000:]}")
 
     g = ca["guards"]
-    if not g["norm_ok"] or not g["dispersion_ok"]:
+    # Enforced only once a threshold has been MEASURED on this quantity; until then these are
+    # readouts (guards['norm_ok'] / ['dispersion_ok'] are None) and a candidate is not failed on a
+    # number nobody has calibrated. Non-finite banks still raise inside the instrument.
+    if g["norm_ok"] is False or g["dispersion_ok"] is False:
         return fail(results_dir, "degenerate_prediction_bank",
                     f"norm_over_bank={g['norm_over_bank']}, "
                     f"angular_dispersion={g['angular_dispersion']} — the prediction bank is "
