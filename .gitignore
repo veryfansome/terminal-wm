@@ -21,3 +21,12 @@ evolve/.cache/
 # per-candidate scratch from the pack lane
 .results/
 cloud/podresults/
+
+# Derived lane artifacts. build_context writes .cache/ at the repo root; an encoded context
+# is around a gigabyte and is rebuilt on demand.
+.cache/
+
+# No tensor or model artifact belongs in git, wherever it lands.
+*.pt
+*.pth
+*.safetensors
