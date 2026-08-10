@@ -64,29 +64,15 @@ def _train(genome, fit, device, loss_fn, seed, steps, target_mod, stream, head=N
     build, aparams = G.load_arch(genome)
     net = build(**aparams)
     if getattr(target_mod, "LEARNED", False):
-        # learned-target extension: the target impl provides an nn.Module (make_target/to_obs/reg)
-        # whose params are registered on the net so the genome's optimizer trains them jointly.
-        # The eval stays in the FIXED obs space (to_obs must reconstruct), which keeps a learned
-        # target honest: collapsing the target space breaks reconstruction and is scored down.
         net.target_module = target_mod.make(D)
     head_state = None
     if head is not None:
-        # head-axis extension: wrap may re-point net.forward and register readout/aux params on
-        # net (trained jointly). aux_loss adds a train-only self-supervised term; passthrough is
-        # a no-op returning None + 0.0. Must run BEFORE make_opt so aux params are optimized.
         head_state = head.wrap(net, D, **(head_p or {}))
     net = net.to(device)
     make_opt, bs = G.load_optim(genome)
     opt, sched = make_opt(net.parameters(), steps)
-    # strip seam: the batcher and stream.collate only ever see the stripped fit (target-only
-    # keys removed). Identity pass-through for v1/v2 (no such keys) -> bit-identical.
     fit_stripped = _strip_target_only(fit)
-    aux_live = fit_stripped is not fit   # v3 aux channels present -> plumbing active (but dormant)
-    # objective contract extension (opt-in, backward-compatible): an objective module may set
-    # WANTS_CTX=True to receive a third arg `ctx` with the causal side-info aligned to pred/tgt —
-    # {"cmd": command embedding per cmd-row, "prev": previous-obs per cmd-row}. Causal only (the
-    # command is a model INPUT; prev is the strict-causal shift) — NO future obs, so leakage_ok
-    # still holds. Objectives without the flag are called loss(pred, tgt) EXACTLY as before.
+    aux_live = fit_stripped is not fit
     import sys as _sys
     _obj_wants_ctx = getattr(_sys.modules.get(getattr(loss_fn, "__module__", None)), "WANTS_CTX", False)
     next_batch = G.load_batcher(genome)(fit_stripped, bs, seed)
@@ -96,13 +82,10 @@ def _train(genome, fit, device, loss_fn, seed, steps, target_mod, stream, head=N
             raise ValueError("batcher contract violation (len/bounds)")
         b = stream.collate([fit_stripped[i] for i in idx], device)
         if aux_live:
-            # DORMANT aux-target plumbing: the harness-held ORIGINAL (unstripped) seq
-            # dicts for this batch, indexed by the batcher's indices — the attach point for
-            # multi-channel aux targets (exit_cls/z_delta). No sanctioned consumer in v3.0.
-            _aux_originals = [fit[i] for i in idx]  # noqa: F841
+            _aux_originals = [fit[i] for i in idx]
         pred_full, _ = net(b["tok"], b["types"], b["key_pad"])
-        cmd_pred = stream.extract_cmd_pred(pred_full, b)           # [B, maxn, D]
-        tgt_full = b["tgt"]                                        # [B, maxn, D] = z_obs per step
+        cmd_pred = stream.extract_cmd_pred(pred_full, b)
+        tgt_full = b["tgt"]
         prev_full = torch.cat([torch.zeros_like(tgt_full[:, :1]), tgt_full[:, :-1]], dim=1)
         m = b["cmd_mask"]
         pred, tgt, prev = cmd_pred[m], tgt_full[m], prev_full[m]
@@ -112,15 +95,13 @@ def _train(genome, fit, device, loss_fn, seed, steps, target_mod, stream, head=N
         else:
             _target = target_mod.make_target(tgt, prev); _reg = 0.0
         if _obj_wants_ctx:
-            # command-INPUT embedding per cmd-row (explicit stream method, aligned to cmd_mask) —
             # causal side-info for content-routing losses. A stream that lacks extract_cmd_input
-            # fails LOUD (AttributeError) rather than silently misaligning a ctx objective.
             ctx = {"cmd": stream.extract_cmd_input(b)[m], "prev": prev}
             loss = loss_fn(pred, _target, ctx) + _reg
         else:
             loss = loss_fn(pred, _target) + _reg
         if head is not None:
-            loss = loss + head.aux_loss(head_state, b, net, device)  # 0.0 for passthrough
+            loss = loss + head.aux_loss(head_state, b, net, device)
         if not torch.isfinite(loss):
             return net, False
         opt.zero_grad(set_to_none=True)

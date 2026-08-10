@@ -41,7 +41,7 @@ from evolve.splits import split_val
 from realenv import seq_worldmodel as M
 
 D = M.D
-SWITCH_MIN = 5      # min windows for an (N,depth) cell to switch independently (an open number)
+SWITCH_MIN = 5
 
 
 def harvest_cups_windows(seqs):
@@ -67,13 +67,9 @@ def harvest_cups_windows(seqs):
                     ctx.append(t)
                 elif "cups_mv" in mt:
                     parts = steps[t]["cmd"].split()
-                    mvs.append((t, parts[1], parts[2]))          # (step, src, dst)
+                    mvs.append((t, parts[1], parts[2]))
             n = cups["N"]
             assert len(expose) == n, f"window {si}:{r} missing exposures"
-            # slot paths in slot-index order (from the exposure commands), then a TEXTUAL
-            # chain replay — the one authority for the positional-marker fields the ceiling
-            # arms need (h_first / h_last / h_lastmv / elim / deepest) AND the stamp-equality
-            # stamp-equality asserts: the stamps are checked here rather than trusted.
             slots = [steps[expose[k]]["cmd"].split()[1] for k in range(n)]
             slot_of = {p: k for k, p in enumerate(slots)}
             loc = {k: slots[k] for k in range(n)}
@@ -118,7 +114,7 @@ def build_cups_layout(wins, seqs):
     valid = torch.zeros(B, Lmax, dtype=torch.bool)
     rpos = torch.zeros(B, dtype=torch.long)
     z_prev = torch.zeros(B, D)
-    cands = []                                           # per-window [N,D] exposure obs embeddings
+    cands = []
     for i, w in enumerate(wins):
         s = seqs[w["si"]]
         r = w["r"]
@@ -192,13 +188,6 @@ def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None):
                for k in ("wm",) + ARMS + ("chance",)}
         out["n"] = len(rs)
         out["arm_max"] = round(max(out[a] for a in ARMS), 4)
-        # the SWITCHING ceiling. max-of-means is not sound — an adversary may
-        # pick a different arm per window from OBSERVABLE features): partition the slice by
-        # the observable (N, depth) cell, take the best arm-mean per cell, mass-weight.
-        # Cells below SWITCH_MIN windows pool into their per-N marginal (then a remainder
-        # group) before switching, because a singleton cell's best-mean IS the
-        # per-row oracle max, the over-strong ceiling round 2 prohibited. Dominates arm_max
-        # by construction; this is the gate-bearing ceiling.
         cells, smalls, groups = {}, {}, []
         for r_ in rs:
             cells.setdefault((r_["N"], r_["depth"]), []).append(r_)
@@ -214,19 +203,11 @@ def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None):
         sw = sum(len(g) * max(sum(r_[a] for r_ in g) / len(g) for a in ARMS)
                  for g in groups) / len(rs)
         out["switch_max"] = round(sw, 4)
-        # CROSS-FIT switching ceiling: the in-sample
-        # per-group best-mean is max-of-means UPWARD-biased (~+0.035 at n=142), silently
-        # eating the gate band. Split each group in half by a seeded shuffle; choose the arm
-        # on one half, EVALUATE it on the other, both directions, eval-mass-weighted —
-        # unbiased for the true switching ceiling. Gate-bearing margin uses THIS; the
-        # in-sample switch_max stays reported as the conservative upper bound.
         import random as _r
         rng = _r.Random(20260807)
         xf_num = 0.0
         for g in groups:
             if len(g) < 2:
-                # a lone remainder window: choose its arm out-of-sample (on the slice minus
-                # the window) — never on itself
                 others = [r_ for r_ in rs if r_ is not g[0]]
                 best = max(ARMS, key=lambda a: sum(r_[a] for r_ in others) / len(others)) \
                     if others else "at_name"
@@ -239,13 +220,6 @@ def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None):
                 best = max(ARMS, key=lambda a: sum(r_[a] for r_ in pick_h) / len(pick_h))
                 xf_num += sum(r_[best] for r_ in eval_h)
         out["switch_max_xfit"] = round(xf_num / len(rs), 4)
-        # the FROZEN-TABLE ceiling: an exact analytic
-        # per-(N,depth)-cell population ceiling computed offline from the planner at the
-        # frozen knobs (benchmarks/cupsA_ceiling_table.json) applied to the REALIZED cell
-        # masses — the gate margin then carries wm sampling noise ONLY (no in-sample
-        # max-of-means bias, no cross-fit pooling gap). A realized cell missing from the
-        # table fails loud. Gate-bearing when a table is supplied; the estimated ceilings
-        # stay reported.
         if ceiling_table is not None:
             num = 0.0
             for r_ in rs:
@@ -266,23 +240,10 @@ def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None):
             if a:
                 strata[f"N{n}_{dbkt}"] = a
     return {"rows": rows,
-            # the raw prediction bank, for callers computing anti-degeneracy diagnostics
-            # (norm / angular dispersion) without paying a second forward. In-process only —
-            # never serialize it.
             "pred_obs": pred_obs,
             "pooled": agg(lambda r: True),
-            # the pre-designated PRIMARY slice: N in {4,5}, relay depth >= 2
-            # (an explicit N-set rather than an open-ended >=4, and the gate ceiling is switch_max,
-            # under which h_H saturates the depth<=H CELLS — the primary margin is genuinely
-            # earnable only where the analytic family runs out).
             "deep": agg(lambda r: r["N"] in (4, 5) and r["depth"] >= 2),
-            # the earnable-stratum aggregate the capability gate references (the
-            # instrument previously had no pooled N-in-{4,5} d>=3 slice)
             "d3plus": agg(lambda r: r["N"] in (4, 5) and r["depth"] >= 3),
-            # the EARNABLE slice: the table cells where a
-            # non-tracking strategy is NOT saturated (ceiling < 0.99 — knob-robust rule);
-            # saturated cells contribute only dilution to a margin. Gate-bearing = the CORE
-            # style earnable slice with the frozen-table margin. None when no table given.
             "earnable_core": agg(lambda r: ceiling_table is not None
                                  and ceiling_table.get(
                                      f"{r['N']},{r['depth']},{r['m']},{r['R']}", 1.0) < 0.99
@@ -293,10 +254,6 @@ def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None):
                                 and r["N"] in (4, 5)),
             "d3plus_core": agg(lambda r: r["N"] in (4, 5) and r["depth"] >= 3
                                and r["style"] == "core"),
-            # style split (census freeze): the GATE-BEARING slice is deep_style_core — the
-            # model trains on core-style boards only, so held-out-style windows measure style
-            # TRANSFER, reported separately — mixing them into the gate
-            # would conflate tracking with style generalization
             "deep_style_core": agg(lambda r: r["N"] in (4, 5) and r["depth"] >= 2
                                    and r["style"] == "core"),
             "deep_style_heldout": agg(lambda r: r["N"] in (4, 5) and r["depth"] >= 2
@@ -329,25 +286,16 @@ def exposure_swap(net, ctx, target_mod, device, seed=20260806, ceiling_table=Non
     pred = _fwd_pred(net, tok2, ctx["types"], ctx["key_pad"], ctx["rpos"], device)
     pred_obs = target_mod.to_obs(pred, ctx["z_prev"]) if target_mod is not None else pred
     cnt = {k: 0 for k in ("follow", "own_r", "own_n", "don_n", "don_o", "m")}
-    dcnt = dict(cnt)                       # core deep slice (reported)
-    ecnt = dict(cnt)                       # core EARNABLE slice — gate-bearing (freeze v3:
-    diag = 0                               # deep_core is ~43% 2-hop-solvable; earnable is 0%)
+    dcnt = dict(cnt)
+    ecnt = dict(cnt)
+    diag = 0
     for i, w in enumerate(wins):
         if donors[i] is None:
             continue
         if w["routed"] == w["name"]:
-            # diagonal window: the {routed, name} bank columns coincide, so argmin's first-index
-            # tie-break would credit a purely name-keyed model with 'follow' (review 2026-08-06).
-            # Uninformative for content-vs-name attribution — excluded, counted.
             diag += 1
             continue
         own, don = ctx["cands"][i], ctx["cands"][donors[i]]
-        # FULL-DONOR bank: the 2x2 bank FORCED an
-        # arm-mimic's wrong-slot predictions onto some bank entry, spilling ~0.1-0.25 of its
-        # mass onto don[routed] and falsifying the probe null. With EVERY donor exposure in
-        # the bank, a wrong-slot mimic prediction lands on its OWN donor entry (counted as
-        # donor_other — the directly-measured arm-mimic mass) and the follow null equals the
-        # strategy's slot accuracy exactly.
         bank = torch.cat([torch.stack([own[w["routed"]], own[w["name"]]]), don])
         d = ((bank - pred_obs[i].unsqueeze(0)) ** 2).mean(-1)
         pick = int(d.argmin())
@@ -373,10 +321,6 @@ def exposure_swap(net, ctx, target_mod, device, seed=20260806, ceiling_table=Non
                 "donor_other": round(c["don_o"] / m, 4) if m else None}
     out = _rep(cnt)
     out["n_diagonal_skipped"] = diag
-    # pooled depths are 2-hop-clearable and the
-    # deep_core slice is still ~43% depth<=2 — the GATE reads the core EARNABLE slice (where
-    # the resolver contributes 0 and the analytic arm family caps at ~0.52); deep_core and
-    # pooled stay reported.
     out["deep_core"] = _rep(dcnt)
     out["earnable_core"] = _rep(ecnt)
     return out
@@ -432,7 +376,7 @@ def build_swap_cache(ctx, percep_name, device, seed=20260806, max_windows=None):
     tokz = AutoTokenizer.from_pretrained(percep.MODEL, revision=revision)
     enc = AutoModel.from_pretrained(percep.MODEL, revision=revision).to(device).eval()
     maxlen = getattr(percep, "MAXLEN", 256)
-    mc, sc = ctx["cmd_stats"]                            # the cached-embedding cmd stats frame
+    mc, sc = ctx["cmd_stats"]
 
     def encode_cmds(cmds):
         texts = [percep.render_cmd({"cmd": c}) for c in cmds]
@@ -447,7 +391,6 @@ def build_swap_cache(ctx, percep_name, device, seed=20260806, max_windows=None):
     rng0 = _random.Random(seed)
     idxs = (sorted(rng0.sample(range(len(wins)), max_windows))
             if max_windows and max_windows < len(wins) else list(range(len(wins))))
-    # self-parity gate over a sample of ORIGINAL mv commands (positions -> cached rows)
     par = [(i, t, src, dst) for i in idxs for (t, src, dst) in wins[i]["mvs"]][:32]
     self_parity_cos = None
     if par:
@@ -469,8 +412,6 @@ def build_swap_cache(ctx, percep_name, device, seed=20260806, max_windows=None):
         mv_steps = [t for (t, _, _) in w["mvs"]]
         dsts = [d for (_, _, d) in w["mvs"]]
         tloc = s["steps"][w["r"]]["cmd"].split()[1]
-        # integrity: replay the ORIGINAL chain, reproduce the stamped routing, and recover the
-        # per-content move-position sets the role-swap needs
         loc = {k: slots[k] for k in range(w["N"])}
         pos = {k: [] for k in range(w["N"])}
         for kd, (_, msrc, mdst) in enumerate(w["mvs"]):
@@ -478,25 +419,8 @@ def build_swap_cache(ctx, percep_name, device, seed=20260806, max_windows=None):
             loc[c] = mdst
             pos[c].append(kd)
         assert loc[w["routed"]] == tloc, f"chain replay mismatch on {w['id']}"
-        # role-swap: partner c' != routed takes routed's positions (and vice versa).
-        # c' also != name_idx: routing the NAME-keyed content to tloc would
-        # credit a purely name-keyed model with "follow"); on the diagonal (routed == name)
-        # any c' != routed is safe. N==2 off-diagonal windows have no valid partner — skipped
-        # and counted (the exposure_swap diagonal-exclusion pattern).
-        # The partner MUST itself be a mover. This is the condition the exchange-symmetry
-        # argument actually needs, and it was not enforced while alt_chain was only a
-        # diagnostic probe (a recorded reference run drew a non-mover partner in roughly half
-        # of all probed windows). It matters now because this differential is the SELECTION
-        # target, and a one-sided exchange is farmable:
-        #   routed is always a mover (the slice requires depth >= 1), so if the partner never
-        #   moved, routed's move positions transfer to it and NOTHING comes back. A positional
-        #   heuristic — first mover, last mover, deepest — then flips from routed to the
-        #   partner under the swap, scoring native_hit = 1 and swap_stayed = 0, i.e. +1. The
-        #   windows that were supposed to cancel it (where the PARTNER is the native marker
-        #   and the swap hands the marker to routed, scoring -1) cannot exist, because a
-        #   non-mover is never the native positional marker.
-        # With both sides movers the exchange is genuinely symmetric and the -1 windows are
-        # exactly as likely as the +1 windows, which is what makes the expectation zero.
+        # The partner must itself be a mover. routed always moves, so a non-mover partner makes
+        # the exchange one-sided: a positional heuristic then scores +1 with no cancelling windows.
         cand2 = [k for k in range(w["N"])
                  if k != w["routed"] and (k != w["name"] or w["name"] == w["routed"])
                  and len(pos[k]) > 0]
@@ -505,7 +429,7 @@ def build_swap_cache(ctx, percep_name, device, seed=20260806, max_windows=None):
             continue
         rng = _random.Random(seed + i)
         c2 = rng.choice(cand2)
-        partner_mover += int(len(pos[c2]) > 0)          # now 1 by construction; kept as a rail
+        partner_mover += int(len(pos[c2]) > 0)
         sched2 = {}
         for kd in pos[w["routed"]]:
             sched2[kd] = c2
@@ -518,8 +442,6 @@ def build_swap_cache(ctx, percep_name, device, seed=20260806, max_windows=None):
         for kd, dst in enumerate(dsts):
             c = sched2.get(kd)
             if c is None:
-                # an unswapped content keeps its original move: its location trajectory is
-                # identical under both chains, so the original src still identifies it
                 c = next(k for k, v in loc2.items() if v == w["mvs"][kd][1])
             cmds2.append(f"mv {loc2[c]} {dst}")
             srcs2.append(loc2[c])
@@ -527,17 +449,13 @@ def build_swap_cache(ctx, percep_name, device, seed=20260806, max_windows=None):
             depth2[c] += 1
             lastmv2 = c
         routed2 = next(k for k, v in loc2.items() if v == tloc)
-        # The SWAPPED chain's positional markers, so a caller can evaluate the analytic
-        # non-tracker arms on the same exchange the net sees. These are pure functions of the
-        # command strings — no net, no embeddings — which is exactly why they are the honest
-        # floor to measure a candidate against.
         slot_of2 = {p: k for k, p in enumerate(slots)}
         dmax2 = max([d for d in depth2.values() if d > 0] or [0])
         alt_marks[i] = {
             "h_first": slot_of2.get(srcs2[0]) if srcs2 else None,
             "h_last": next((slot_of2[s] for s in reversed(srcs2) if s in slot_of2), w["name"]),
             "h_lastmv": lastmv2,
-            "at_name": w["name"],                      # untouched by the swap, by construction
+            "at_name": w["name"],
             "deepest": sorted(k for k, d in depth2.items() if d == dmax2 and d > 0),
         }
         assert routed2 == c2 and routed2 != w["routed"], f"role-swap failed on {w['id']}"
@@ -571,12 +489,6 @@ def alt_chain(net, ctx, target_mod, device, percep_name=None, seed=20260806, max
     m = len(alts)
     follow = sum(1 for i, r2 in alts.items() if picks[i] == r2)
     stayed = sum(1 for i in alts if picks[i] == wins[i]["routed"])
-    # PER-WINDOW rows (added for cups_ca). Every aggregate below is derivable from these; they
-    # exist because the compositional differential must be intersected with measure()'s rows
-    # window-by-window and meaned UNROUNDED. Subtracting the round(4) aggregates instead is
-    # wrong twice over: the rounding, and the fact that the two arms' slice selectors do not
-    # agree (measure's earnable_core has no depth filter; earn_core here requires depth>=2 and
-    # silently drops the no-partner windows). Keyed by window id, which is stable across arms.
     rows = [{"id": wins[i]["id"], "i": i, "N": wins[i]["N"], "R": wins[i]["R"],
              "depth": wins[i]["depth"], "style": wins[i]["style"],
              "m": len(wins[i]["movers"]), "routed": wins[i]["routed"],
@@ -585,9 +497,6 @@ def alt_chain(net, ctx, target_mod, device, percep_name=None, seed=20260806, max
              "follow": int(picks[i] == r2),
              "alt_marks": alt_marks[i]}
             for i, r2 in sorted(alts.items())]
-    # deep = the PRIMARY slice (N in {4,5}, depth >= 2); alt-depth == stamped depth by the
-    # role-swap construction, so this slice's alternatives are genuinely deep. The GATE reads
-    # the core-style deep slice; both are reported.
     deep = [i for i in alts if wins[i]["N"] in (4, 5) and wins[i]["depth"] >= 2]
     deep_core = [i for i in deep if wins[i]["style"] == "core"]
     earn_core = [i for i in deep_core if ceiling_table is not None and ceiling_table.get(
@@ -630,7 +539,7 @@ def _load_standardized_seqs(data, split, model, device, stats_data=None):
     if stats_data and stats_data != data:
         mo, so, mc, sc = M.standardize_stats(H._cached_encode(stats_data, "train", model, device))
     else:
-        mo, so, mc, sc = M.standardize_stats(train_full)       # train-only stats (own root)
+        mo, so, mc, sc = M.standardize_stats(train_full)
     if split in ("inner", "final"):
         val_seqs = H._cached_encode(data, "val", model, device)
         M.apply_stats(val_seqs, mo, so, mc, sc)
@@ -658,9 +567,7 @@ def load_cups_context(data, split, model, device=None, stats_data=None):
         return None
     ctx = build_cups_layout(wins, seqs)
     ctx["seqs"] = seqs
-    ctx["data_root"] = data          # for alt_chain's perception-stamp guard
-    # the cmd standardization frame (for probe-time alt-chain encodes): recompute exactly as
-    # the loader above does — the stats root's raw train cache
+    ctx["data_root"] = data
     stats_train = H._cached_encode(stats_data or data, "train", model, device)
     _mo, _so, mc, sc = M.standardize_stats(stats_train)
     ctx["cmd_stats"] = (mc, sc)

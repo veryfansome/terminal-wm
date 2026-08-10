@@ -1,12 +1,3 @@
-# R21 causal matched-prefix prototype for native obs-missing endpoints.
-#
-# Ordinary interleaved sequences have even length and are returned by the original
-# r18 forward byte-for-byte. On an odd [prefix,c_m,PAD,c_r] layout, this
-# head retrieves the observation paired with the most c_r-similar valid prefix
-# command and conservatively blends that prototype into the native prediction.
-# The same code runs in the history-masked arm; with no valid prefix pair it
-# returns the native prediction exactly.
-
 import math
 
 import torch
@@ -37,11 +28,6 @@ def _unit(x):
 
 
 def _detect_masked_endpoint(types, key_pad):
-    """Find the last live cmd, masked obs, live cmd gap in each odd row.
-
-    Earlier tokens may be live (base arm) or masked (history arm). Detection
-    therefore cannot distinguish the two arms and does not use mask fractions.
-    """
     if (
         key_pad is None
         or types.dim() != 2
@@ -92,7 +78,6 @@ def _matched_prefix(
     read,
     threshold,
 ):
-    """Return the nearest raw prefix observation and an evidence-present mask."""
     L = tok.size(1)
     n_pairs = L // 2
     keys = tok[rows, : 2 * n_pairs : 2]
@@ -145,7 +130,6 @@ def wrap(net, D, **params):
     cfg["_prototype_original_forward"] = original_forward
 
     def wrapped_forward(tok_emb, types, key_pad):
-        # All ordinary train/fitness sequences are even cmd/obs interleaves.
         if tok_emb.size(1) % 2 == 0:
             return original_forward(tok_emb, types, key_pad)
 
@@ -164,7 +148,6 @@ def wrap(net, D, **params):
             read,
             cfg["prototype_match_threshold"],
         )
-        # This is the exact history-arm path: no evidence, no correction.
         if not bool(has_evidence.any().item()):
             return pred, hidden
 
@@ -185,7 +168,6 @@ def wrap(net, D, **params):
 
 
 def aux_loss(head_state, batch, net, device):
-    # Retain the shared transition-consistency objective exactly.
     return BASE.aux_loss(head_state, batch, net, device)
 
 

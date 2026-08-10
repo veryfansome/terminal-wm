@@ -1,24 +1,3 @@
-'''R22 batcher: EXACT-QUERY STATE-BIFURCATION PACKING.
-
-An earlier diagnostic isolated command decoding behind a history-presence gate as the
-dominant failure mode. This batcher makes command decoding insufficient during ordinary causal
-training: it co-packs distinct fit trajectories from the SAME image and cwd that issue the
-EXACT same cat/ls command but have close-yet-distinct observation targets. Image, cwd, and
-command are held fixed; only preceding trajectory/state can explain which target is right.
-
-Mining is fit-only and read-only. For each (image, cwd, raw command) group, retain distinct-
-sequence target pairs with cosine in [min_target_cos, max_target_cos]. The upper threshold
-removes near-duplicate false negatives; the lower threshold keeps the pair in the
-antiretrieval-ring objective's confusable regime. At training time, preserve the sysblock
-uniform-to-image-blocked hard curriculum, but fill the hard block round-robin from a few of
-these state-bifurcation groups. Unfilled slots use the ordinary selected-image pool.
-
-The module changes only batch indices. It adds no tokens, targets, parameters, forward
-branches, or eval behavior. Anti-collapse and causality remain those of the unchanged
-objective/model. Construction and sampling use no global RNG; all sampling uses one private
-torch.Generator.
-'''
-
 import collections
 import posixpath
 import shlex
@@ -45,11 +24,8 @@ def _tokens(cmd):
 
 
 def _advance_cwd(cmd, cwd):
-    '''Track the collection environment's persistent cd state.
-
-    cd emits an empty observation, so the cached `ok` bit is false even on success; update
-    from command syntax rather than that bit. The collection policy draws valid cd targets.
-    '''
+    # Track cd state from command SYNTAX, not from the cached `ok` bit: cd emits an empty
+    # observation, so that bit is false even on a successful cd.
     toks = _tokens(cmd)
     if not toks or toks[0] != 'cd':
         return cwd
@@ -63,12 +39,8 @@ def _advance_cwd(cmd, cwd):
 
 
 def _mine_state_groups(fit, min_cos, max_cos, max_entries):
-    '''Return image pools and exact-query divergent-target pair groups.
-
-    Each pair tensor is [E,2] of distinct fit-sequence indices. Pair identities are
-    deduplicated so repeated executions of one query do not multiply its sampling weight.
-    All target geometry is detached and moved to CPU during this one-time construction.
-    '''
+    """Return (image names, per-image index pools, pool sizes, per-image list of [E,2] tensors of
+    distinct fit-sequence index pairs sharing an exact query with divergent targets)."""
     raw = collections.defaultdict(list)
     image_members = collections.defaultdict(list)
 
@@ -99,7 +71,6 @@ def _mine_state_groups(fit, min_cos, max_cos, max_entries):
         if len(entries) < 2:
             continue
         if len(entries) > cap:
-            # Deterministic coverage of a giant common query without quadratic blow-up.
             take = torch.linspace(0, len(entries) - 1, cap).round().long().unique().tolist()
             entries = [entries[j] for j in take]
 
@@ -201,7 +172,6 @@ def make_batcher(
                     used.update(pair)
                     cursor += 1
 
-            # Odd slots, sparse groups, or complete fallback use the sysblock-style image pool.
             if len(hard) < n_hard:
                 fill = block_pool[torch.randint(
                     0, block_pool.numel(), (n_hard - len(hard),), generator=g

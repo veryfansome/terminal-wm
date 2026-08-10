@@ -2,28 +2,13 @@
 
     python -m cloud.runner --genomes evolve/genomes/*.json --seeds 0,1,2 --concurrency 6 --gpus 4
 
-The scoring engine is deliberately synchronous and has no job queue, no parallelism and no GPU
-arbitration — it scores one candidate at a time. That is fine for the engine's own bookkeeping and
-useless for a measurement campaign, where the work is dozens of independent (genome, seed) trains
-that should saturate a rented box. So the pack lane runs them here and the numbers go back through
-the engine's ingest path afterwards.
+Runs many independent (genome, seed) trains across the visible GPUs; the numbers go back through
+the engine's ingest path afterwards. Default concurrency is 3 per GPU, and BLAS threads are sized
+from the container's real cgroup cpu quota divided across the concurrent jobs — not from the
+reported core count, which is the shared host's.
 
-THE JOB IS SMALL AND THE GPU IS THE LIMIT
-  A single train on this world model is kernel-launch bound, not memory bound — one GPU is not
-  saturated by one job and is saturated by roughly three. So throughput scales with GPU COUNT, and
-  concurrency should be about three per visible GPU. Running one job at a time wastes most of the
-  box; running twenty wastes the queue.
-
-THREAD CAPS ARE MANDATORY, AND nproc IS A LIE
-  A container reports the SHARED HOST's core count while being CFS-quota-capped to a fraction of
-  it. Sizing BLAS threads to the reported count is how you get a box pegged at heavy throttling
-  with the GPU idle. This module reads the real cgroup quota and divides it across the concurrent
-  jobs. Measured consequence of getting this wrong, once: a box wedged badly enough to lose the
-  session.
-
-Each job writes a .done sentinel, so re-running the command resumes rather than repeating. One job
-failing does not take down the batch — its reason is recorded and the rest continue, because a
-failed candidate is a result.
+Each job writes a .done sentinel, so re-running the command resumes rather than repeating. One
+job failing does not take down the batch: its reason is recorded and the rest continue.
 """
 import argparse
 import concurrent.futures as cf
@@ -73,8 +58,6 @@ def run_job(genome, seed, gpu, threads, outdir, split, mode, timeout_s):
 
     if r.returncode != 0 or not (d / "metrics.json").exists():
         (d / "error.txt").write_text((r.stdout or "") + "\n" + (r.stderr or ""))
-        # An environment fault is not a candidate fault. Say which, loudly, so a broken box does
-        # not get written up as a population of bad candidates.
         kind = "infra" if "PREFLIGHT FAILED" in (r.stderr or "") else "failed"
         return {"job": tag, "status": kind, "secs": round(time.time() - t0),
                 "detail": (r.stderr or "")[-300:]}
@@ -101,10 +84,6 @@ def main(argv=None):
     seeds = [int(s) for s in a.seeds.split(",")]
     conc = a.concurrency or (3 * max(1, a.gpus))
 
-    # Derive the lane ONCE. The standardized splits, the window layout and the role-swap chains
-    # are properties of (root, split, eye, swap-seed), not of any genome, and synthesizing them
-    # per worker means reloading the text encoder and re-encoding every alternative chain N times
-    # for a bit-identical result. Workers memory-map this, so they share one physical copy.
     if not os.environ.get("TWM_CONTEXT"):
         ctx_path = pathlib.Path(a.out) / f"lane-{a.split}.pt"
         if not ctx_path.exists():

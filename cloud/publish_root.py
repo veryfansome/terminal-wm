@@ -2,11 +2,7 @@
 
     python -m cloud.publish_root <encoded-root> [<hf-dataset-repo>]
 
-Encoding is fast enough that re-doing it per machine is tempting. Don't. The encoder checkpoint is
-pinned by a tree hash, but the tensors it produces are not pinned by anything, and a forward pass
-on different hardware can differ in the last bits — which is a different standardization frame,
-reached with every integrity check still green. Publish once, pin the embedding sha, and make every
-consumer verify it.
+Prints the embedding sha to pin wherever the root is consumed; eval/preflight.py verifies it.
 """
 import pathlib
 import sys

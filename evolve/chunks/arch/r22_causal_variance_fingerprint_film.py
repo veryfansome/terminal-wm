@@ -1,30 +1,3 @@
-'''R22 architecture: causal variance-fingerprint FiLM.
-
-The r18 path-state forward is retained verbatim. A new channel computes a shrunk
-per-coordinate variance over strictly earlier valid observation embeddings and
-uses only that second-order statistic to calibrate command predictions. It does
-not retain observation identity, order, or mean and cannot retrieve/copy a
-prefix value.
-
-The stored embeddings are standardized with train statistics, so N(0, I) is the
-no-evidence prior. For command i:
-
-    rho = n / (n + kappa)
-    v   = rho * population_variance(obs_j, j < i) + (1-rho) * 1
-    q   = clipped_log(v) / (1 + RMS(clipped_log(v)))
-    u   = SiLU(W_down q)
-    a,b = W_out u
-    correction = rho * [mult_cap*tanh(a)*pred + shift_cap*tanh(b)]
-
-W_down and W_out have no biases, so an empty prefix always emits exactly zero.
-W_out is zero-initialized, making the complete model exactly the r18 path-state
-model at initialization while allowing the ordinary main loss to recruit the channel.
-The correction is RMS-capped and applied only at valid command positions.
-Cumulative moments are shifted by one pair, so observation j affects commands
-strictly after j. Invalid observations, including the imagination PAD slot, are
-excluded before every cumulative operation.
-'''
-
 import math
 
 import torch
@@ -81,19 +54,11 @@ class R22CausalVarianceFingerprintFilm(R18PathStateLatentTransition):
         if any((not math.isfinite(v)) or v <= 0.0 for v in values):
             raise ValueError('variance hyperparameters must be finite and positive')
 
-        # Both maps are bias-free: log-variance zero implies a zero channel for
-        # every parameter setting, ruling out a blank-history command decoder.
         self.variance_down = nn.Linear(D, self.variance_rank, bias=False)
         self.variance_out = nn.Linear(self.variance_rank, 2 * D, bias=False)
         nn.init.zeros_(self.variance_out.weight)
 
     def _causal_log_variance(self, tok_emb, valid, n_cmd):
-        '''Return shrunk log-variance and evidence count at each command.
-
-        The zero prepended to each inclusive observation cumulative sum shifts it
-        onto command positions: command i receives observations j<i only. The
-        inherited _pad_steps handles odd masked-endpoint and even train layouts.
-        '''
         batch = tok_emb.size(0)
         obs = tok_emb[:, 1::2, :]
         obs_valid = valid[:, 1::2]

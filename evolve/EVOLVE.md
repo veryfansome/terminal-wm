@@ -92,3 +92,12 @@ Ten arch impls import the path-state trunk and eight head impls import the forwa
 Setting `TWM_CDH_ROOT` adds a command-history routing reading to every candidate: on the same trained net, does the prediction for a read depend on the navigation that actually preceded it, or would a different navigation history have produced the same answer? It appears as `public.cdh_routing` and in full under `private.cdh`.
 
 It is **reported and never scored**. Two reasons it is worth carrying anyway. It keeps a skill's trajectory visible across the whole search rather than only while that skill happens to be the objective, and those readings are what make a training blend across packs tunable later. Note what it currently measures: the net trains on one pack and is asked about another, so this is a *transfer* reading. Its windows are standardized in the training root's frame when the lane context is built, so the net is at least being fed inputs of the kind it saw.
+
+### How a round runs here
+Two workflows, in sequence.
+
+**First, the inventors.** Spawn the requested number, one per slot, each in its own jail, and let the whole cohort finish before anything else happens. Every inventor returns an implementation and an explicit hypothesis — what it claims its mechanism does, stated so that someone else can check the code against it.
+
+**Then, the reviewers.** A second workflow with one adversarial reviewer per proposal — a reviewer each, not a shared pool and not one reviewer over the batch. Each reviewer answers one narrow question: **does this code actually do what its hypothesis says it does?** Not whether the idea is good, not general code quality. A proposal whose implementation diverges from its own description is worse than a weak idea, because it gets scored and archived under a description that does not match it, and every later reader inherits the mismatch. A divergence is fixed or the slot is dropped, before any evaluation is spent.
+
+Splitting the stages is deliberate: an inventor still working cannot be reviewed, and a reviewer that starts early reviews a moving target.

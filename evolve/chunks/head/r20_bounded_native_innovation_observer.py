@@ -1,11 +1,3 @@
-"""R20 bounded innovation observer for native obs-missing imagination.
-
-The r18 forward-model-consistency auxiliary is retained. A private module additionally learns
-an endpoint-only, hard-bounded correction over the native imagination-write prediction.
-It is trained from masked mutation/read suffixes mined exclusively from training batches.
-All private-branch inputs are detached, so its loss cannot update the shared world model.
-"""
-
 import math
 
 import torch

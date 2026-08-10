@@ -1,11 +1,3 @@
-"""R20 arch: operation-conditioned imagination write with bounded shell calibration.
-
-This is the R18 path-state transition world model plus a small two-scalar intervention
-calibrator. Fully observed even-length streams delegate directly to R18. On the declared
-odd masked-endpoint layout, alpha controls how much of the learned transition is written
-and beta supplies a bounded radial correction at the later read.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -37,7 +29,8 @@ class R20InterventionalGainShell(R18PathStateLatentTransition):
         self.imag_shell_max = float(imag_shell_max)
         self._imag_mode = None
 
-        # Do not move the inherited/global initialization RNG stream.
+        # New modules are constructed AFTER the entire inherited __init__ and the global RNG
+        # state is restored around them, so the inherited init-RNG stream is unchanged.
         rng_state = torch.get_rng_state()
         try:
             hidden = max(8, int(imag_calib_hidden))
@@ -55,7 +48,6 @@ class R20InterventionalGainShell(R18PathStateLatentTransition):
         self.supports_interventional_calibrator = True
 
     def imagination_command_features(self, tok_emb, types):
-        """Return the exact pre-transformer command features used by the R18 transition."""
         t = types.long().clamp(0, 1)
         cmd_x = self.cmd_proj(tok_emb)
         obs_x = self.obs_proj(tok_emb)
@@ -74,8 +66,6 @@ class R20InterventionalGainShell(R18PathStateLatentTransition):
         return alpha, beta
 
     def imagination_calibrate(self, p0, p1, x_m, x_r, w_prior):
-        """Analytic endpoint used by the head: interpolate structured hypotheses, then
-        make only a bounded radial correction. No free 768-dimensional innovation exists."""
         alpha, beta = self.imagination_coeffs(x_m, x_r, w_prior)
         pre = p0 + alpha.unsqueeze(-1) * (p1 - p0)
         shell = F.normalize(pre, dim=-1, eps=1e-6) * (float(D) ** 0.5)
@@ -84,8 +74,6 @@ class R20InterventionalGainShell(R18PathStateLatentTransition):
         return out, alpha, beta
 
     def _transition_reads(self, x_cmd, obs_tok, valid_cmd, valid_obs, n_cmd, n_pair):
-        # Every fitness stream is even and paired, so this is the exact inherited R18 path
-        # without a device synchronization or calibrator graph.
         if n_cmd == n_pair:
             return super()._transition_reads(
                 x_cmd, obs_tok, valid_cmd, valid_obs, n_cmd, n_pair

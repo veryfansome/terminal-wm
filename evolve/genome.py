@@ -8,7 +8,6 @@ import pathlib
 CHUNKS_DIR = pathlib.Path(__file__).resolve().parent / "chunks"
 
 
-# ---- registry --------------------------------------------------------------------------
 
 def load_objective(genome):
     """Import the objective impl module named by the genome and return its `loss` callable.

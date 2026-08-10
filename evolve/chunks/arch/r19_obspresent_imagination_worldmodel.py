@@ -1,83 +1,3 @@
-"""
-R19 arch: OBS-ABSENT "IMAGINATION" PATH over the R18 per-path latent-transition world
-model. Surgical port of `r18_pathstate_latent_transition_worldmodel`: adds a third slot
-type (type 2 = an IMAGINED command whose observation is ABSENT by design, sitting at an
-even/command position) so the per-path transition operator f(s,cmd)=s*(1+gamma)+beta can be
-COMPOSED without any observation to feed it. A type-2 command writes to its path slot using
-its current retrieved content s_pre in place of the missing obs (base=s_pre when obs absent),
-gated by the same mutation gate; its paired obs slot contributes NOTHING (obs_present decoupled
-from valid_cmd across every obs-consuming branch). With no type-2 slots the arch computes the
-R18 path-state model BIT-FOR-BIT (the imagination path is inert). The write depends only on
-s_pre (strictly
-earlier writes) + the command — never on future/absent obs — so it stays strictly causal and
-leakage-clean; imagined mutations let the model roll the transition forward with no obs feedback
-(a latent "imagined rollout" / planning-by-composition endpoint).
-
-Base mechanism (unchanged, R18): an object-centric,
-Dreamer/RSSM-style *learned latent dynamics* keyed by path, added as a zero-init
-correction on the carried r13 trunk (syscond FiLM + verb-quotient filebind + path
-memory), so at init it computes that trunk's function bit-for-bit.
-
-WHERE THE MARGIN LIVES (v3): the least-retrievable cells are content reads on
-MUTATED paths. A symbolic tracker + mutation-aware retrieval are already SUBTRACTED
-as baselines, so merely re-deriving "which path changed" ties them and earns ~0. The
-open lever is predicting the CURRENT CONTENT a tracker cannot compute — e.g. after
-`echo hi > P` a later `cat P` must return "hi", content that never appeared as stdout.
-
-WHY THIS IS A NEW CORE DYNAMICS (distinct from all prior path memories):
-  * r17_pathdelta stores value = obs + w_mut * v_cmd — an ADDITIVE command projection
-    that does NOT depend on the path's current content (v_cmd(cmd) alone). It cannot
-    express MODIFY/APPEND (new = g(old, cmd)); it can only overwrite with a
-    command-decoded vector.
-  * r18 typed-slot memory (in-round #6) TRANSPORTS fixed content vectors across discrete
-    slots (MOVE p->q, DELETE free, allocate) — symbolic bookkeeping, no learned content
-    TRANSFORM.
-  * THIS arch's primitive is a LEARNED CONTENT-TRANSITION OPERATOR f(s_pre, cmd): the
-    value written to a path slot is a command-conditioned AFFINE EDIT of the slot's
-    CURRENT retrieved content, s_pre * (1 + gamma(cmd)) + beta(cmd), with gamma,beta a
-    per-channel (diagonal) function of the COMMAND and gamma bounded by a tanh (stable
-    recurrence; command-only so the per-path recurrence is an exact linear scan). REPLACE
-    (gamma->-1, beta=new content),
-    MODIFY/APPEND (gamma~0, beta=increment), or plain carry (blend toward obs) all fall
-    out of one operator. Because a path is touched repeatedly, this is a genuine
-    RECURRENCE s -> f(s) -> f(f(s)) — a per-object latent world-model transition (RSSM /
-    Dreamer, arXiv:1912.01603; object-centric slots), applied per PATH, in obs space.
-
-MECHANISM (sequential causal scan over the <=16 command positions — cheap; the r13 trunk
-already runs a single-chunk delta solve at this length):
-  For command i, with path key p_i = unit(W_tr x_cmd_i):
-    s_pre_i = p_i^T MEM                         # current content from writes < i (CAUSAL)
-    read_i  = s_pre_i                            # the post-mutation content this read returns
-    delta_i = s_pre_i*(1 + g) + b   where (g,b)=Transition(x_cmd_i), g=tanh*g_scale  # COMMAND-conditioned
-    v_i     = (1 - w_i)*obs_i + w_i*delta_i      # w_i=sigmoid(mut_gate): reads store obs, mutations store the transition
-    MEM    <- decay*MEM + p_i (v_i - s_pre_i)^T  # delta-rule (Widrow-Hoff) overwrite of the slot
-  (g,b) depend on the COMMAND only (a per-channel/diagonal affine edit — the mechanism's point),
-  so this recurrence is exactly a diagonal-gated linear scan with erase gate a_i=w_i(1+g)-1 and
-  additive source b_i=(1-w_i)obs_i+w_i*beta_i; it therefore admits an exact batched closed-form
-  solve (implemented + verified equivalent, <1.1e-6), but the per-channel gate makes that solve
-  D-heavy and it is a wash-to-slower at the real train config, so the <=16-step loop ships.
-  The read at i uses MEM from strictly-earlier writes only; obs_i enters the WRITE at i,
-  which affects reads at i+1.. only — strictly causal (obs_t perturbs predictions at
-  commands > t only). The read is injected as pred_cmd += sigmoid(gate) * W_ro(read),
-  with W_ro a ZERO-INIT (D,D) square Linear -> exactly 0 at init -> the r13 trunk's function
-  bit-for-bit.
-  W_ro square (768,768) is the unique signature the co-designed optim's spectral cap targets.
-
-CO-DESIGN (the epistasis stack this round tests): the head aux
-`r18_transition_forwardmodel_consistency` supervises THIS module's `transition_from_emb`
-on mined mutation triples (pre-content, mutating command, future read) so the operator
-becomes a good forward model; the optim `r18_spectral_capped_transition_readout` caps the
-spectral norm of the (D,D) `tr_read` so the injected off-manifold correction stays norm-
-calibrated (the R10/R11 off-manifold-norm finding). arch+head+optim reinforce.
-
-r13 trunk machinery retained verbatim: verb-quotient filebind memory, path memory, view
-FiLM, 3-way read mix, fuse/direct gates, causal system-identity summary + syscond FiLM,
-exact chunkwise delta solver. Strictly causal; NaN-safe; identity at init.
-
-Refs: RSSM/Dreamer latent dynamics (arXiv:1912.01603); DeltaNet chunkwise (arXiv:2406.06484);
-Gated DeltaNet erase (arXiv:2412.06464); FiLM (arXiv:1709.07871); object-centric slots.
-"""
-
 import math
 
 import torch
@@ -135,7 +55,6 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
 
         self.cmd_proj = nn.Linear(D, self.d)
         self.obs_proj = nn.Linear(D, self.d)
-        # rows 0/1 keep R18 meaning (command / observation); row 2 = IMAGINED-command type.
         self.type_emb = nn.Embedding(3, self.d)
         self.in_norm = nn.LayerNorm(self.d)
         self.pos_scale = nn.Parameter(torch.tensor(0.2))
@@ -151,26 +70,22 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
         )
         self.tf = nn.TransformerEncoder(enc, self.layers, enable_nested_tensor=False)
 
-        # -- file memory: verb-quotient addressing over the raw command token.
         self.file_read = nn.Linear(self.d, self.key_d, bias=False)
         self.file_write = nn.Linear(self.d, self.key_d, bias=False)
         self.verb_codebook = nn.Parameter(torch.randn(self.n_verb, self.key_d) * 0.2)
         self.ctx_proj = nn.Linear(self.d, self.ctx_d)
 
-        # -- path-state memory (r13 trunk channel, unchanged).
         self.path_read = nn.Linear(self.d, self.key_d, bias=False)
         self.path_write = nn.Linear(self.d, self.key_d, bias=False)
 
         self.write_gate = nn.Linear(2 * self.d, 1)
 
-        # -- FiLM view transform (r13 trunk channel, unchanged).
         fh = max(16, int(film_hidden))
         self.film_in = nn.Linear(self.d + self.ctx_d, fh)
         self.film_out = nn.Linear(fh, 2 * D)
         nn.init.zeros_(self.film_out.weight)
         nn.init.zeros_(self.film_out.bias)
 
-        # -- causal system-identity summary + zero-init system FiLM (r13 trunk channel).
         self.sys_sal = nn.Linear(self.d, 1)
         self.sys_val = nn.Linear(self.d, self.sys_d)
         sh = max(16, int(sysfilm_hidden))
@@ -186,18 +101,16 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
         self.out_norm = nn.LayerNorm(self.d)
         self.head = nn.Linear(self.d, D)
 
-        # -- NEW: per-path latent-transition world-model memory.
-        # tr_path is a (key_d, d) sibling of the addressing projections (Muon-compatible).
         self.tr_path = nn.Linear(self.d, self.key_d, bias=False)
         th = max(32, int(tr_hidden))
-        self.tr_in = nn.Linear(self.d, th)        # command-conditioned only (cmd_feat -> gamma,beta)
+        self.tr_in = nn.Linear(self.d, th)
         self.tr_out = nn.Linear(th, 2 * D)
         self.tr_mut_gate = nn.Linear(self.d, 1)
-        self.tr_read = nn.Linear(D, D)            # (D,D) square, ZERO-INIT (identity at init)
+        self.tr_read = nn.Linear(D, D)
         nn.init.zeros_(self.tr_read.weight)
         nn.init.zeros_(self.tr_read.bias)
         self.tr_read_gate = nn.Linear(self.d, 1)
-        nn.init.constant_(self.tr_mut_gate.bias, -1.0)   # start storing obs; transition fades in
+        nn.init.constant_(self.tr_mut_gate.bias, -1.0)
         nn.init.constant_(self.tr_read_gate.bias, 0.0)
 
         init_decay = (0.985 - 0.90) / 0.099
@@ -206,8 +119,6 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
         nn.init.constant_(self.write_gate.bias, 1.0)
         nn.init.constant_(self.fuse_gate.bias, -1.0)
         nn.init.constant_(self.direct_gate.bias, -2.0)
-
-    # ---- helpers -------------------------------------------------------------
 
     def _positional(self, L, device, dtype):
         half = (self.d + 1) // 2
@@ -318,15 +229,7 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
 
         return torch.cat(outs, dim=1)
 
-    # ---- NEW: per-path latent-transition memory --------------------------------
-
     def _transition(self, s_pre, cmd_feat):
-        """Learned content-transition operator f(s_pre, cmd): a command-conditioned
-        affine edit of the current retrieved content. gamma,beta depend on the COMMAND
-        ONLY (not s_pre), so the per-path recurrence becomes a diagonal-gated linear scan
-        with the per-channel edit (gamma in R^D) as its mechanism; gamma bounded by
-        tanh*g_scale keeps the recurrence marginally stable. Signature unchanged so
-        transition_from_emb + the head forward-model hook still work."""
         hin = torch.nn.functional.gelu(self.tr_in(cmd_feat))
         gb = self.tr_out(hin)
         gamma = torch.tanh(gb[..., :D]) * self.tr_gscale
@@ -334,72 +237,42 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
         return s_pre * (1.0 + gamma) + beta
 
     def transition_from_emb(self, s_pre, cmd_emb):
-        """Co-design entry point for the forward-model head aux: apply the SHARED transition
-        operator to a current-content estimate `s_pre` [N,D] and a RAW standardized command
-        embedding `cmd_emb` [N,D], reconstructing the same cmd feature the trunk uses
-        (cmd_proj + cmd type_emb + in_norm; position omitted). Gradients flow into the shared
-        tr_in/tr_out and the trunk input projection."""
+        """Apply the shared transition operator to a current-content estimate `s_pre` [N,D]
+        and a raw standardized command embedding `cmd_emb` [N,D]; returns the post-transition
+        content [N,D]. Entry point for the head aux that supervises the operator."""
         idx0 = torch.zeros(cmd_emb.size(0), dtype=torch.long, device=cmd_emb.device)
         cmd_feat = self.in_norm(self.cmd_proj(cmd_emb) + self.type_emb(idx0))
         return self._transition(s_pre, cmd_feat)
 
     def _transition_reads(self, x_cmd, obs_tok, valid_cmd, valid_obs, imagined, n_cmd, n_pair):
-        """Sequential causal per-path latent world-model scan. Returns reads [B,n_cmd,D]:
-        read at command i = the path slot's current content from writes STRICTLY before i.
-
-        R19: a command-only IMAGINED slot (imagined[:,i]=True, type 2) writes to its path slot
-        even though its observation is absent, using s_pre in place of the missing obs
-        (base=s_pre) so the transition operator composes with no obs feedback. With no imagined
-        slots this reduces to the R18 recurrence bit-for-bit (obs_present==valid_obs, base==obs_i,
-        write gate==valid_cmd&valid_obs).
-
-        The transition is now COMMAND-CONDITIONED (gamma,beta from cmd only), so this recurrence
-        is exactly the diagonal-gated linear scan
-            mem_i = (decay*I + a_i . p_i p_i^T) mem_{i-1} + p_i b_i^T,
-            a_i = w_i*(1+gamma_i)-1 (diagonal erase gate),  b_i = (1-w_i)obs_i + w_i beta_i,
-        read_i = p_i^T mem_{i-1} (strictly-earlier writes -> obs_i affects reads>i only, causal).
-
-        NOTE (2026-07-26 speed review): a batched closed-form solve of this scan was implemented
-        and verified numerically equivalent (leakage-clean, <1.1e-6 on pred/reads). It is NOT
-        the version that ships: the diagonal (per-channel) gate forces a per-channel [B,D,C,C]
-        solve that cannot share across the D output channels (unlike r9/r17's scalar-beta
-        delta), so at the actual train config (bs64, L16, N<=8) it is ~0.6x the loop's speed
-        and a wash on the full arch
-        (0.386 vs 0.374 s/step full stack). The <=16-step Python loop is cheaper here and was
-        never the arch bottleneck; the head-aux vectorization (r18 head) is what removed the
-        timeout. Kept sequential for simplicity/speed."""
         B = x_cmd.size(0)
         dtype = x_cmd.dtype
-        p = self._unit(self.tr_path(x_cmd))                          # [B,n_cmd,key_d]
-        w = torch.sigmoid(self.tr_mut_gate(x_cmd)).squeeze(-1)       # [B,n_cmd]
+        p = self._unit(self.tr_path(x_cmd))
+        w = torch.sigmoid(self.tr_mut_gate(x_cmd)).squeeze(-1)
         decay = 0.90 + 0.099 * torch.sigmoid(self.logit_decay)
         decay = decay.to(dtype)
         mem = x_cmd.new_zeros(B, self.key_d, D)
         reads = []
         for i in range(n_cmd):
-            pi = p[:, i, :]                                          # [B,key_d]
-            s_pre = torch.bmm(pi.unsqueeze(1), mem).squeeze(1)       # [B,D] writes < i (causal)
+            pi = p[:, i, :]
+            s_pre = torch.bmm(pi.unsqueeze(1), mem).squeeze(1)
             reads.append(s_pre)
-            delta = self._transition(s_pre, x_cmd[:, i, :])          # [B,D] (gamma,beta cmd-only)
-            imagined_i = imagined[:, i]                              # [B] bool
+            delta = self._transition(s_pre, x_cmd[:, i, :])
+            imagined_i = imagined[:, i]
             if i < n_pair:
                 obs_i = obs_tok[:, i, :].to(dtype)
-                obs_present_i = valid_obs[:, i] & ~imagined_i        # [B] real paired obs?
+                obs_present_i = valid_obs[:, i] & ~imagined_i
             else:
-                obs_i = s_pre.new_zeros(B, D)                        # trailing lone command: no obs
+                obs_i = s_pre.new_zeros(B, D)
                 obs_present_i = torch.zeros(B, dtype=torch.bool, device=x_cmd.device)
-            wi = w[:, i].unsqueeze(-1)                               # [B,1] mutation gate
-            # base = obs when a real observation is present, else keep current content s_pre
-            base_i = torch.where(obs_present_i.unsqueeze(-1), obs_i, s_pre)   # [B,D]
-            # write on a paired read OR an imagined command; never on a bare/absent obs.
-            write_active_i = valid_cmd[:, i] & (obs_present_i | imagined_i)   # [B] bool
-            v_i = (1.0 - wi) * base_i + wi * delta                   # write value
-            corr = (v_i - s_pre) * write_active_i.to(dtype).unsqueeze(-1)     # gate padded/dead/absent-obs
+            wi = w[:, i].unsqueeze(-1)
+            base_i = torch.where(obs_present_i.unsqueeze(-1), obs_i, s_pre)
+            write_active_i = valid_cmd[:, i] & (obs_present_i | imagined_i)
+            v_i = (1.0 - wi) * base_i + wi * delta
+            corr = (v_i - s_pre) * write_active_i.to(dtype).unsqueeze(-1)
             mem = decay * mem + torch.bmm(pi.unsqueeze(2), corr.unsqueeze(1))
             mem = torch.nan_to_num(mem, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-1e4, 1e4)
         return torch.nan_to_num(torch.stack(reads, dim=1), nan=0.0, posinf=1e4, neginf=-1e4)
-
-    # ---- forward -------------------------------------------------------------
 
     def forward(self, tok_emb, types, key_pad):
         B, L, _ = tok_emb.shape
@@ -416,8 +289,6 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
 
         cmd_x = self.cmd_proj(tok_emb)
         obs_x = self.obs_proj(tok_emb)
-        # obs projection ONLY for type 1; cmd projection for types 0 AND 2 (imagined command).
-        # bit-identical to R18's (t==0 -> cmd else obs) for t in {0,1}.
         x = torch.where((t == 1).unsqueeze(-1), obs_x, cmd_x)
         x = x + self.type_emb(t) + self.pos_scale * self._positional(L, device, x.dtype).unsqueeze(0)
         x = self.in_norm(x)
@@ -437,9 +308,7 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
 
         valid_cmd = valid[:, 0::2]
         valid_obs = valid[:, 1::2]
-        # type-2 imagined commands (command stream = even positions), [B,n_cmd].
         imagined = (t[:, 0::2] == 2)
-        # an imagined command has NO paired observation to write / summarize / carry.
         obs_present_pair = valid_obs & ~imagined[:, :n_pair]
         active_pair = valid_cmd[:, :n_pair] & obs_present_pair
 
@@ -477,7 +346,6 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
         shift = film[..., D:]
         r_view = torch.nan_to_num(gamma * r_obs + shift, nan=0.0, posinf=1e4, neginf=-1e4)
 
-        # -- causal system-identity summary (gated running mean over past obs).
         if n_pair:
             sal = torch.sigmoid(self.sys_sal(h_obs)).squeeze(-1)
             sal = sal * obs_present_pair.to(sal.dtype)
@@ -520,10 +388,9 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
         fuse_in = torch.cat([h_cmd0, mem_h, read_feat], dim=-1)
         h_cmd = self.out_norm(h_cmd0 + torch.sigmoid(self.fuse_gate(fuse_in)) * mem_h)
 
-        # -- NEW: per-path latent-transition read, injected via a zero-init (D,D) readout.
         tr_reads = self._transition_reads(x_cmd, obs_tok, valid_cmd, valid_obs, imagined, n_cmd, n_pair)
-        g_tr = torch.sigmoid(self.tr_read_gate(h_cmd0))              # [B,n_cmd,1]
-        tr_contrib = g_tr * self.tr_read(tr_reads.to(x.dtype))       # 0 at init (tr_read zero)
+        g_tr = torch.sigmoid(self.tr_read_gate(h_cmd0))
+        tr_contrib = g_tr * self.tr_read(tr_reads.to(x.dtype))
 
         sf_h = torch.tanh(self.sysfilm_in(torch.cat([h_cmd0, s_cmd.to(x.dtype)], dim=-1)))
         sf = self.sysfilm_out(sf_h).to(dtype)
@@ -534,7 +401,7 @@ class R19ObsPresentImaginationWorldModel(nn.Module):
         h_out[:, 0::2, :] = h_cmd
         pred = self.head(h_out).clone()
         pred_cmd = pred[:, 0::2, :] + torch.sigmoid(self.direct_gate(fuse_in)).to(dtype) * target_read
-        pred_cmd = pred_cmd + tr_contrib.to(dtype)                   # NEW transition correction
+        pred_cmd = pred_cmd + tr_contrib.to(dtype)
         pred_cmd = pred_cmd * (1.0 + g_sys) + b_sys
         pred[:, 0::2, :] = torch.nan_to_num(pred_cmd, nan=0.0, posinf=1e4, neginf=-1e4)
 

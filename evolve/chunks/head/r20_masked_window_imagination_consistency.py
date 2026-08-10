@@ -1,57 +1,3 @@
-"""R20 head: the r18 FORWARD-MODEL CONSISTENCY term verbatim + a MASKED-WINDOW IMAGINATION
-aux that trains the co-designed r20 arch's `imaginer` on in-batch-mined mutation->read
-windows — the missing training signal for direct-endpoint imagination.
-
-THE TARGET (measured): the r18 stack composes its obs-calibrated transition operator
-at -0.105 vs the lexical floor on mutation->read windows, while a frozen-embedding probe
-(cross-attention over the plan-time prefix queried by the two endpoint commands) proves
-+0.16-0.30 headroom exists on every family. Nothing in the r18 stack's single training
-pass ever POSES the imagination problem: by the time a read at r is scored, the obs at
-m..r-1 are present in the stream, so no mechanism is ever trained to predict z_r from
-(H_{<m}, c_m, c_r) alone. The refuted r19 attempt posed it POST-HOC (unstable all-params
-InfoNCE fine-tune, non-reproducing); this head poses it INSIDE the pass, on a dedicated
-module with stationary (frozen-embedding) inputs, so it cannot destabilize the trunk.
-
-MECHANISM (train-only; eval forward untouched — wrap adds no module, never re-points):
-  1. TRANSITION-CONSISTENCY TERM, VERBATIM: mine same-path (i < k < j) triples by frozen
-     cmd-cosine with the observation changed across k, and require the arch's shared
-     operator f(obs_i, cmd_k) ~ obs_j (cos+MSE, change-weighted, ramped). Identical code,
-     weights and RNG consumption to `r18_transition_forwardmodel_consistency` — that aux
-     is preserved bit-for-bit.
-  2. NEW IMAGINATION TERM: mine same-path (k -> j = nearest later touch) ENDPOINT pairs
-     (no earlier-touch requirement — ~90% of genuine window targets have NO local source
-     observation, and requiring one would mis-match the measurement distribution),
-     weighted by sim_kj * (floor + w_mut(k)) where w_mut is the arch's OWN learned
-     mutation-gate (detached) — the in-distribution mutation detector (0.946 on real
-     mutations). Each mined pair becomes a masked-window JEPA example: predict z_obs_j
-     from (raw prefix pairs < k, raw cmd_k, raw cmd_j) via net.imaginer, trained with
-     an L2-InfoNCE in the eval geometry (per-dim-mean sqL2 logits, tau=0.25, duplicate-
-     label masking) + a small MSE anchor for norm calibration. Gradients flow ONLY into
-     imaginer params (all inputs are detached frozen embeddings; the w_mut factor is
-     computed under no_grad) — the trunk's training trajectory is untouched.
-
-WHY THIS CAPTURES THE SIGNAL WHERE r18/r19 FAILED: the imaginer's inputs are raw frozen
-embeddings, so the training and measurement input distributions are IDENTICAL by
-construction (the r18 operator's train/compose mismatch cannot occur); the read command
-c_r is an input (the r18 operator never saw it); and cross-attention composes distributed
-prefix evidence (source-content transport for mv/redir, system-styled priors for mkdir)
-instead of editing a single content estimate. Hypothesis-tested end-to-end on TRAIN-image
-windows (held-out seqs, exact genuine windows, this exact module + loss on the noisy
-embedding-mined pool): +0.166 aggregate over the lexical floor, every family positive,
-history-ON minus trained-history-OFF +0.309.
-
-Causal / leak-free: eval forward untouched; future obs_j enters ONLY as a loss label;
-future cmd_j is a train-only aux INPUT mirroring the sanctioned endpoint formulation
-(the measurement itself supplies c_r as the query) and never touches any scored
-prediction. Disabled (transition-term-only) on archs without `imaginer`; fully disabled
-(hard 0.0) on archs with neither `imaginer` nor `transition_from_emb`.
-
-Refs: I-JEPA masked latent prediction (arXiv:2301.08243); V-JEPA 2 action-conditioned
-predictor on frozen features (arXiv:2506.09985); CPC/InfoNCE (arXiv:1807.03748);
-debiased/false-negative-aware contrastive (arXiv:2007.00224); constructive episodic
-simulation (Schacter, Addis & Buckner 2007, Nat Rev Neurosci 8:657).
-"""
-
 import math
 
 import torch
@@ -69,24 +15,22 @@ DESCRIPTION = (
 )
 
 _DEFAULTS = {
-    # ---- transition-consistency term (verbatim r18 defaults) ----
-    "row_frac": 0.6,       # fraction of batch rows the aux mining runs on
-    "path_thresh": 0.60,   # frozen cmd-cosine floor for "same path"
-    "change_floor": 0.25,  # min mean-sq change |obs_i - obs_j|^2 to call it a mutation
-    "max_examples": 512,   # cap mined triples per step (cost control)
-    "cos_weight": 0.10,    # operator -> obs_j cosine reconstruction
-    "mse_weight": 0.02,    # small metric anchor
+    "row_frac": 0.6,
+    "path_thresh": 0.60,
+    "change_floor": 0.25,
+    "max_examples": 512,
+    "cos_weight": 0.10,
+    "mse_weight": 0.02,
     "aux_weight": 1.0,
-    "ramp_steps": 400,     # smoothstep ramp so early training is main-loss-dominated
-    # ---- NEW imagination term ----
-    "imag_weight": 1.0,        # weight on the imagination aux (imaginer params only)
-    "imag_ramp_steps": 400,    # own smoothstep ramp (same schedule family)
-    "imag_path_thresh": 0.60,  # same-path floor for endpoint mining
-    "imag_max_examples": 256,  # cap mined endpoint pairs per step
-    "imag_tau": 0.25,          # L2-InfoNCE temperature (eval-geometry, proven value)
-    "imag_dup_delta": 0.05,    # per-dim sq-dist below which two labels are the SAME answer
-    "imag_mse": 0.05,          # small MSE anchor (norm calibration; the r19 blowup guard)
-    "imag_wfloor": 0.15,       # mining-weight floor added to the detached mutation gate
+    "ramp_steps": 400,
+    "imag_weight": 1.0,
+    "imag_ramp_steps": 400,
+    "imag_path_thresh": 0.60,
+    "imag_max_examples": 256,
+    "imag_tau": 0.25,
+    "imag_dup_delta": 0.05,
+    "imag_mse": 0.05,
+    "imag_wfloor": 0.15,
 }
 
 _EPS = 1e-8
@@ -125,9 +69,6 @@ def _interleave_layout_ok(b):
 
 
 def wrap(net, D, **params):
-    """No forward re-point, no module cycle, no new module: the operator and the imaginer
-    are the ARCH's own (shared by reference). Returns a config dict; each term is disabled
-    independently when the arch lacks its module (passthrough-equivalent if both absent)."""
     cfg = dict(_DEFAULTS)
     cfg.update(params)
     cfg["D"] = int(D)
@@ -139,46 +80,38 @@ def wrap(net, D, **params):
 
 @torch.no_grad()
 def _mine_triples(cmd, obs, valid, path_thresh, change_floor):
-    """Per row, mine (row, i, k, j) same-path triples with obs changed across k, plus a weight.
-    cmd/obs [B,maxn,D] standardized; valid [B,maxn] bool. FULLY VECTORIZED — one batched
-    similarity matmul + tensor top/min selection, no per-row/per-position Python loop and no
-    Python-scalar float()/.item() (which forced tens of thousands of MPS device->host syncs).
-    Numerically equivalent to the original mining (nearest earlier / nearest later same-path
-    touch; change>=floor; positive finite weight), modulo tie-breaking. Returns device tensors
-    (sel_b, sel_i, sel_k, sel_j, sel_w), each 1-D over the surviving triples."""
     B, maxn, _ = cmd.shape
     device = cmd.device
     cu = _unit(torch.nan_to_num(cmd, nan=0.0, posinf=1e4, neginf=-1e4))
-    sim = torch.bmm(cu, cu.transpose(1, 2))                         # [B,maxn,maxn] cmd cosine
-    vmask = valid.bool()                                           # [B,maxn]
+    sim = torch.bmm(cu, cu.transpose(1, 2))
+    vmask = valid.bool()
 
     pos = torch.arange(maxn, device=device)
-    lower = pos.unsqueeze(1) > pos.unsqueeze(0)                    # [maxn,maxn] p<k  (rows=k, cols=p)
-    upper = pos.unsqueeze(1) < pos.unsqueeze(0)                    # [maxn,maxn] p>k
-    same_path = (sim > path_thresh) & vmask.unsqueeze(1)          # [B,maxn,maxn], p valid & sim>thr
+    lower = pos.unsqueeze(1) > pos.unsqueeze(0)
+    upper = pos.unsqueeze(1) < pos.unsqueeze(0)
+    same_path = (sim > path_thresh) & vmask.unsqueeze(1)
 
-    before = same_path & lower.unsqueeze(0)                        # [B,maxn,maxn] candidate earlier p
-    after = same_path & upper.unsqueeze(0)                         # candidate later p
-    # nearest earlier same-path touch i = max p over `before`; nearest later j = min p over `after`.
+    before = same_path & lower.unsqueeze(0)
+    after = same_path & upper.unsqueeze(0)
     posf = pos.view(1, 1, maxn).expand(B, maxn, maxn)
-    i_idx = torch.where(before, posf, torch.full_like(posf, -1)).amax(dim=2)     # [B,maxn], -1 if none
-    j_idx = torch.where(after, posf, torch.full_like(posf, maxn)).amin(dim=2)    # [B,maxn], maxn if none
+    i_idx = torch.where(before, posf, torch.full_like(posf, -1)).amax(dim=2)
+    j_idx = torch.where(after, posf, torch.full_like(posf, maxn)).amin(dim=2)
 
     has_i = i_idx >= 0
     has_j = j_idx < maxn
-    triple_ok = has_i & has_j & vmask                             # k valid, both touches exist
+    triple_ok = has_i & has_j & vmask
 
     ic = i_idx.clamp(0, maxn - 1)
     jc = j_idx.clamp(0, maxn - 1)
     obs_i = torch.gather(obs, 1, ic.unsqueeze(-1).expand(B, maxn, obs.size(-1)))
     obs_j = torch.gather(obs, 1, jc.unsqueeze(-1).expand(B, maxn, obs.size(-1)))
-    change = (obs_i - obs_j).pow(2).mean(dim=-1)                   # [B,maxn]
-    sim_ki = torch.gather(sim, 2, ic.unsqueeze(-1)).squeeze(-1)    # [B,maxn] sim[b,k,i]
-    sim_kj = torch.gather(sim, 2, jc.unsqueeze(-1)).squeeze(-1)    # [B,maxn] sim[b,k,j]
-    w = sim_ki * sim_kj * change                                  # [B,maxn]
+    change = (obs_i - obs_j).pow(2).mean(dim=-1)
+    sim_ki = torch.gather(sim, 2, ic.unsqueeze(-1)).squeeze(-1)
+    sim_kj = torch.gather(sim, 2, jc.unsqueeze(-1)).squeeze(-1)
+    w = sim_ki * sim_kj * change
 
     keep = triple_ok & (change >= change_floor) & torch.isfinite(w) & (w > 0.0)
-    nz = torch.nonzero(keep, as_tuple=False)                      # [N,2] -> (row b, position k)
+    nz = torch.nonzero(keep, as_tuple=False)
     sel_b = nz[:, 0]
     sel_k = nz[:, 1]
     sel_i = i_idx[sel_b, sel_k]
@@ -189,25 +122,18 @@ def _mine_triples(cmd, obs, valid, path_thresh, change_floor):
 
 @torch.no_grad()
 def _mine_endpoint_pairs(cmd, obs, valid, net, path_thresh, wfloor):
-    """Mine (row, k, j) ENDPOINT pairs: j = the nearest LATER same-path touch of k (frozen
-    cmd-cosine > path_thresh). NO earlier-touch requirement — the imagination windows'
-    target content is mostly NOT locally observed, and requiring a source observation
-    would mis-match that distribution. Weight = sim_kj * (wfloor + w_mut(k)) with w_mut
-    the arch's own mutation gate on the reconstructed command feature (detached — the
-    same reconstruction `transition_from_emb` uses; falls back to wfloor-only when the
-    arch lacks the gate). Fully vectorized; no RNG. Returns (sel_b, sel_k, sel_j, sel_w)."""
     B, maxn, _ = cmd.shape
     device = cmd.device
     cu = _unit(torch.nan_to_num(cmd, nan=0.0, posinf=1e4, neginf=-1e4))
-    sim = torch.bmm(cu, cu.transpose(1, 2))                         # [B,maxn,maxn]
+    sim = torch.bmm(cu, cu.transpose(1, 2))
     vmask = valid.bool()
 
     pos = torch.arange(maxn, device=device)
-    upper = pos.unsqueeze(1) < pos.unsqueeze(0)                    # [maxn,maxn] p>k
+    upper = pos.unsqueeze(1) < pos.unsqueeze(0)
     same_path = (sim > path_thresh) & vmask.unsqueeze(1)
     after = same_path & upper.unsqueeze(0)
     posf = pos.view(1, 1, maxn).expand(B, maxn, maxn)
-    j_idx = torch.where(after, posf, torch.full_like(posf, maxn)).amin(dim=2)    # [B,maxn]
+    j_idx = torch.where(after, posf, torch.full_like(posf, maxn)).amin(dim=2)
     has_j = (j_idx < maxn) & vmask
 
     w_mut = None
@@ -220,14 +146,14 @@ def _mine_endpoint_pairs(cmd, obs, valid, net, path_thresh, wfloor):
                 and isinstance(tmg, nn.Module) and isinstance(te, nn.Module)):
             idx0 = torch.zeros(B, maxn, dtype=torch.long, device=device)
             x_cmd = inn(cp(torch.nan_to_num(cmd, nan=0.0, posinf=1e4, neginf=-1e4)) + te(idx0))
-            w_mut = torch.sigmoid(tmg(x_cmd)).squeeze(-1)                        # [B,maxn]
+            w_mut = torch.sigmoid(tmg(x_cmd)).squeeze(-1)
     except Exception:
         w_mut = None
     if w_mut is None:
         w_mut = torch.zeros(B, maxn, device=device, dtype=cmd.dtype)
 
     jc = j_idx.clamp(0, maxn - 1)
-    sim_kj = torch.gather(sim, 2, jc.unsqueeze(-1)).squeeze(-1)                  # [B,maxn]
+    sim_kj = torch.gather(sim, 2, jc.unsqueeze(-1)).squeeze(-1)
     w = sim_kj * (float(wfloor) + w_mut)
 
     keep = has_j & torch.isfinite(w) & (w > 0.0)
@@ -240,13 +166,6 @@ def _mine_endpoint_pairs(cmd, obs, valid, net, path_thresh, wfloor):
 
 
 def _imag_nce(pred, tgt, w, tau, dup_delta, mse_w):
-    """Eval-geometry L2-InfoNCE over the mined examples' labels + a small MSE anchor.
-    Logits are negative per-dim-mean squared L2 (the retrieval metric's decision
-    variable) / tau; near-duplicate labels (per-dim sqdist < dup_delta) are masked out
-    of the negatives (false-negative guard — the same answer read twice). Per-example
-    weights w are pre-normalized. Anti-collapse: a constant prediction leaves the
-    softmax row-uniform over distinct labels (NLL pinned > 0) and the MSE anchor
-    strictly positive."""
     n, d = pred.shape
     mse = ((pred - tgt) ** 2).mean(dim=-1)
     if n < 4:
@@ -263,9 +182,6 @@ def _imag_nce(pred, tgt, w, tau, dup_delta, mse_w):
 
 
 def _transition_term(cfg, batch, net, device, ramp):
-    """The r18 forward-model-consistency term, logic verbatim (including its
-    randperm row subsample — the ONLY RNG the aux consumes, matching the r18 head's
-    per-step RNG consumption exactly)."""
     if cfg.get("_disabled", True) or float(cfg.get("aux_weight", 0.0)) <= 0.0:
         return 0.0
     op = getattr(net, "transition_from_emb", None)
@@ -280,8 +196,8 @@ def _transition_term(cfg, batch, net, device, ramp):
 
     nrows = max(1, int(math.ceil(B * float(cfg["row_frac"]))))
     sel = torch.randperm(B, device=device)[:nrows]
-    cmd = tok[sel][:, 0::2][:, :maxn]                              # [nr,maxn,D] standardized z_cmd
-    obs = tok[sel][:, 1::2][:, :maxn]                              # [nr,maxn,D] standardized z_obs
+    cmd = tok[sel][:, 0::2][:, :maxn]
+    obs = tok[sel][:, 1::2][:, :maxn]
     valid = cmd_mask[sel]
 
     r, ti, tk, tj, w = _mine_triples(
@@ -290,21 +206,20 @@ def _transition_term(cfg, batch, net, device, ramp):
     if r.numel() == 0:
         return 0.0
     if r.numel() > int(cfg["max_examples"]):
-        # keep the strongest (largest weight) triples
         w, order = torch.topk(w, int(cfg["max_examples"]))
         r = r[order]; ti = ti[order]; tk = tk[order]; tj = tj[order]
 
     w = w.to(cmd.dtype)
     w = (w / w.sum().clamp_min(_EPS)).detach()
 
-    pre = obs[r, ti].detach()                                     # [N,D] pre-mutation content estimate
-    cmd_k = cmd[r, tk].detach()                                   # [N,D] the mutating command
-    tgt = obs[r, tj].detach()                                     # [N,D] future post-mutation read (LABEL)
+    pre = obs[r, ti].detach()
+    cmd_k = cmd[r, tk].detach()
+    tgt = obs[r, tj].detach()
     pre = torch.nan_to_num(pre, nan=0.0, posinf=1e4, neginf=-1e4)
     cmd_k = torch.nan_to_num(cmd_k, nan=0.0, posinf=1e4, neginf=-1e4)
     tgt = torch.nan_to_num(tgt, nan=0.0, posinf=1e4, neginf=-1e4)
 
-    pred = op(pre, cmd_k)                                         # SHARED arch operator (grad flows in)
+    pred = op(pre, cmd_k)
     pred = torch.nan_to_num(pred, nan=0.0, posinf=1e4, neginf=-1e4)
 
     pu, gu = _unit(pred), _unit(tgt)
@@ -315,9 +230,6 @@ def _transition_term(cfg, batch, net, device, ramp):
 
 
 def _imagination_term(cfg, batch, net, device, ramp):
-    """The NEW masked-window imagination term. Trains ONLY net.imaginer parameters:
-    every input is a detached frozen embedding; the mutation-gate mining factor is
-    computed under no_grad. The trunk's gradient stream is untouched."""
     if cfg.get("_imag_disabled", True) or float(cfg.get("imag_weight", 0.0)) <= 0.0:
         return 0.0
     imaginer = getattr(net, "imaginer", None)
@@ -330,8 +242,8 @@ def _imagination_term(cfg, batch, net, device, ramp):
     if maxn < 2:
         return 0.0
 
-    cmd = tok[:, 0::2][:, :maxn].detach()                          # [B,maxn,D]
-    obs = tok[:, 1::2][:, :maxn].detach()                          # [B,maxn,D]
+    cmd = tok[:, 0::2][:, :maxn].detach()
+    obs = tok[:, 1::2][:, :maxn].detach()
     valid = cmd_mask
 
     sb, sk, sj, w = _mine_endpoint_pairs(
@@ -346,14 +258,14 @@ def _imagination_term(cfg, batch, net, device, ramp):
     w = w.to(cmd.dtype)
     w = (w / w.sum().clamp_min(_EPS)).detach()
 
-    pair_cat = torch.cat([cmd, obs], dim=-1)[sb]                   # [N,maxn,2D] raw frozen prefix
+    pair_cat = torch.cat([cmd, obs], dim=-1)[sb]
     pos = torch.arange(maxn, device=device)
-    pmask = valid[sb] & (pos.unsqueeze(0) < sk.unsqueeze(1))       # strictly-earlier valid pairs
+    pmask = valid[sb] & (pos.unsqueeze(0) < sk.unsqueeze(1))
     c_m = cmd[sb, sk]
     c_r = cmd[sb, sj]
     lab = torch.nan_to_num(obs[sb, sj], nan=0.0, posinf=1e4, neginf=-1e4)
 
-    pred = imaginer(pair_cat, pmask, c_m, c_r)                     # grads -> imaginer params ONLY
+    pred = imaginer(pair_cat, pmask, c_m, c_r)
     pred = torch.nan_to_num(pred, nan=0.0, posinf=1e4, neginf=-1e4)
 
     total = _imag_nce(pred, lab, w, cfg["imag_tau"], cfg["imag_dup_delta"], cfg["imag_mse"])
@@ -386,12 +298,6 @@ def aux_loss(head_state, batch, net, device):
 
 
 def leak_safe(mod, params):
-    """Forward untouched (wrap adds no module, never re-points forward). The transition
-    term consumes future obs_j strictly as a loss LABEL; the imagination term consumes
-    future obs_j strictly as a loss LABEL and the future COMMAND c_j only as a train-
-    only aux input to an eval-inactive module (the sanctioned endpoint formulation) —
-    no scored prediction sees anything but its own history. Validate params finite and
-    in range."""
     p = dict(_DEFAULTS)
     p.update(params or {})
     try:

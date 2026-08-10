@@ -1,33 +1,15 @@
-"""The eval adapter — the search's sole fitness oracle.
-
-Invoked by the evolve engine, once per seed, as:
+"""The eval adapter — the search's fitness oracle. Invoked by the evolve engine once per seed:
 
     python -m eval.adapter {results_dir} {genome} {seed} {split} {mode}
 
-It trains ONE net on the training root — the cups pack, or a BLEND of capability packs when
-TWM_TRAIN_ROOT names a blend spec — and emits {results_dir}/metrics.json:
+It trains one net on the training root — the cups pack, or a blend of capability packs when
+TWM_TRAIN_ROOT names a blend spec — and writes {results_dir}/metrics.json with
 
-    combined_score = comp_ca   (evolve/cups_ca.py — the compositional-depth differential)
+    combined_score = comp_ca   (evolve/cups_ca.py)
 
-Everything else the net can tell us rides along in `public` (what inventors get to see) and
-`private` (recorded, never briefed). One net per (genome, seed): the compositional metric and
-the world-model health readout both come off that same trained net, because training it twice
-to measure two things off it is pure waste.
+plus a `public` block (visible to inventors) and a `private` block (recorded, never briefed).
 
-WHY THE TIER DOES NOT CHANGE THE STEP COUNT
-  `mode` is reported but never shortens training. A step-reduced proxy has been measured to
-  RANK-INVERT exactly the slow-converging memory and architecture mechanisms that a compositional
-  objective is about — and the deepest one simply timed out.
-  The cheap tier here is fewer SEEDS at full step count, which is configured in evolve.json.
-  If you find yourself wanting a shorter proxy, read that lesson again first.
-
-WHAT COUNTS AS WHOSE FAULT
-  Environment problems — a missing or half-present data root, an unset or wrong-sha encoder, a
-  ceiling table that disagrees with the root — RAISE before any candidate code is reached, so
-  they surface as a broken run rather than being recorded as a candidate's null. Candidate
-  problems — a genome that will not build, diverges, leaks, or produces a degenerate prediction
-  bank — are caught and written as correct:false with the reason, because a failure that is the
-  candidate's own is search signal and belongs in the archive.
+Environment problems raise; candidate problems are written as correct:false with a reason.
 """
 import copy
 import json
@@ -58,8 +40,7 @@ def _env(name, default=None, required=False):
 
 
 def _require_encoded(root, var):
-    """Half-present roots are worse than absent ones: the manifests resolve and then the loader
-    dies deep inside a paid run. Check the shards up front."""
+    """Raise unless `root` is a complete ENCODED pack root."""
     rp = pathlib.Path(root)
     if not rp.is_dir():
         raise RuntimeError(f"{var}={root} is not a directory")
@@ -72,11 +53,7 @@ def _require_encoded(root, var):
 
 
 def preflight():
-    """Environment checks. These RAISE — they are never a candidate's fault.
-
-    Returns (cups pack root, eye, training root, frame root). The training root is the cups pack
-    root unless TWM_TRAIN_ROOT names another — a blend spec, whose constituents are checked in its
-    place and which requires TWM_FRAME_ROOT to say what frame everything is standardized in."""
+    """Environment checks; these raise. Returns (cups pack root, eye, training root, frame root)."""
     root = _env("TWM_CUPS_ROOT", required=True)
     eye = _env("TWM_EYE", "enc_e5_ft_nocwd_hf")
     _require_encoded(root, "TWM_CUPS_ROOT")
@@ -97,7 +74,7 @@ def preflight():
         raise RuntimeError(f"missing frozen ceiling table {CEILING_TABLE}")
 
     from evolve import reencode as RE
-    percep = RE.load_perception(eye)          # raises if TJ_FT_ENCODER is unset
+    percep = RE.load_perception(eye)
     want = _env("TWM_EYE_TREE_SHA")
     if want:
         got = RE._checkpoint_tree_sha(percep.MODEL)
@@ -119,12 +96,11 @@ def fail(results_dir, reason, detail=""):
     write(results_dir, {"combined_score": None, "correct": False, "error": reason,
                         "text_feedback": f"{reason}: {detail}"[:600] if detail else reason,
                         "public": {}, "private": {"error": reason, "detail": detail[:4000]}})
-    return 0        # a candidate failure is a RESULT, not a crash
+    return 0
 
 
 def main(argv):
     results_dir, genome_path, seed, split, mode = argv[1], argv[2], int(argv[3]), argv[4], argv[5]
-    # raises on environment problems
     root, eye, train_root, frame_root = preflight()
 
     gen = json.load(open(genome_path))
@@ -142,11 +118,9 @@ def main(argv):
     except Exception as e:
         return fail(results_dir, "genome_invalid", f"{type(e).__name__}: {e}")
 
-    # The cups instrument builds a fixed [cmd, obs, cmd, obs, ...] layout and reads the
-    # prediction at a strided position. A stream that lays tokens out differently would be scored
-    # on a sequence the net never trained on — both arms of the differential wrong, no guard able
-    # to see it, and a plausible number written as a pass. Fail closed until the instrument learns
-    # to ask the stream where its tokens are.
+    # The scoring instrument reads predictions at strided positions of a fixed [cmd,obs,...]
+    # layout; any other layout would be scored on a sequence the net never trained on, and no
+    # guard can see that.
     if getattr(stream, "CUPS_LAYOUT", None) != "interleave2":
         return fail(results_dir, "stream_layout_unsupported",
                     "the scoring instrument pins a strided [cmd,obs,...] layout; this stream "
@@ -158,23 +132,9 @@ def main(argv):
                     "the head declares itself unsafe against the no-future-leakage contract")
 
     try:
-        # Frame discipline: ONE root supplies the train statistics, and the training set and every
-        # pack's probe windows are standardized in that one frame. Mixing frames here is the
-        # documented way to collapse two incomparable spaces into one silent number — it raises
-        # nothing and yields plausible readings. The frame is the training root on the single-pack
-        # lane and an explicit reference root whenever a blend is in play (see preflight).
-        #
-        # TWM_CONTEXT points at a prebuilt lane context (cloud/build_context.py): the composed and
-        # standardized training set, the window layouts, and the role-swap chains already
-        # synthesized and encoded. All of that is a property of the roots, eye, split and swap seed
-        # and none of it is a property of the genome, so a campaign derives it once and memory-maps
-        # it into every worker instead of reloading the encoder and re-encoding every alternative
-        # chain per candidate.
         cpath = _env("TWM_CONTEXT")
         if cpath:
             blob = torch.load(cpath, map_location="cpu", weights_only=False, mmap=True)
-            # contexts built before the blend lane carry no train/frame keys; what they used then
-            # is what the defaults say now
             built = (blob["root"], blob["eye"], blob["split"],
                      blob.get("train_root", blob["root"]),
                      blob.get("frame_root", blob["root"]))
@@ -213,26 +173,17 @@ def main(argv):
             return fail(results_dir, "leakage_fail",
                         "perturbing a later observation moved an earlier command's prediction")
 
-        # A learned target is a REGISTERED child of the net, so `tm.cpu()` is undone by the next
-        # `net.to(device)` inside the probe's forward. Take an unregistered copy instead.
+        # A learned target is a REGISTERED child of the net, so tm.cpu() is undone by the next
+        # net.to(device) inside the probe's forward. Take an unregistered copy instead.
         tm = getattr(net, "target_module", None)
         tmod = copy.deepcopy(tm).cpu() if tm is not None else target_mod
         ca = CA.measure_trained_net(net, ctx, tmod, device, eye, cells,
                                     ceiling_table=cells, swap_cache=swap_cache, knobs=knobs)
 
-        # World-model health on the same net: plain next-observation retrieval against same-verb
-        # foils on the pack's own val split. No baseline arms, no content-cell tables — this is a
-        # "is this net a usable instrument at all" readout, not a competing objective.
         flat = stream.flatten_predictions(net, H._strip_target_only(ctx["seqs"]), device)
         pred_obs = tmod.to_obs(flat["pred"], flat["prev"]) if tmod is not None else flat["pred"]
         health = M.retrieval(pred_obs, flat["true"], flat["verbs"], seed=seed)
 
-        # A SECOND capability, read off the SAME net and never scored: does this model route a read
-        # through the navigation history that actually happened? Its windows were standardized in
-        # this net's own frame when the lane context was built, so this measures the net on inputs
-        # of the kind it was trained on. It is a transfer reading — the net trained on one pack and
-        # is asked about another — and it is here so a skill's trajectory stays visible across the
-        # whole search rather than only while it happens to be the objective.
         cdh = None
         if cdh_ctx is not None:
             cdh = {"nav": CDH.nav_probe(net, cdh_ctx, tmod, device),
@@ -242,9 +193,6 @@ def main(argv):
                     f"{e}\n{traceback.format_exc()[-2000:]}")
 
     g = ca["guards"]
-    # Enforced only once a threshold has been MEASURED on this quantity; until then these are
-    # readouts (guards['norm_ok'] / ['dispersion_ok'] are None) and a candidate is not failed on a
-    # number nobody has calibrated. Non-finite banks still raise inside the instrument.
     if g["norm_ok"] is False or g["dispersion_ok"] is False:
         return fail(results_dir, "degenerate_prediction_bank",
                     f"norm_over_bank={g['norm_over_bank']}, "
@@ -280,12 +228,11 @@ def main(argv):
             "swap_follow": ca["swap_follow"],
             "chance": g["chance"],
             "wm_health_top1_sameverb": health["top1_sameverb"],
-            # reported, never scored — see the note at the measurement site
             "cdh_routing": (cdh["nav"]["nav_differential_unmasked_matched"] if cdh else None),
             "steps": steps, "seed": seed, "split": split, "mode": mode,
         },
-        # keyed by seed: the engine dict-MERGES private across seeds, so an unkeyed block would
-        # let the last seed silently overwrite the others
+        # Keyed by seed: the engine dict-MERGES private across seeds, so an unkeyed block would
+        # let the last seed silently overwrite the others.
         "private": {f"seed{seed}": {
             "guards": g,
             "slice": ca["slice"],
@@ -295,8 +242,6 @@ def main(argv):
             "wm_health": health,
             "cdh": cdh,
             "root": root, "eye": eye,
-            # what this net was trained on and what frame it all lives in — a reading is only
-            # comparable to another taken in the same frame
             "train_root": train_root, "frame_root": frame_root,
             "n_train_seqs": len(train_full),
         }},

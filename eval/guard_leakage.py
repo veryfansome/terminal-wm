@@ -1,19 +1,8 @@
-"""The no-future-leakage guard — the one property no candidate may violate.
+"""The no-future-leakage guard, run on every candidate before any GPU time.
 
-The whole measurement rests on the model predicting each command's next observation from what
-came BEFORE it. A mechanism that can see the observation it is being asked to predict scores
-beautifully and means nothing. So this runs on every candidate, before any GPU time: perturb a
-later observation and assert that no earlier command's prediction moves.
-
-It needs a BUILT net but not a TRAINED one, and no data at all, which is what makes it cheap
-enough to be unconditional. Structural checks belong here rather than in a gate ceremony after
-the fact — they cost every candidate the same, and a candidate that fails has no usable number.
-
-Two independent checks:
-  head.leak_safe  — the head declares whether its wrapper can see the future. A head that
-                    re-points forward or adds an auxiliary task is exactly where leakage creeps
-                    in, so the axis is required to answer for itself.
-  stream.leakage_ok — the empirical check: build the net, perturb, measure movement.
+Two checks on a built (untrained) net, with no data: head.leak_safe, where the head declares
+for itself whether its wrapper can see the future, and stream.leakage_ok, which perturbs a
+later observation and asserts no earlier command's prediction moves.
 """
 import json
 import sys

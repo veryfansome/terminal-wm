@@ -1,10 +1,3 @@
-'''R21 algebraic history-evidence innovation observer.
-
-Keeps the r18 auxiliary and adds a private bounded masked-endpoint
-correction. The same observer runs with or without history. Only attention values
-from valid prefix pairs enter its bias-free residual, so empty history gives an
-exactly zero correction without detecting an evaluation arm.
-'''
 import math
 import torch
 import torch.nn as nn

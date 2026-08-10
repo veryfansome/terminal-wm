@@ -48,7 +48,6 @@ def _checkpoint_tree_sha(model_name):
     h = hashlib.sha256()
     for f in sorted(p.rglob("*")):
         # skip encoder_meta.json: it is the provenance STAMP written AFTER this sha is computed, so hashing it
-        # would make the value self-referential (never round-trips against the final on-disk tree).
         if f.is_file() and f.name != "encoder_meta.json":
             h.update(str(f.relative_to(p)).encode())
             h.update(hashlib.sha256(f.read_bytes()).digest())
@@ -89,7 +88,6 @@ def load_perception_for_root(root):
     if BV.is_v3_policy(root):
         raise ValueError(f"{root}: v3-policy root without a perception stamp — cannot resolve the "
                          f"root's render/pool recipe for SST/wtm precompute (fail-closed)")
-    # stamp-less v1/v2 root: the historical default recipe (all pre-stamp e5 roots used it)
     return load_perception("enc_e5_base")
 
 
@@ -103,7 +101,7 @@ def _fertility(src, percep, tok, maxlen, sample=3000):
         return None
     steps = [s for l in open(tf) for s in json.loads(l).get("steps", [])]
     if not steps:
-        return None   # degenerate root with no steps → skip (avoids a div-by-zero after embeddings are saved)
+        return None
     samp = random.Random(0).sample(steps, min(sample, len(steps)))
     ids = tok([percep.render_obs(s) for s in samp], truncation=False)["input_ids"]
     lens = [len(x) for x in ids]
@@ -162,7 +160,7 @@ def main(argv=None):
 
     percep = load_perception(args.perception)
     model_name = getattr(percep, "MODEL", "answerdotai/ModernBERT-base")
-    revision = getattr(percep, "REVISION", None)   # immutable HF commit SHA (None = latest); or a local ckpt dir
+    revision = getattr(percep, "REVISION", None)
     maxlen = getattr(percep, "MAXLEN", 256)
     device = pick_device()
     print(f"perception '{args.perception}' | encoder {model_name}@{revision or 'latest'} | "
@@ -173,18 +171,12 @@ def main(argv=None):
 
     outdir = pathlib.Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
-    # Adaptive encode batch: memory ~ bs × maxlen (activations). The length-sorted batcher makes the
-    # LONG-obs batches (rare — obs p99≈12410 chars) the OOM risk on a long-context trunk (gte@2048 is 8×
-    # the 256-token footprint). Hold bs×maxlen at the 256/bs-96 reference so a max-context reencode fits
-    # the same VRAM as the 256 baseline; floor 8. maxlen 256→96, 512→48, 1024→24, 2048→12.
     enc_bs = max(8, (96 * 256) // maxlen)
     if enc_bs != 96:
         print(f"adaptive encode batch: bs={enc_bs} (maxlen {maxlen}, holding bs×maxlen≈{96 * 256})", flush=True)
     for split in ("train", "val"):
         src_jsonl = pathlib.Path(args.src) / f"{split}.jsonl"
         if not src_jsonl.exists():
-            # TRAIN-ONLY root tolerance (F6): the ablate raw root ships no val.jsonl — skip the
-            # absent split instead of raising (required to build dockerfs3-ablate-e5).
             print(f"skip absent split '{split}' (train-only root, F6)", flush=True)
             continue
         shutil.copy(src_jsonl, outdir / f"{split}.jsonl")
@@ -192,18 +184,14 @@ def main(argv=None):
         torch.save(seqs, outdir / f"emb-seq-{split}.pt")
         print(f"encoded {split}: {len(seqs)} seqs -> {outdir}/emb-seq-{split}.pt", flush=True)
 
-    # bench-version identity MUST travel with derived roots (review-B2 blocker: a missing summary
-    # silently resolves as v1 and disengages v2 classes). Copy the src summary and ADD the
-    # perception stamp (harmless/additive on v1/v2; the SST/wtm resolver reads it). The
-    # cache_format-3 guard is written ONLY for v3-policy src roots (v1/v2 byte behavior unchanged).
     _s = pathlib.Path(args.src) / "summary.json"
     summ = json.loads(_s.read_text()) if _s.exists() else {}
     summ["perception"] = {"impl": args.perception, "model": model_name,
                           "content_sha": _content_sha(percep), "revision": revision, "maxlen": maxlen}
-    ckpt_sha = _checkpoint_tree_sha(model_name)   # non-None only for a LOCAL checkpoint dir
+    ckpt_sha = _checkpoint_tree_sha(model_name)
     if ckpt_sha:
         summ["perception"]["checkpoint_tree_sha"] = ckpt_sha
-    fert = _fertility(args.src, percep, tok, maxlen)   # brief Stage-0 rung-0 diagnostic (stamped)
+    fert = _fertility(args.src, percep, tok, maxlen)
     if fert:
         summ["perception"]["fertility"] = fert
         print(f"tokenizer fertility: mean {fert['mean_obs_tokens']} tok/obs, "

@@ -1,19 +1,3 @@
-"""R20 head: privileged shadow execution with modular causal innovations.
-
-The ordinary R18 forward and its transition-consistency auxiliary are preserved.
-A private student is trained in the same pass on mined mutation-to-read endpoints.
-It receives two read-only executions of the R18 stack: a no-mutation counterfactual
-read and the exact obs-missing [prefix, mutation, PAD, read] shadow execution.
-A command-routed mixture of residual experts predicts only the innovation over the
-counterfactual base.  The normal fully-observed read at the later command is used
-as training-only privileged information, gated on whether it improves on the base.
-
-At inference the private route fires only for the declared odd-length masked layout.
-All student inputs are detached and all extra R18 forwards run under no_grad in
-eval mode, so the imagination loss sends zero gradient to the R18 stack and consumes
-no dropout RNG.  Future observations are labels only.
-"""
-
 import math
 
 import torch
@@ -63,12 +47,6 @@ def _smoothstep(x):
 
 
 class _ModularInnovation(nn.Module):
-    """Counterfactual prior plus operation-routed residual experts.
-
-    No parameter has shape (768,768) or 64 rows, so the harness optimizer routes
-    every private parameter to its ordinary AdamW group.
-    """
-
     def __init__(self, D, hidden_d, width=192, heads=4, experts=6, router_temp=0.5):
         super().__init__()
         heads = max(1, int(heads))
@@ -101,8 +79,6 @@ class _ModularInnovation(nn.Module):
         )
         self.amount = nn.Linear(width, 1)
 
-        # Exact counterfactual base at initialization. Expert symmetry is broken by
-        # their input weights after the first update because routes vary by command.
         for expert in self.experts:
             nn.init.zeros_(expert.weight)
             nn.init.zeros_(expert.bias)
@@ -153,7 +129,6 @@ class _ModularInnovation(nn.Module):
         )
         all_delta = torch.stack([expert(state) for expert in self.experts], dim=1)
         delta = (route.unsqueeze(-1) * all_delta).sum(dim=1)
-        # Bounded innovation prevents the R19 norm explosion.
         delta = 3.0 * torch.tanh(delta / 3.0)
         amount = torch.sigmoid(self.amount(state))
         pred = base + amount * delta
@@ -162,7 +137,6 @@ class _ModularInnovation(nn.Module):
 
 @torch.no_grad()
 def _mine_pairs(cmd, valid, threshold):
-    """Nearest later same-path-like command for each possible intervention."""
     B, N, _ = cmd.shape
     cu = F.normalize(
         torch.nan_to_num(cmd, nan=0.0, posinf=1e4, neginf=-1e4), dim=-1
@@ -207,7 +181,6 @@ def _mutation_weight(net, c_m):
 
 
 def _l2_nce(pred, target, weight, tau, dup_delta, mse_weight):
-    """Strict retrieval-geometry InfoNCE plus an absolute norm anchor."""
     n, d = pred.shape
     mse_row = (pred - target).pow(2).mean(dim=-1)
     mse = (weight * mse_row).sum()
@@ -256,7 +229,6 @@ def _detect_masked_endpoint(key_pad, L, device):
 
 @torch.no_grad()
 def _counterfactual_base(orig_forward, net, tok, rows, mutation, read_pos):
-    """Run [fully observed prefix before m, read command] through the R18 stack."""
     R = rows.numel()
     Lp = 2 * int(mutation.max().item()) + 1
     pos = torch.arange(Lp, device=tok.device)
@@ -285,7 +257,6 @@ def _counterfactual_base(orig_forward, net, tok, rows, mutation, read_pos):
 
 @torch.no_grad()
 def _dual_execution(orig_forward, net, tok, row, mutation, read):
-    """One concatenated no-grad forward computes counterfactual and exact masked states."""
     P = row.numel()
     Lp = 2 * int(mutation.max().item()) + 3
     pos = torch.arange(Lp, device=tok.device)
@@ -337,7 +308,6 @@ def _dual_execution(orig_forward, net, tok, row, mutation, read):
 
 
 def wrap(net, D, **params):
-    """Install the private module and a branch dead on ordinary even-length streams."""
     champ_params = {
         key: value for key, value in params.items() if key in BASE._DEFAULTS
     }
@@ -463,16 +433,12 @@ def _private_loss(cfg, batch, net):
         float(cfg["imag_mse"]),
     )
 
-    # InfoMax: sharp per-command routing, but high marginal expert use.
     rp = route.clamp_min(1e-8)
     cond_entropy = -(rp * rp.log()).sum(dim=1).mean()
     marginal = rp.mean(dim=0).clamp_min(1e-8)
     marginal_entropy = -(marginal * marginal.log()).sum()
     router_loss = cond_entropy - marginal_entropy
 
-    # Training-only future-observation teacher. It never sees obs at read itself
-    # (the R18 stack is causal), and it is used only where its squared-L2 distance to
-    # the target is below the counterfactual base's by a pre-registered margin.
     with torch.no_grad():
         d_teacher = (teacher - target).pow(2).mean(dim=-1)
         d_base = (base - target).pow(2).mean(dim=-1)
@@ -500,7 +466,6 @@ def _private_loss(cfg, batch, net):
 
 
 def aux_loss(head_state, batch, net, device):
-    """Run the R18 auxiliary first, preserving its RNG stream exactly."""
     if head_state is None:
         return 0.0
     base_term = BASE.aux_loss(head_state, batch, net, device)
@@ -526,12 +491,6 @@ def aux_loss(head_state, batch, net, device):
 
 
 def leak_safe(mod, params):
-    """The normal path is original R18. The odd path uses only prefix, c_m and c_r.
-
-    The masked observation value is key-padded in both the R18 and private
-    executions. Later observations and the full-history teacher occur only in the
-    train-only auxiliary, so they cannot affect a scored forward prediction.
-    """
     params = params or {}
     champ_params = {
         key: value for key, value in params.items() if key in BASE._DEFAULTS

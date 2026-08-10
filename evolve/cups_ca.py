@@ -48,103 +48,21 @@ import torch.nn.functional as F
 
 from evolve import cups_probe as CP
 
-# ---------------------------------------------------------------------------------------------
-# The eligible slice W. Genome-independent by construction: every term is a property of the
-# window and the frozen ceiling table, never of the net. Identical for every candidate, which is
-# what makes the differential comparable across the population.
-#
-# Of the ceiling table's cells only fifteen are earnable, and every one of them has depth 3 or 4,
-# so the ceiling filter and the depth floor largely coincide at these knobs. Both are kept explicit:
-# they encode different intentions, and a re-mint can pull them apart.
-# N includes 3: the table has four earnable N=3 cells in the same ceiling band and with the same
-# depth profile, worth about +44% more windows at no cost. N in {4,5} is the pre-designated primary
-# slice for the CAPABILITY GATE, and this is the search signal, explicitly not the gate — widening
-# here leaves that pre-registration untouched. N=2 stays out: the pick is two-way, and off-diagonal
-# N=2 windows have no legal role-swap partner by construction.
 SLICE_N = (3, 4, 5)
-SLICE_STYLE = "core"          # the model trains on core-style boards; held-out style measures
-                              # style TRANSFER and is reported separately, never scored
-CEILING_EARNABLE_LT = 0.99    # cells at or above this are saturated for non-trackers: a margin
-                              # there is unearnable and contributes only dilution
+SLICE_STYLE = "core"
+CEILING_EARNABLE_LT = 0.99
 # DEPTH_MIN must sit ABOVE the bounded-trace cap, or a scored window is solvable by a trace and
-# contributes a free +1. It is pinned to the ceiling table's own gauntlet_h at measurement time
-# rather than hardcoded, so a re-mint at a different cap cannot desync the slice from the band.
-# It cannot go higher either: earnability needs some other mover to match routed's depth, i.e.
-# R >= 2*depth + (m-2), so the frozen r_grid caps earnable depth at 4 and a depth floor of 5
-# empties the slice.
 DEPTH_MIN = 3
 
 DEPTH_BANDS = (("d2", 2, 2), ("d3", 3, 3), ("d4plus", 4, 99))
 
-# --- anti-degeneracy readouts, REPORTED AND NOT ENFORCED --------------------------------------
-# Two shapes of degeneracy would make the differential meaningless: a prediction bank collapsed
-# toward zero, and one that is constant across windows. Both are measured on both arms and emitted
-# on every run.
-#
-# They are not gates, because no threshold for them has been measured on this quantity. Numbers
-# carried over from a different instrument put the dispersion floor at half, which a real net does
-# not come close to: predictions over a shared observation space cluster near a common direction,
-# so cosine-to-centroid stays high and dispersion stays small even when the net is discriminating
-# perfectly well. A first run of a lightly-trained net reads about two hundredths. Enforcing an
-# invented floor here would null every candidate and leave nothing with which to set a real one.
-#
-# What IS enforced is non-finiteness, which needs no calibration to interpret.
-#
-# Set these from a population of measurements — the distribution over a scored round — and only
-# then turn them into gates.
 MIN_NORM_OVER_BANK = None
 MIN_ANGULAR_DISPERSION = None
 
-# --- capability readout, REPORTED BUT NOT ENFORCED --------------------------------------------
-# "the net beats chance on W by this much" is a CAPABILITY claim, not an instrument-validity
-# claim, and this search deliberately does not gate on capability. On the recorded reference run
-# the pack-trained net sits within a few points of chance on this slice, so enforcing a floor here
-# would null every candidate and the search could never climb out of the regime it starts in. It
-# is emitted on every measurement instead, so a population that does move off chance is visible
-# immediately. Revisit only with measured data in hand.
 REPORT_NATIVE_WM_OVER_CHANCE = 0.10
 
 
-# --- the analytic non-tracker band -------------------------------------------------------------
-# The differential's null is zero only in EXPECTATION over an exchangeable population, and the
-# scored slice is one frozen realization of a mint whose chains are deliberately biased. Measured
-# on the real inner slice, the name-keyed and last-src arms cancel to exactly zero, as designed —
-# but a FIRST-MOVER lookup, a depth-zero strategy, scores clearly positive. Restricting the swap
-# partner to movers shrinks that but does not remove it, because the routed content is not
-# uniformly distributed over the movers.
-#
-# The band is REPORTED beside the score, never folded into it. No point estimate of it bounds what
-# a shortcut can earn, in either direction:
-#   - On one split the largest arm is an extreme value over a few noisy directions. Measured on the
-#     training split, which carries five times as many windows and is equally valid because the arms
-#     never touch the model, h_first reads about +0.01 against about +0.17 on the scored split,
-#     while only `deepest` holds steady across splits. Subtracting a per-split maximum would remove
-#     several times the only stable effect, through an arm whose value is near zero.
-#   - Nor is the larger-sample value a substitute: a committed lookup keyed on the OBSERVABLE cell,
-#     fitted without ever touching a scored split, realizes more on a held-out slice than the band
-#     prices it at.
-# So the band exists for INTERPRETATION, and it is free: every arm is genome-independent, making the
-# whole band a per-split constant that cannot reorder any candidate.
-#
-# WHICH ARMS HAVE TO BE IN THE BAND, AND WHY THE OTHERS DO NOT.
-# The role swap re-encodes ONLY the mv command strings and splices them at the mv positions. It
-# leaves untouched: the exposure observations, the previous observation, the name index, and — given
-# that the partner must itself be a mover — the SET of contents that move. So three of the
-# instrument's arms cancel structurally, per window, and need no accounting:
-#   copy_prev  reads the previous observation, unchanged            -> identical pick both arms
-#   centroid   reads the exposure bank, unchanged                   -> identical pick both arms
-#   elim       is 1/|movers|, and the swap trades one mover for another -> same cardinality
-# (elim cancels on cardinality alone, so it would cancel with any partner. What the mover-partner
-# rule actually buys is a two-sided exchange for the POSITIONAL arms; the rail below enforces it.)
-#
-# The arms that do NOT cancel are the ones that read WHERE in the chain something happened, because
-# that is exactly what the swap permutes: the positional markers, and the depth-bounded backward
-# tracers. A tracer that solves a window natively resolves to the SWAPPED content under the swap,
-# scoring one minus zero — so on any window shallow enough for it, it scores maximally. It is
-# silent here only because every scored window is deeper than its cap, which is a property of the
-# current slice and not a property of the metric. Listing it explicitly means a future slice change
-# cannot quietly stop accounting for it.
-BOUNDED_TRACE_CAPS = (1, 2)   # hop caps whose backward trace is realizable at the frozen knobs
+BOUNDED_TRACE_CAPS = (1, 2)
 ANALYTIC_ARMS = (("h_first", "h_last", "h_lastmv", "at_name", "deepest")
                  + tuple(f"trace_h{c}" for c in BOUNDED_TRACE_CAPS))
 
@@ -179,7 +97,7 @@ def _trace_arm(w, cap, native):
     """
     if w["depth"] <= cap:
         return 1.0 if native else 0.0
-    return float(w["name"] == w["routed"])           # falls back to the name, which cancels
+    return float(w["name"] == w["routed"])
 
 
 def analytic_band(win_by_id, swap, W):
@@ -275,8 +193,6 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     """
     assert_slice_matches_table(knobs)
     cap = CP.measure(net, ctx, target_mod, device, ceiling_table=ceiling_table)
-    # swap_cache is the prebuilt role-swap synthesis: net-independent, so a campaign builds it
-    # once rather than reloading the encoder per candidate.
     alt = CP.alt_chain(net, ctx, target_mod, device, percep_name, seed=seed,
                        ceiling_table=ceiling_table, cache=swap_cache)
 
@@ -286,10 +202,6 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     _elig = eligible_ids(cap["rows"], cells)
     W = [i for i in _elig if i in swap]
     dropped = [i for i in _elig if i not in swap]
-    # Windows whose only non-routed mover IS the queried name have no legal role-swap partner and
-    # leave the slice. Measured on the real inner slice that is about a fifth of it — sizeable, and
-    # a re-mint could make it most of it, so rail on the fraction rather than on the comment being
-    # right. A slice gutted this way still returns a plausible-looking number.
     if _elig and len(dropped) / len(_elig) > 0.35:
         raise ValueError(
             f"cups_ca: {len(dropped)}/{len(_elig)} eligible windows have no legal role-swap "
@@ -300,10 +212,6 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
             "core-style, deep enough and role-swappable. A comp_ca over an empty slice is not a "
             "small number, it is no measurement at all.")
 
-    # The exchange must be two-sided on EVERY probed window. A one-sided exchange (partner never
-    # moved) is farmable by any positional heuristic — see the note in cups_probe.alt_chain. The
-    # partner draw now enforces this, so this is a rail against that enforcement regressing, not
-    # a condition we hope holds.
     if alt["partner_was_mover_frac"] not in (None, 1.0):
         raise ValueError(
             f"cups_ca: role-swap partner was a non-mover in "
@@ -311,9 +219,6 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
             f"argument this metric rests on requires BOTH sides of the swap to be movers; a "
             f"one-sided exchange lets a first/last/deepest-mover heuristic score positive.")
 
-    # The two arms must be talking about the same windows. Asserted rather than assumed: at the
-    # frozen knobs the only role-swap dropouts are N==2 windows, which W excludes anyway, so this
-    # should be vacuous — and if it ever stops being vacuous we need to know immediately.
     for i in W:
         n_r, s_r = native[i], swap[i]
         assert (n_r["N"], n_r["depth"], n_r["m"], n_r["R"], n_r["routed"]) == \
@@ -323,11 +228,6 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     diffs = [native[i]["wm"] - swap[i]["stayed"] for i in W]
     comp_ca = sum(diffs) / len(diffs)
 
-    # The alt-arm-only form: follow_alt - stayed_original, computed on the IDENTICAL slice. It
-    # never references the absolute pick rate, so it is fully disjoint from the capability gate;
-    # its non-tracker cancellation is only expectation-zero, which is why it is not what we
-    # select on. Carried as a standing cross-check — the two forms should move together, and a
-    # divergence between them is a signal that something is wrong with one of the arms.
     alt_only = [swap[i]["follow"] - swap[i]["stayed"] for i in W]
 
     per_depth = {}
@@ -340,8 +240,6 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
         }
 
     idxs = [swap[i]["i"] for i in W]
-    # Both arms, not just the native one: comp_ca is a DIFFERENCE, so a collapsed role-swap bank
-    # corrupts it exactly as badly as a collapsed native bank.
     diag = _diagnostics(cap["pred_obs"], ctx["cands"], idxs)
     diag_swap = _diagnostics(alt["pred_obs"], ctx["cands"], idxs)
     for nm, pb in (("native", cap["pred_obs"]), ("swap", alt["pred_obs"])):
@@ -352,9 +250,6 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     native_wm = sum(native[i]["wm"] for i in W) / len(W)
 
     guards = {
-        # HARD: structural integrity of the measurement. alt_chain raises internally on a
-        # self-parity or encoder-stamp failure, so reaching here means those passed; the values
-        # are surfaced so a run is auditable without re-reading logs.
         "self_parity_cos": alt["self_parity_cos"],
         "eye_tree_sha": alt["eye_tree_sha"],
         "slice_nonempty": True,
@@ -364,7 +259,6 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
         "angular_dispersion": diag["angular_dispersion"],
         "norm_over_bank_swap": diag_swap["norm_over_bank"],
         "angular_dispersion_swap": diag_swap["angular_dispersion"],
-        # None means "no threshold has been measured", which is different from passing
         "norm_ok": (None if MIN_NORM_OVER_BANK is None else
                     all(d["norm_over_bank"] is not None
                         and d["norm_over_bank"] >= MIN_NORM_OVER_BANK
@@ -373,7 +267,6 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
                           all(d["angular_dispersion"] is not None
                               and d["angular_dispersion"] >= MIN_ANGULAR_DISPERSION
                               for d in (diag, diag_swap))),
-        # REPORTED ONLY — see REPORT_NATIVE_WM_OVER_CHANCE above.
         "native_wm": native_wm,
         "chance": chance,
         "native_wm_over_chance": native_wm - chance,
@@ -386,14 +279,12 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     best_arm = max(band, key=lambda a: band[a])
 
     return {
-        # THE scalar the search maximizes: the raw paired differential. The analytic band travels
-        # beside it as a reference, never subtracted from it — see the note above.
         "comp_ca": comp_ca,
         "analytic_band": band,
         "best_analytic_arm": best_arm,
         "n": len(W),
         "per_depth": per_depth,
-        "comp_ca_alt_only": sum(alt_only) / len(alt_only),   # cross-check, never selection
+        "comp_ca_alt_only": sum(alt_only) / len(alt_only),
         "native_wm": native_wm,
         "swap_stayed": sum(swap[i]["stayed"] for i in W) / len(W),
         "swap_follow": sum(swap[i]["follow"] for i in W) / len(W),
@@ -401,8 +292,6 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
         "slice": {"N_in": list(SLICE_N), "style": SLICE_STYLE, "depth_min": DEPTH_MIN,
                   "ceiling_earnable_lt": CEILING_EARNABLE_LT},
         "role_swap_seed": seed,
-        # the capability gate's own reading on the same net, carried for reporting. NEVER an
-        # input to selection: it is the honest yardstick this search must not learn to climb.
         "gate_report": {
             "earnable_core": cap.get("earnable_core"),
             "deep_style_core": cap.get("deep_style_core"),

@@ -1,53 +1,3 @@
-"""R20 head: DUAL-PRE forward-model consistency — the r18 aux VERBATIM plus a second
-supervision arm that trains the SAME shared transition operator on its DEPLOYMENT input
-distribution: the arch's own memory content s_pre.
-
-THE SEAM THIS CLOSES (prior findings 6+7). The r18 head supervises
-transition_from_emb(pre, cmd) -> future read with pre = RAW past observations (obs_i) only. At
-composition time — both the (a)-path companion and the (b)-path imagination write — the
-operator is applied to the arch's MEMORY content s_pre, a distribution it never trained on:
-measured collapse endhist-pre 0.404 >> mem-pre 0.148 (finding 6), r18 re-baseline mem-pre
-margin -0.342 dedup. Finding 7's de-risk showed the memory content is USABLE — a fresh operator
-trained on (s_pre_m, c_m) -> z_r recovers 0.510 (affine, = floor: the r18 operator FORM has no
-capacity to use content) / 0.569 (MLP, +0.057). This head runs exactly that experiment INSIDE
-the sanctioned single pass, on the r18 head's own mined triples:
-
-  arm 1 (r18 aux, verbatim): f(obs_i, cmd_k) ~ obs_j           weight 1.0  (cos 0.10 + mse 0.02)
-  arm 2 (NEW, mem-pre):       f(s_pre_k, cmd_k) ~ obs_j        weight mem_arm_w = 0.5x arm 1
-    s_pre_k = the arch's OWN transition-memory read at k, computed by the arch's input block +
-    `_transition_reads` under no_grad on the SAME selected rows (no transformer trunk — the
-    cheap path the (a)-path instrument `imag_direct._memory_spre` validated), DETACHED — it is
-    an input like obs_i, so gradient flows only through the operator call (tr_in/tr_out [+ the
-    co-designed arch's content residual] + cmd_proj/type_emb/in_norm), the exact same parameter
-    surface as arm 1.
-
-ONE mining pass serves both arms (same triples, same weights): the per-step RNG draw count is
-IDENTICAL to the r18 head (one randperm), so with mem_arm_w=0 training is bit-equal to the
-r18 head under the same seed (verified), and with mem_arm_w>0 the ONLY training-trajectory
-change is the mem-arm gradient itself — clean attribution. CO-DESIGN: on the r18 arch this
-arm can only re-linearize (finding 7: affine-on-memory saturates at floor); it is paired with
-`r20_contentcond_transition_imagwrite`, whose rms-normalized content residual is the capacity
-that can act on it. HONEST MINI RESULT (2x2 quadrant probe, 2 seeds, 700-step d=128 minis):
-at that budget the arm is outcome-neutral — main task unchanged (deltas <= 0.0013 in all
-quadrants), operator mem-pre composition unmoved, small consistent raw-pre improvement with
-the capacity arch (+0.01..+0.03 full) — while the residual IS recruited (||res||/||base||
-0.42); the repo's documented proxy-inversion doctrine for memory-mechanism training (700-step
-minis under-train them; evolve/CLAUDE.md) is why the full-budget 3-seed measurement — the
-scale where finding 7's +0.057 was measured — is the one that would settle it. Composability:
-the mem arm silently disables (raw-obs-arm-only, still verbatim) on any arch lacking the
-input-block/_transition_reads surface; the whole head disables (hard 0.0) without
-`transition_from_emb`, as the r18 head does.
-
-Causal/leak-free: identical to the raw-obs arm — obs_j enters ONLY as a loss label; s_pre_k is
-computed from pairs strictly before k on fully-observed training rows; forward is untouched
-(wrap adds no module, never re-points forward; eval bit-identical to the wrapped arch).
-
-Refs: the r18 head (this file's arm 1, verbatim); learned-simulator distribution-shift
-/ train-on-own-state corrections (DAgger arXiv:1011.0686; scheduled sampling arXiv:1506.03099 —
-here applied to the OPERATOR's input distribution, not the trunk's); Dreamer/RSSM latent
-self-consistency (arXiv:1912.01603).
-"""
-
 import math
 
 import torch
@@ -66,15 +16,13 @@ DESCRIPTION = (
 
 _DEFAULTS = dict(CH._DEFAULTS)
 _DEFAULTS.update({
-    "mem_arm_w": 0.5,      # mem-pre arm weight relative to the raw-obs arm's cos/mse weights
+    "mem_arm_w": 0.5,
 })
 
 _MEM_ATTRS = ("cmd_proj", "obs_proj", "type_emb", "in_norm", "_positional", "_transition_reads")
 
 
 def wrap(net, D, **params):
-    """Delegate to the r18 wrap (no module, no forward re-point), then add the mem-arm
-    config + capability check."""
     cfg = CH.wrap(net, D, **{k: v for k, v in params.items() if k in CH._DEFAULTS})
     cfg["mem_arm_w"] = float(params.get("mem_arm_w", _DEFAULTS["mem_arm_w"]))
     mem_ok = all(hasattr(net, a) for a in _MEM_ATTRS) and hasattr(net, "pos_scale")
@@ -84,8 +32,6 @@ def wrap(net, D, **params):
 
 @torch.no_grad()
 def _memory_pre(net, rows_tok, rows_types, valid, device):
-    """s_pre at every command index for the selected rows, via the arch's OWN input block +
-    _transition_reads (no transformer trunk). rows_tok [nr, L, D]; valid [nr, maxn]."""
     L = rows_tok.shape[1]
     t = rows_types.long().clamp(0, 1)
     x = torch.where((t == 0).unsqueeze(-1), net.cmd_proj(rows_tok), net.obs_proj(rows_tok))
@@ -121,7 +67,7 @@ def aux_loss(head_state, batch, net, device):
         return 0.0
 
     nrows = max(1, int(math.ceil(B * float(cfg["row_frac"]))))
-    sel = torch.randperm(B, device=device)[:nrows]      # the ONE RNG draw (same as the r18 head)
+    sel = torch.randperm(B, device=device)[:nrows]
     cmd = tok[sel][:, 0::2][:, :maxn]
     obs = tok[sel][:, 1::2][:, :maxn]
     valid = cmd_mask[sel]
@@ -149,11 +95,9 @@ def aux_loss(head_state, batch, net, device):
         mse_err = (w * (pred - tgt).pow(2).mean(dim=-1)).sum()
         return float(cfg["cos_weight"]) * cos_err + float(cfg["mse_weight"]) * mse_err
 
-    # -- arm 1: the r18 aux, verbatim (raw-obs pre) --
     pre_raw = torch.nan_to_num(obs[r, ti].detach(), nan=0.0, posinf=1e4, neginf=-1e4)
     total = arm(pre_raw)
 
-    # -- arm 2: mem-pre (deployment distribution), on the SAME triples --
     mem_w = float(cfg.get("mem_arm_w", 0.0))
     if mem_w > 0.0 and not cfg.get("_mem_disabled", True):
         reads = _memory_pre(net, tok[sel], batch["types"][sel], valid, device)
@@ -167,8 +111,6 @@ def aux_loss(head_state, batch, net, device):
 
 
 def leak_safe(mod, params):
-    """r18 checks + mem_arm_w range. Forward untouched; future obs_j is a loss label only;
-    s_pre_k uses pairs strictly before k."""
     p = dict(params or {})
     mw = p.pop("mem_arm_w", _DEFAULTS["mem_arm_w"])
     try:

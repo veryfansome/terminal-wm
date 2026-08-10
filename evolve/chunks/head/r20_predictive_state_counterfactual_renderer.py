@@ -1,13 +1,3 @@
-'''R20 head: counterfactual predictive-state endpoint imagination.
-
-The normal R18 prediction path is numerically untouched. The wrapper caches the
-strictly-causal hidden belief and transition-memory read at each command. A
-train-only endpoint objective applies the shared transition to its deployment-time
-memory input, then renders the resulting state through the later read command.
-Counterfactual history swaps force the route to use information beyond the command
-suffix. Only a small explicitly scaled gradient reaches shared parameters.
-'''
-
 import math
 
 import torch
@@ -44,14 +34,11 @@ _IMAG_DEFAULTS = {
 
 
 def _route_grad(x, fraction):
-    '''Identity in the forward pass, fraction-scaled gradient in backward.'''
     rho = float(fraction)
     return x.detach() + rho * (x - x.detach())
 
 
 class _PredictiveStateRenderer(nn.Module):
-    '''Factorized belief -> post-mutation state -> command-specific observation view.'''
-
     def __init__(self, D, hidden_d, width):
         super().__init__()
         width = int(width)
@@ -80,7 +67,6 @@ class _PredictiveStateRenderer(nn.Module):
 
 @torch.no_grad()
 def _mine_endpoints(cmd, valid, threshold):
-    '''Nearest later same-path-like command for every possible mutation position.'''
     B, N, _ = cmd.shape
     unit = F.normalize(
         torch.nan_to_num(cmd, nan=0.0, posinf=1e4, neginf=-1e4), dim=-1
@@ -106,7 +92,6 @@ def _mine_endpoints(cmd, valid, threshold):
 
 
 def _native_endpoint(cfg, net, tok, key_pad, pred, hidden, transition_reads):
-    '''Override only cmd_r in the declared odd-length missing-observation layout.'''
     if tok.shape[1] % 2 == 0 or transition_reads is None:
         return pred
     if key_pad is None:
@@ -119,7 +104,6 @@ def _native_endpoint(cfg, net, tok, key_pad, pred, hidden, transition_reads):
     if n_pair == 0:
         return pred
 
-    # Missing obs after command m, immediately followed by a valid read command.
     pattern = (
         valid_cmd[:, :n_pair]
         & ~valid_obs
@@ -148,7 +132,6 @@ def _native_endpoint(cfg, net, tok, key_pad, pred, hidden, transition_reads):
 
 
 def wrap(net, D, **params):
-    '''Preserve the R18 aux, register the renderer, and install the native route.'''
     cfg = BASE.wrap(net, D, **params)
     for key, value in _IMAG_DEFAULTS.items():
         cfg.setdefault(key, value)
@@ -166,8 +149,8 @@ def wrap(net, D, **params):
     if cfg['_disabled']:
         return cfg
 
-    # Draw seed-dependent private parameters but restore the global RNG exactly, so
-    # the harness dropout/batcher/auxiliary random stream is unchanged.
+    # A head drawing seed-dependent private parameters must restore the global RNG state
+    # exactly, or the harness dropout / batcher / aux random stream shifts for the same seed.
     rng = torch.get_rng_state()
     try:
         renderer = _PredictiveStateRenderer(
@@ -194,7 +177,6 @@ def wrap(net, D, **params):
         pred, hidden = original_forward(tok_emb, types, key_pad)
         transition_reads = cfg.get('_tr_reads')
         if tok_emb.shape[1] % 2 == 0:
-            # Standard fully-observed training/eval layout: return bit-identically.
             cfg['_cache'] = (tok_emb, hidden, transition_reads)
             return pred, hidden
         pred = _native_endpoint(
@@ -228,7 +210,6 @@ def _imagination_loss(cfg, batch, net):
     if row.numel() < 2:
         return 0.0
 
-    # The learned R18 mutation gate is a detached mining prior, never a label.
     with torch.no_grad():
         c_m_all = cmd[row, mutation]
         type_zero = torch.zeros(
@@ -253,7 +234,6 @@ def _imagination_loss(cfg, batch, net):
     s_pre = transition_reads[row, mutation].detach()
     h_m = hidden[row, 2 * mutation]
 
-    # Exact measurement-time memory distribution enters the shared transition.
     post_raw = net.transition_from_emb(s_pre, c_m)
     post_raw = torch.nan_to_num(post_raw, nan=0.0, posinf=1e4, neginf=-1e4)
     rho = float(cfg['shared_grad'])
@@ -291,7 +271,6 @@ def _imagination_loss(cfg, batch, net):
         prediction, target
     )
 
-    # Same command suffix, wrong predictive state: a direct conditional-history test.
     with torch.no_grad():
         suffix = F.normalize(torch.cat([c_m, c_r], dim=-1), dim=-1)
         suffix_similarity = suffix @ suffix.t()
@@ -330,7 +309,6 @@ def _imagination_loss(cfg, batch, net):
 
 
 def aux_loss(head_state, batch, net, device):
-    '''R18 consistency plus the single-pass endpoint predictive-state loss.'''
     cfg = head_state
     base_loss = BASE.aux_loss(cfg, batch, net, device)
     if cfg is None or cfg.get('_disabled', True):
@@ -350,13 +328,6 @@ def aux_loss(head_state, batch, net, device):
 
 
 def leak_safe(mod, params):
-    '''Validate the wrapper and explain the causal boundary.
-
-    Fully observed forward is the original R18 forward. In the native odd layout,
-    the endpoint consumes only s_pre_m and h_m, both computed at command m from
-    positions <=2m, plus c_m and c_r. The missing observation value is masked and
-    is never used. Future observations and mined z_r occur only as aux labels.
-    '''
     if not BASE.leak_safe(BASE, params or {}):
         return False
     p = dict(_IMAG_DEFAULTS)

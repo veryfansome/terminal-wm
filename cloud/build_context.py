@@ -1,41 +1,18 @@
-"""Build the lane context ONCE, so a campaign loads and derives nothing per candidate.
+"""Build the lane context once, so a campaign derives nothing per candidate.
 
     python -m cloud.build_context [--split inner] [--out .cache/lane-inner.pt]
 
-Everything in here is a property of (train root, frame root, pack roots, eye, split, swap-seed)
-and NOT of the genome:
+The context is a property of (train root, frame root, pack roots, eye, split, swap-seed) and not
+of the genome: the composed and standardized training set, the cups windows and their token
+layout, the cd-history windows, and the role-swap chains with their re-encoded embeddings.
 
-  - the composed and standardized training set
-  - the cups windows harvested from the val split, and the interleaved token layout
-  - the cd-history windows and their layout
-  - the ROLE-SWAP chains: partner draw, chain synthesis, and the re-encoded mv embeddings
+TWM_TRAIN_ROOT names the root the net trains on; unset, it is the cups pack root. A root holding
+a blend.json is a SPEC and not a dataset: the training set is composed here from the constituents'
+already-encoded caches, using the sequence indices the spec records. Write a spec with
+evolve/blend_root.py.
 
-That last one is the expensive part and the reason this exists. Synthesizing and encoding the
-alternative chains means loading the text encoder and running it over every rewritten command; done
-inside the per-candidate path it is repeated once per (genome, seed) for a result that is bit-wise
-identical every time.
-
-THE TRAINING ROOT MAY BE A BLEND SPEC
-  TWM_TRAIN_ROOT names the root the net trains on; unset, it is the cups pack root and this is the
-  single-pack lane, unchanged. If that root holds a blend.json it is a SPEC, not a dataset: it has
-  no data of its own, and the training set is composed here from the constituents' ALREADY ENCODED
-  caches using the exact sequence indices the spec records. So each pack is encoded once, every
-  blend arm shares bit-identical embeddings for the sequences they have in common, and no blend
-  re-encodes anything. Write a spec with evolve/blend_root.py.
-
-THE FRAME
-  Standardization statistics come from ONE root and every tensor in the context is put in that one
-  frame: the composed training set, the cups windows, the cd-history windows. A blend spec root has
-  no caches, so it cannot supply a frame, and with two capability packs measured on one net neither
-  pack can be the frame either. TWM_FRAME_ROOT names the frozen reference root that supplies the
-  train statistics, and it is REQUIRED whenever a blend is in play — never inferred, never falling
-  back to a constituent. A silent frame mismatch does not raise; it produces plausible numbers.
-  The resolved frame is recorded in the saved context so a consumer can check what it was built in.
-
-The artifact is written with torch's zipfile serialization so workers can memory-map it: N training
-processes then share one physical copy of the tensors instead of each loading their own. Processes
-rather than threads is deliberate — training seeds the global RNG and dropout draws from it, so
-concurrent threads would interleave those draws and a genome+seed would stop meaning one thing.
+TWM_FRAME_ROOT names the root whose train statistics standardize every tensor in the context, and
+it is required whenever a blend is in play. The resolved frame is recorded in the saved context.
 """
 import argparse
 import hashlib
@@ -51,9 +28,6 @@ from realenv import seq_worldmodel as M
 
 BLEND_SPEC = "blend.json"
 
-# A blend spec root carries the spec and the inherited summary and NOTHING else. If any of these
-# appear beside it, the root has data that no spec accounts for and the two can disagree without
-# anything raising.
 SPEC_ROOT_FORBIDDEN = ("train.jsonl", "val.jsonl", "emb-seq-train.pt", "emb-seq-val.pt")
 
 
@@ -78,12 +52,8 @@ def load_blend_spec(train_root):
 
 
 def resolve_constituent(entry, spec_root, what):
-    """Resolve one constituent root from its spec entry and verify its identity.
-
-    The recorded path is absolute and machine-specific, so a spec written on one box names roots
-    that may sit elsewhere on another. If the recorded path is absent, the same basename beside the
-    spec root is tried. Either way the root's summary.json must hash to the sha the spec recorded,
-    so a relocated root is accepted and a re-minted or substituted one is not."""
+    """Resolve one constituent root from its spec entry — the recorded path, else the same
+    basename beside the spec root — and verify its summary.json against the recorded sha."""
     want = entry["summary_sha256"]
     cands = [pathlib.Path(entry["root"]),
              pathlib.Path(spec_root).resolve().parent / pathlib.Path(entry["root"]).name]
@@ -102,10 +72,8 @@ def resolve_constituent(entry, spec_root, what):
 
 def compose_train_seqs(spec, spec_root, eye, device):
     """The composed training set: the base's encoded train sequences followed, per pack in spec
-    order, by exactly the pack sequences the spec's indices name, in that recorded order.
-
-    Nothing is encoded here. Every sequence comes out of a constituent's existing cache, which is
-    what makes two arms' shared sequences bit-identical."""
+    order, by the pack sequences the spec's indices name, in that recorded order. Nothing is
+    encoded here; every sequence comes out of a constituent's existing cache."""
     base_root = resolve_constituent(spec["base"], spec_root, "base")
     seqs = list(H._cached_encode(base_root, "train", eye, device))
     if len(seqs) != spec["base"]["train_seqs"]:
@@ -140,11 +108,8 @@ def compose_train_seqs(spec, spec_root, eye, device):
 
 
 def resolve_frame_root(train_root, blend, frame_root):
-    """The one root whose train statistics standardize everything in this context.
-
-    With a blend in play the frame must be given explicitly: a spec root has no statistics of its
-    own, and picking a constituent would put the net's inputs and some pack's windows in different
-    frames without anything raising."""
+    """The one root whose train statistics standardize everything in this context. With a blend in
+    play it must be given explicitly and is never inferred."""
     if blend is not None:
         if not frame_root:
             raise RuntimeError(
@@ -173,22 +138,18 @@ def build(root, eye, split, swap_seed, cdh_root=None, train_root=None, frame_roo
     else:
         train_full = H._cached_encode(train_root, "train", eye, device)
 
-    # Statistics come off the UN-standardized train sequences of the frame root. When the frame IS
-    # the training root and nothing was blended, train_full already holds exactly those sequences,
-    # so reusing it is both identical and one fewer multi-GB load.
+    # stats_src must be UN-standardized: apply_stats below mutates train_full in place, so this
+    # reuse is only correct before that call.
     same = (blend is None
             and os.path.realpath(frame) == os.path.realpath(train_root))
     stats_src = train_full if same else H._cached_encode(frame, "train", eye, device)
     mo, so, mc, sc = M.standardize_stats(stats_src)
     M.apply_stats(train_full, mo, so, mc, sc)
 
-    # Every window set goes in the SAME frame as the net's training inputs. Putting a pack's
-    # windows in their own frame would measure a net on inputs it never saw.
     ctx = CP.load_cups_context(root, split, eye, device, stats_data=frame)
     if ctx is None:
         raise SystemExit(f"no cups windows in the {split} split of {root}")
 
-    # the one genuinely expensive, genuinely net-independent step
     swap = CP.build_swap_cache(ctx, eye, device, seed=swap_seed)
 
     cdh = None
@@ -201,7 +162,6 @@ def build(root, eye, split, swap_seed, cdh_root=None, train_root=None, frame_roo
     return {"train_full": train_full, "ctx": ctx, "swap": swap, "cdh": cdh,
             "root": root, "eye": eye, "split": split, "swap_seed": swap_seed,
             "cdh_root": cdh_root, "train_root": train_root, "frame_root": frame,
-            # what the training set actually is, travelling with the tensors it describes
             "blend": (None if blend is None else
                       {"spec_sha256": hashlib.sha256(
                           (pathlib.Path(train_root) / BLEND_SPEC).read_bytes()).hexdigest(),
@@ -216,9 +176,9 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     root = os.environ.get("TWM_CUPS_ROOT")
-    cdh_root = os.environ.get("TWM_CDH_ROOT")          # the second capability pack's windows
-    train_root = os.environ.get("TWM_TRAIN_ROOT")      # a blend spec, or unset for the cups root
-    frame_root = os.environ.get("TWM_FRAME_ROOT")      # required when a blend is in play
+    cdh_root = os.environ.get("TWM_CDH_ROOT")
+    train_root = os.environ.get("TWM_TRAIN_ROOT")
+    frame_root = os.environ.get("TWM_FRAME_ROOT")
     eye = os.environ.get("TWM_EYE", "enc_e5_ft_nocwd_hf")
     if not root:
         raise SystemExit("TWM_CUPS_ROOT is not set")

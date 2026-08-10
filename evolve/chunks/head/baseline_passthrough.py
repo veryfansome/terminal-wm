@@ -1,3 +1,13 @@
+"""Contract for any head impl:
+  wrap(net, D, **params) -> a head state, or None for no head
+      Called BEFORE the optimizer is built, so any readout or auxiliary parameters it
+      registers on net are optimized. Two hazards a wrapper must avoid: a parent-child
+      module cycle (hold the base net unregistered, or moving to device recurses), and
+      forward recursion when re-pointing net.forward (save the original bound method first).
+  aux_loss(head_state, batch, net, device) -> scalar tensor or 0.0; train-time only.
+  leak_safe(mod, params) -> bool; asserted before scoring.
+"""
+
 import torch
 
 NAME_BASELINE = "baseline_passthrough"
@@ -6,18 +16,16 @@ DESCRIPTION_BASELINE = ("Arch's own Linear readout, unchanged; no aux loss. "
 
 
 def wrap(net, D, **params):
-    # Do nothing: leave net.forward exactly as the arch defined it, add no modules.
-    # Returning None signals "no head state" to the (unused) aux path.
     return None
 
 
+# A hard 0.0 (not a zero tensor) so `main + aux` is main bit-for-bit and archived
+# fitnesses replay exactly.
 def aux_loss(head_state, batch, net, device):
-    # No auxiliary term. Return a hard zero so `main + aux` == main bit-for-bit.
     return 0.0
 
 
 def leak_safe(mod, params):
-    # No aux branch, no head params, forward untouched -> trivially leak-safe.
     return True
 
 

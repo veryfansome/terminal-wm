@@ -1,32 +1,3 @@
-'''R22 optimizer: CROSS-BATCH GRADIENT CONSENSUS.
-
-The reference stack already has strong content-attributable native imagination (CA 0.5471),
-but the R20/R21 candidates measured only about +0.005 cumulative CA and the strongest
-write-family HA result was mostly command decoding. The untouched optimization path still
-turns each pooled batch into one update, even though TRAIN-only gradient analysis at two
-archived 4000-step reference-stack checkpoints found a useful temporal separation: genuine
-mutation-to-read subset gradients align much more strongly than intervention-output subset
-gradients with a slow EMA of the ordinary full-batch gradient on input, trunk, renderer,
-output, and transition matrices.
-
-For every large non-addressing matrix this optimizer maintains a slow bias-corrected gradient
-EMA c_t, RMS-matches it to the current gradient g_t, and applies the bounded convex filter
-
-    g_t <- (1 - alpha_t) * g_t + alpha_t * c_t,  0 <= alpha_t <= 0.35.
-
-Cross-batch-consistent directions therefore receive more angular weight while batch-specific
-directions are attenuated. Since c_t is RMS-matched and the mixture is convex, each filtered
-tensor's gradient norm cannot exceed its pre-filter norm. A delayed smooth ramp leaves early
-representation formation unchanged.
-
-The carried optimizer stack is otherwise retained: Muon still owns the six repeated 64xd addressing
-matrices, AdamW keeps the same warmup/hold/cosine-floor schedule, and the 768x768 transition
-readout keeps the same spectral cap. The optimizer sees no data, masks, targets, metadata,
-images, or eval artifacts; it adds no model parameter or forward branch and cannot detect the
-wrong-history arm. Causality, PAD invariance, anti-collapse behavior, identity target, and the
-native measurement layout are inherited unchanged.
-'''
-
 import math
 import torch
 NAME="r22_crossbatch_gradient_consensus"
@@ -138,6 +109,8 @@ def make(params,steps,lr=5e-4,wd=5e-4,warmup_frac=.04,hold_frac=.30,floor_ratio=
     if not 0.<float(consensus_beta)<1.: raise ValueError("consensus_beta must be in (0,1)")
     candidates=[p for p in plist if p.ndim==2 and p.shape[0]==int(key_d) and p.shape[1]!=int(key_d) and p.shape[1]!=D]; counts={}
     for p in candidates: counts[tuple(p.shape)]=counts.get(tuple(p.shape),0)+1
+    # Sibling rule: addressing projections always come as identical-shape read/write pairs, so a
+    # lone tensor matching the signature (Embedding(key_d, d)) is not addressing and must not route.
     keys=[p for p in candidates if counts[tuple(p.shape)]>=2]; key_ids={id(p) for p in keys}; rest=[p for p in plist if id(p) not in key_ids]; dd=[p for p in rest if p.ndim==2 and tuple(p.shape)==(D,D)]; large=[p for p in rest if p.ndim==2 and p.numel()>=int(min_matrix_numel)]
     schedule=_lr_lambda(steps,warmup_frac,hold_frac,floor_ratio); adamw=torch.optim.AdamW(rest,lr=float(lr),weight_decay=float(wd),betas=(.9,float(beta2))); scheds=[torch.optim.lr_scheduler.LambdaLR(adamw,schedule)]; muon=None
     if keys:

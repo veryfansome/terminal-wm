@@ -1,12 +1,8 @@
-"""Environment preflight — run once per scoring clone, BEFORE any candidate code.
+"""Environment preflight — run once per scoring clone, before any candidate code.
 
-The engine treats a nonzero exit from the setup step as an infrastructure failure: it is not
-archived, it does not consume budget, and it does not become some candidate's null. That is the
-correct home for "the data root is missing", "the encoder is the wrong one", "the ceiling table
-disagrees with the mint". Those are facts about the machine, not about the genome, and recording
-them against a candidate both slanders the candidate and burns a full-eval slot.
-
-Anything reached only at probe time still raises inside the adapter; this is the cheap front door.
+Checks the roots, the blend constituents, the frame, the ceiling table and the encoder sha, and
+exits nonzero on anything wrong with the machine. Anything reached only at probe time still
+raises inside the adapter.
 """
 import hashlib
 import json
@@ -18,14 +14,7 @@ from eval.adapter import CEILING_TABLE, preflight
 
 
 def embedding_sha(root):
-    """sha256 over the encoded tensors themselves.
-
-    The existing stamps cover summary.json and the encoder checkpoint — not the embeddings. But
-    encoding is a GPU forward pass, and two machines that each "just re-encode" the same raw mint
-    with the same pinned eye can land on different bytes, hence a different standardization frame,
-    with every existing check passing. Encode once, publish, and pin THIS: it is the only stamp
-    that actually asserts two boxes are measuring in the same space.
-    """
+    """sha256 over the encoded tensors themselves (emb-seq-train.pt, emb-seq-val.pt)."""
     h = hashlib.sha256()
     for name in ("emb-seq-train.pt", "emb-seq-val.pt"):
         h.update(name.encode())
@@ -36,12 +25,9 @@ def embedding_sha(root):
 
 
 def main():
-    # env vars, root shards, blend constituents, the frame, table presence, eye sha
     root, eye, train_root, frame_root = preflight()
     rp = pathlib.Path(root)
 
-    # The ceiling table defines the eligible slice. If it was built for a different mint, the
-    # slice silently changes shape — so compare the knobs it was built at against the root's own.
     tbl = json.load(open(CEILING_TABLE))
     knobs, cups = tbl.get("knobs") or {}, (json.loads((rp / "summary.json").read_text())
                                            .get("cups") or {})

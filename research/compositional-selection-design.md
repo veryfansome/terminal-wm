@@ -104,6 +104,46 @@ Reported, not enforced: the pick rate over chance, the analytic band, and the ca
 
 The norm and dispersion floors are **inherited from a different instrument and have not been calibrated for this quantity.** The realized values are emitted on every measurement; re-set the thresholds from measured data before reading a failure there as a statement about a candidate.
 
+## 7a. The three ceilings the instrument reports, and why there are three
+
+`cups_probe.measure` emits three ceiling estimates per slice. They are not redundant, and none of
+them is a candidate-facing knob.
+
+**`arm_max`** — the best single arm's mean over the slice. Too weak to be the gate: an adversary is
+not required to commit to one arm for the whole slice.
+
+**`switch_max`** — the switching ceiling. The slice is partitioned by the *observable* cell (the
+exposure count and the chain depth, both readable without tracking), the best arm's mean is taken
+per cell, and the cells are mass-weighted. It dominates `arm_max` by construction.
+
+Two corrections inside it look like over-engineering and are not:
+
+- **Cells with fewer than `SWITCH_MIN` windows pool into their per-N marginal before switching,**
+  and whatever is still too small pools into one remainder group. Without this, a singleton cell's
+  best arm-mean is just that row's oracle maximum, and the "ceiling" degenerates into a per-row
+  oracle — a ceiling no strategy could actually realize, which would make the margin meaningless in
+  the conservative direction.
+- **The arm is chosen out-of-sample.** The in-sample per-group best-mean is a maximum over ten
+  correlated means and is biased upward as an estimate of the switching ceiling — around +0.035 at
+  n=142, which is a large fraction of the band the gate is read against. `switch_max_xfit` splits
+  each group in half by a seeded shuffle, picks the arm on one half, evaluates it on the other,
+  does both directions, and weights by evaluation mass. That is what the reported margin uses;
+  in-sample `switch_max` stays beside it as the conservative bound.
+
+**`ceiling_frozen`** — the analytic per-`(N, depth, m, R)`-cell population ceiling, computed offline
+from the planner at the frozen knobs and applied to the realized cell masses. When a table is
+supplied this is the gate-bearing one, because the resulting margin carries the model's own
+sampling noise and nothing else: no in-sample maximum bias, no cross-fit pooling gap. A realized
+cell absent from the table fails loud.
+
+The exposure-swap probe carries a related correction. Its bank is a **full-donor** bank — the
+window's own routed and name exposures plus *every* donor exposure — rather than the 2×2
+`{own,donor} × {routed,name}` bank it started as. The small bank forced an arm-mimic's wrong-slot
+predictions onto some bank entry, spilling roughly 0.1–0.25 of its mass onto the donor-routed
+column and falsifying the probe's null. With every donor exposure present, a wrong-slot prediction
+lands on its own donor entry, is counted as donor-other, and the follow rate equals the strategy's
+slot accuracy exactly.
+
 ## 8. The lane
 
 One net per (genome, seed), trained on the pack root and standardized on **that root's own** train statistics. The compositional metric and the world-model health readout both come off that same net, because training twice to measure two things off it is waste.

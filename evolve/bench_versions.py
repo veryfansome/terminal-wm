@@ -10,10 +10,6 @@ import json
 import pathlib
 
 
-# ---------------------------------------------------------------- v3-policy scoring-side infra
-# These helpers depend on nothing but a root's OWN declaration — no external class table — which is
-# what lets the reencode stamper, the harness cached-encode gate and load_perception_for_root all
-# fail closed on a malformed root without a shared authority to consult.
 
 def is_v3_policy(data_root):
     """True iff the root's summary.json declares a dockerfs3 (v3) bench policy. Lightweight
@@ -52,8 +48,6 @@ def require_v3_cache(data_root):
     for fld in ("bench_version", "policy_sha", "classes_sha"):
         cv, jv = cm.get(fld), js.get(fld)
         # B1: reject FALSY stamps, not only mismatched — a pre-B1 root (or a hand-edited cache)
-        # carrying no policy_sha/classes_sha would otherwise pass this guard vacuously (None==None),
-        # exactly the gap that let an unstamped v3 root reach scoring. A v3 root MUST pin all three.
         if not cv or not jv:
             raise ValueError(f"{data_root}: v3 {fld} is empty (cache_meta={cv!r}, summary={jv!r}) "
                              f"— a v3 root MUST carry a non-empty {fld} (fail-closed)")

@@ -1,12 +1,12 @@
-"""arch chunk baseline: the R4 causal transformer (SeqWorldModel).
-
-Contract for any arch impl: expose `build(**params) -> nn.Module` whose
+"""Contract for any arch impl: expose `build(**params) -> nn.Module` whose
   forward(tok_emb [B,L,768], types [B,L] in {0,1}, key_pad [B,L] bool) -> (pred [B,L,768], h [B,L,dh])
-predicting at EVERY position (the harness reads command positions as pred[:, 0::2]). It MUST be
-CAUSAL: the per-genome no-leakage guard rejects any arch where a command-position prediction can
-depend on its own or a future observation token (score -inf). Input tokens are frozen 768-d
-embeddings; the head must map back to 768-d target space. Params come from the genome's
-chunks.arch.params."""
+predicting at EVERY position; the harness reads command positions as pred[:, 0::2]. Input tokens
+are frozen 768-d embeddings and the module must map back to 768-d target space. Params come from
+the genome's chunks.arch.params.
+
+The module MUST be causal: a command-position prediction may not depend on its own or a later
+observation token. The per-genome no-leakage guard rejects any arch that fails this.
+"""
 
 from realenv import seq_worldmodel as M
 

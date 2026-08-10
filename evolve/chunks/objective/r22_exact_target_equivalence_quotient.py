@@ -1,33 +1,3 @@
-"""R22 objective: EXACT-TARGET EQUIVALENCE QUOTIENT.
-
-The identity target admits exact equivalence classes: two occurrences with the same
-standardized target vector are the same answer. The squared-L2 eval agrees—an exactly
-equal foil ties the truth and therefore cannot beat it. The r12 loss does not:
-its duplicate guard only removes the EXTRA ring emphasis, while duplicate occurrences
-remain separate one-hot classes, separate candidate columns, and separate focal anchors.
-For an exact class of size k, diagonal probability is at most about 1/k even when the
-TOTAL correct-class probability is approximately one, so the focal term calls a solved
-answer hard forever. Repeated empty stdout is the largest class in this corpus.
-
-This loss takes the quotient by exact target equality. If k_j is target j's class size:
-  * candidate logits receive -log(k_j), integrating k identical columns to one class;
-  * the positive numerator is logsumexp over every target equivalent to t_i;
-  * focal hardness uses total positive-class probability;
-  * query rows, precision estimates, MSE, and repulsion use measure 1/k_i.
-Thus duplicating any training example leaves the complete loss invariant. The r12
-precision-weighted L2 geometry and close-BUT-DISTINCT ring remain, so mutation twins and
-other genuinely different hard targets are still separated.
-
-Measured TRAIN fact: 55.22% of rows in reference-stack batches have an exact sibling. On
-the three archived 4000-step reference-stack checkpoints their aggregate class probability is
-0.994-0.996, but diagonal focal hardness remains 0.800-0.812. Quotient weighting shifts
-effective batch mass from repeated intervention stdout toward diverse read/revisit targets.
-
-Pure pred/tgt function; no metadata, state, RNG, forward change, or eval visibility.
-Anti-collapse: a constant prediction cannot identify all distinct target classes, and the
-class-balanced MSE anchor remains strictly positive for varying targets.
-"""
-
 import torch
 import torch.nn.functional as F
 
@@ -55,8 +25,6 @@ _MARGIN = 0.5
 _TAU_R = 0.25
 _GATE_EPS = 1e-3
 
-# Float32 Gram-matrix equality tolerance. On 20 real reference-stack batches:
-# same-class max 3.34e-6; distinct-class min 3.31e-4; zero FP/FN at 1e-5.
 _EQ_EPS = 1e-5
 _NUM_EPS = 1e-12
 
@@ -67,8 +35,6 @@ def loss(pred, tgt):
     if n < 2:
         return per_row_mse.mean()
 
-    # Define the target quotient and all detached measures. Equality is computed in
-    # unweighted identity-target geometry; near-but-distinct vectors remain negatives.
     with torch.no_grad():
         tf = tgt.float()
         t0_sq = (tf * tf).sum(dim=1, keepdim=True)
@@ -80,8 +46,6 @@ def loss(pred, tgt):
         inv_class = class_size.reciprocal()
         row_measure = inv_class.sum().clamp_min(_NUM_EPS)
 
-        # Quotient-weighted free-energy precision: repeating an exact target does not
-        # change the error statistics or any dimension's reliability.
         err2 = (pred.detach() - tgt).pow(2)
         mse_d = (inv_class.unsqueeze(1) * err2).sum(dim=0) / row_measure
         precision = (1.0 / (mse_d + _EPS)).pow(_BETA)
@@ -92,7 +56,6 @@ def loss(pred, tgt):
 
     mse_anchor = (inv_class * per_row_mse).sum() / row_measure
 
-    # r12 precision-weighted per-dimension squared-L2 geometry.
     pw = pred * sqrt_precision
     tw = tgt * sqrt_precision
     pw_sq = (pw * pw).sum(dim=1, keepdim=True)
@@ -105,7 +68,6 @@ def loss(pred, tgt):
         tt = tt / float(d)
         distinct = ~equivalent
 
-        # Class-pair measure makes the ring scale invariant to duplicating either class.
         pair_measure = (
             inv_class.unsqueeze(1)
             * inv_class.unsqueeze(0)
@@ -117,7 +79,6 @@ def loss(pred, tgt):
         ring = torch.exp(-tt / lam) * (1.0 - torch.exp(-tt / _DUP_DELTA))
         ring = ring.masked_fill(equivalent, 0.0)
 
-        # Importance normalization is over distinct TARGET CLASSES, not occurrences.
         candidate_measure = inv_class.unsqueeze(0)
         neg_measure = candidate_measure * distinct.to(inv_class.dtype)
         a_raw = 1.0 + _KAPPA * ring
@@ -126,7 +87,6 @@ def loss(pred, tgt):
         importance = (a_raw / a_mean.clamp_min(1e-6)).masked_fill(equivalent, 1.0)
         log_importance = importance.clamp_min(1e-6).log()
 
-        # k identical candidate columns integrate to one unit of class measure.
         log_class_measure = -class_size.log().unsqueeze(0)
 
     logits = -dist2 / _TEMP + log_importance + log_class_measure
@@ -140,8 +100,6 @@ def loss(pred, tgt):
 
     listwise = (inv_class * focal * nll).sum() / row_measure
 
-    # r12 close-distinct repulsion, integrated once per candidate class and once
-    # per anchor class. Exact-equivalent targets carry zero repulsion by construction.
     with torch.no_grad():
         ring_measure = ring * candidate_measure
         mass = ring_measure.sum(dim=1)

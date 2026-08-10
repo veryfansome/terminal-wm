@@ -1,10 +1,3 @@
-"""R20 native imagination-write arch.
-
-This is the r18 path-state latent-transition model with one parameter-free causal branch: a
-valid command whose observation token is masked writes the existing learned transition
-f(s_pre, cmd) into path memory. The branch is identically zero on fully observed streams.
-"""
-
 import torch
 
 from evolve.chunks.arch.r18_pathstate_latent_transition_worldmodel import (

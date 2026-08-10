@@ -1,21 +1,3 @@
-'''R21 head: COUNTERFACTUAL HISTORY GUIDANCE.
-
-A parameter-free inference-time readout for the frozen odd masked-endpoint layout.
-The same R18 trunk is evaluated with the supplied history and with a causal
-counterfactual in which positions strictly before the mutation command are masked.
-The conditional-minus-counterfactual latent is a direct estimate of the prefix's
-contribution. A small RMS-capped extrapolation sharpens that contribution:
-
-    guided = conditional + clip_rms(gain * (conditional - no_history), cap)
-
-This is analogous to classifier-free guidance, but operates on a JEPA endpoint
-embedding rather than a diffusion score. It is algebraically honest under IMAG_HA:
-when the caller already masks history, conditional and no_history are identical and
-the correction is exactly zero. No prefix-liveness statistic or arm-specific branch
-is used. All even-length and training-mode forwards are the original forward, the
-R18 auxiliary is retained verbatim, and no parameter or RNG state is added.
-'''
-
 import math
 
 import torch
@@ -41,12 +23,6 @@ _EPS = 1e-8
 
 
 def _detect_masked_endpoint(types, key_pad):
-    '''Find the last live-cmd/dead-obs/live-cmd endpoint in each odd row.
-
-    Detection uses only the fixed local layout. It imposes no requirement on prefix
-    liveness, so supplied-history and externally history-masked rows follow the same
-    computation. It never reduces key_pad to a mask fraction or arm classifier.
-    '''
     if (
         key_pad is None
         or types.dim() != 2
@@ -93,7 +69,6 @@ def _detect_masked_endpoint(types, key_pad):
 
 
 def _counterfactual_pad(key_pad, rows, mutation):
-    '''Mask positions strictly before c_m for selected rows.''' 
     counterfactual = key_pad.bool().clone()
     pos = torch.arange(key_pad.size(1), device=key_pad.device).unsqueeze(0)
     counterfactual[rows] = counterfactual[rows] | (
@@ -120,9 +95,6 @@ def wrap(net, D, **params):
     cfg['_history_guidance_original_forward'] = original_forward
 
     def wrapped_forward(tok_emb, types, key_pad):
-        # Every ordinary train/fitness sequence is an even cmd/obs interleave. The
-        # training guard also prevents two dropout draws if an odd diagnostic is ever
-        # accidentally invoked before net.eval().
         if tok_emb.size(1) % 2 == 0 or net.training:
             return original_forward(tok_emb, types, key_pad)
 

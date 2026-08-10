@@ -1,11 +1,3 @@
-"""R20 head: train-only calibration of the interventional gain/shell arch.
-
-The R18 forward-model consistency auxiliary is retained. A second, sparse
-auxiliary mines same-path mutation/read candidates, evaluates the structured no-write and
-full-write hypotheses without trunk gradients, and trains only the arch's two-scalar
-calibrator in the same training pass.
-"""
-
 import math
 
 import torch
@@ -58,7 +50,6 @@ def _d2m(a, b):
 
 @torch.no_grad()
 def _mine_pairs(cmd, cmd_feat, valid, net, threshold, max_pairs):
-    """Nearest later same-path touch for each command, prioritized by mutation confidence."""
     batch, maxn, _ = cmd.shape
     device = cmd.device
     cu = _unit(torch.nan_to_num(cmd, nan=0.0, posinf=1e4, neginf=-1e4))
@@ -89,7 +80,6 @@ def _mine_pairs(cmd, cmd_feat, valid, net, threshold, max_pairs):
 
 
 def _build_masked(tok, sel_b, sel_k, sel_j):
-    """Build [fully observed pairs before k, c_k, PAD, c_j]."""
     device = tok.device
     count = sel_b.numel()
     length = 2 * int(sel_k.max().item()) + 3

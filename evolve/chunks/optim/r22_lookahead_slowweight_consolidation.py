@@ -1,50 +1,3 @@
-"""OPTIM chunk: SLOW-WEIGHT CONSOLIDATION (Lookahead; Zhang, Lucas, Hinton & Ba, NeurIPS 2019,
-arXiv:1907.08610) wrapped AROUND the r18 inner optimizer (Muon-on-addressing + AdamW
-warmup-hold-cosine-floor + spectral-capped (D,D) transition readout), all kept VERBATIM.
-
-WHY (the lever this round hasn't tried). After 21+8 candidates the record localizes all
-content-attributable imagination in the path-state TRUNK, and BINDING-v2 selects the content-
-attributable differential IMAG_CA. My own TRAIN-window analysis adds one fact the round did not
-have: the history/content-dependence of a read (its target's distance from the cross-system
-centroid of the SAME command) cleanly separates command-only-solvable reads (mean 0.230) from
-command-only-FAILURE reads (0.629) -- but it is UNIFORMLY spread across sequences, so a
-sequence-selection batcher barely moves batch composition (failed-reads/seq 8.21 -> 8.52 at
-beta=1, a 1.04x no-op; genuine windows/seq 1.92 -> 1.89, 0.99x). Interpretation: the content-
-learning gradient signal is diluted UNIFORMLY across every batch -- it cannot be concentrated by
-DATA SELECTION. It can only be acted on where that diluted signal is integrated over time (the
-optimizer) or where the function is changed (arch). The optimizer GRADIENT space was taken this
-round (temporal gradient consensus); the optimizer WEIGHT space is untried.
-
-MECHANISM. Lookahead keeps a set of SLOW weights phi and lets the r18 inner optimizer A run
-k fast steps from phi; then phi <- phi + alpha*(theta_k - phi) and the fast weights reset to phi
-(Algorithm 1, verbatim). A forced consolidation at the final step returns phi (the paper returns
-phi). Proposition 2 of the paper proves, on the noisy-quadratic proxy, that Lookahead converges to
-the SAME expected value as the inner optimizer but to a STRICTLY SMALLER variance fixed point for
-any alpha in (0,1) at equal learning rate (V*_LA = [first-product-term < 1] * V*_SGD). Variance
-reduction helps the LOWEST-SNR parameters most -- here the content-delivery / memory-readout
-parameters that carry IMAG_CA and receive exactly the diluted signal my data measured. So the
-consolidated phi is a lower-variance estimate of the content-direction (cleaner, more transferable
-across the held-out systems that fitness rewards) -- WITHOUT biasing the solution (same mean =>
-low fitness risk) and WITHOUT any model, loss, batch, forward, or eval change.
-
-STRICT SUPERSET OF r18 (verified, max|delta| = 0.0). The inner optimizer is
-`r18_spectral_capped_transition_readout` inlined verbatim: identical Muon routing (6 (key_d,d)
-addressing matrices), identical spectral cap on the unique (D,D) `tr_read`, identical warmup-hold-
-cosine-floor schedule. At la_alpha = 1.0 (or la_k > steps) NO consolidation ever runs and the
-parameter trajectory is r18's bit-for-bit. The slow-weight interpolation of spectral-
-capped iterates stays inside the spectral-norm ball by convexity, so the cap is never violated by
-consolidation. NaN-safe: a non-finite param skips its interpolation; no RNG. Lookahead's slow
-weights live in the OPTIMIZER, never on the net (net.state_dict untouched), so the frozen
-instrument, PAD-invariance, and all ablations are structurally inherited.
-
-Contract: make(params, steps, **kw) -> (optimizer, scheduler). opt.zero_grad / opt.step /
-scheduler.step once per iteration. Pure/self-contained; torch only.
-
-Ref: Zhang, Lucas, Hinton, Ba, \"Lookahead Optimizer: k steps forward, 1 step back\", NeurIPS 2019
-(arXiv:1907.08610) -- Algorithm 1 (slow/fast update), Proposition 2 (variance fixed point strictly
-below the inner optimizer), and the paper's \"maintain the inner optimizer's internal state\" choice
-(momentum kept; only the params reset), all used here.
-"""
 import math
 
 import torch
@@ -62,7 +15,6 @@ DESCRIPTION = (
 D = 768
 
 
-# ================= r18 inner optimizer, inlined VERBATIM =================
 def _ns_orth(g, steps=5, eps=1e-7):
     a, b, c = 3.4445, -4.7750, 2.0315
     x = g.float()
@@ -184,12 +136,7 @@ def _schedule_lambda(steps, warmup_frac, hold_frac, floor_ratio):
     return lr_lambda
 
 
-# ================= NEW: Lookahead slow-weight consolidation wrapper =================
 class _Lookahead:
-    """Weight-space slow/fast consolidation (Zhang et al. 2019, Alg. 1) wrapping the r18 inner
-    optimizer. Every la_k inner steps: slow += alpha*(fast - slow); fast <- slow. A forced final
-    consolidation at t == total_steps makes the returned net hold the SLOW weights phi (Alg.1
-    returns phi). la_alpha >= 1.0 skips all consolidation -> the inner optimizer bit-for-bit."""
 
     def __init__(self, inner, params, total_steps, la_k=5, la_alpha=0.5):
         self.inner = inner
@@ -215,14 +162,14 @@ class _Lookahead:
         self.inner.step(closure)
         self._t += 1
         if self.la_alpha >= 1.0:
-            return                                               # exact inner optimizer (no consolidation)
+            return
         if self._t % self.la_k != 0 and self._t != self.total_steps:
             return
         for p, slow in zip(self.params, self._slow):
-            if not torch.isfinite(p).all():                      # NaN-safe: skip this param
+            if not torch.isfinite(p).all():
                 continue
-            slow.add_(p.detach() - slow, alpha=self.la_alpha)    # slow += alpha*(fast - slow)
-            p.copy_(slow)                                        # fast <- slow (final t: net holds phi)
+            slow.add_(p.detach() - slow, alpha=self.la_alpha)
+            p.copy_(slow)
 
 
 def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30, floor_ratio=0.05,
@@ -230,16 +177,16 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30, floo
          spectral_iters=2, la_k=5, la_alpha=0.5):
     params = [p for p in params]
 
-    # -- r18 routing, verbatim: addressing keys -> Muon --
     cand = [p for p in params
             if p.ndim == 2 and p.shape[0] == key_d and p.shape[1] != key_d and p.shape[1] != D]
+    # Sibling rule: addressing projections always come as identical-shape read/write pairs, so a
+    # lone tensor matching the signature (Embedding(key_d, d)) is not addressing and must not route.
     shape_counts = {}
     for p in cand:
         shape_counts[tuple(p.shape)] = shape_counts.get(tuple(p.shape), 0) + 1
     keys = [p for p in cand if shape_counts[tuple(p.shape)] >= 2]
     key_ids = {id(p) for p in keys}
 
-    # -- (D,D) square transition readout(s) -> spectral cap (unique signature) --
     dd = [p for p in params if p.ndim == 2 and p.shape[0] == D and p.shape[1] == D]
     rest = [p for p in params if id(p) not in key_ids]
 
@@ -248,7 +195,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30, floo
     def _wrap(inner, sched):
         return _Lookahead(inner, params, steps, la_k=la_k, la_alpha=la_alpha), sched
 
-    if not keys and not dd:                                       # exact carried baseline (plain AdamW)
+    if not keys and not dd:
         opt = torch.optim.AdamW(params, lr=lr, weight_decay=wd, betas=(0.9, beta2))
         return _wrap(opt, torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda))
 
@@ -259,7 +206,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30, floo
         muon = _MuonKeys(keys, lr=lr, momentum=momentum, ns_steps=ns_steps, rms_match=rms_match)
         scheds.append(torch.optim.lr_scheduler.LambdaLR(muon, lr_lambda))
 
-    if not dd:                                                    # keys present, no readout
+    if not dd:
         from types import SimpleNamespace
         cap = SimpleNamespace(project=lambda: None)
         return _wrap(_CapOpt(adamw, muon, cap), _MultiSched(*scheds))

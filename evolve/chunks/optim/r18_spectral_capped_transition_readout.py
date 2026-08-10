@@ -1,33 +1,3 @@
-"""OPTIM chunk: the r8 Muon-on-addressing + AdamW/warmup-hold-cosine-floor stack, PLUS a soft
-SPECTRAL-NORM CAP on the co-designed r18 arch's (D,D) latent-transition content READOUT
-(`tr_read`), applied as a post-step projection.
-
-CO-DESIGN (the epistasis stack this round tests). The arch
-`r18_pathstate_latent_transition_worldmodel` is the ONLY channel that leaves the observation
-manifold: it injects a per-path latent-transition correction into the prediction through a
-square (D=768, D=768) readout `tr_read` (zero-init). Contrastive row-softmax is invariant to a
-prediction's own norm, so this correction can grow off-manifold — the measured R10/R11 defect
-(‖pred‖²/‖true‖² ≈ 4.7 on imagined listings). Capping the LARGEST SINGULAR VALUE of `tr_read`
-bounds the gain of the injected correction, keeping predictions norm-calibrated and the per-path
-recurrence dynamically stable, without touching the direction the operator learned.
-
-WHY DISTINCT from the other optim proposals / the r8 stack:
-  * Muon (r8) orthogonalizes the momentum of the (key_d×d) ADDRESSING matrices — equalizes
-    ALL singular values of the key map for pattern separation. Kept here VERBATIM.
-  * Shampoo (in-round #5) preconditions the ADDRESSING-matrix gradient with Kronecker curvature.
-  * THIS caps only the TOP singular value of a DIFFERENT matrix (the content readout, not the
-    addressing keys) toward a target, for norm-calibration / stability — a spectral-norm CONSTRAINT
-    (Miyato et al., arXiv:1802.05957), not an orthogonalization or a curvature preconditioner.
-
-STRICT SUPERSET OF THE r8 STACK. The cap group is routed by the UNIQUE (D,D) square signature — no
-registered arch has a 768×768 weight except the co-designed arch's `tr_read`. On every other arch
-the cap group is EMPTY and make() returns the exact r8 stack (Muon on addressing when present,
-else plain AdamW), bit-identically. NaN-safe: non-finite weights skip the projection; the power
-iteration is normalized by a clamped norm; no RNG.
-
-Contract: make(params, steps, **kw) -> (optimizer, scheduler). opt.zero_grad / opt.step /
-scheduler.step once per iteration. Pure/self-contained; torch only.
-"""
 import math
 import torch
 
@@ -92,10 +62,6 @@ class _MuonKeys(torch.optim.Optimizer):
 
 
 class _SpectralCap:
-    """Soft spectral-norm cap applied post-step to the routed (D,D) matrices. Persistent left
-    singular estimate per param via 2 power iterations; if sigma > cap, scale the whole matrix by
-    cap/sigma (a projection back onto the spectral-norm ball). NaN-safe; no RNG (u is deterministic
-    from the first non-finite-free weight)."""
 
     def __init__(self, params, cap=4.0, iters=2):
         self.params = list(params)
@@ -123,7 +89,6 @@ class _SpectralCap:
 
 
 class _CapOpt:
-    """Composite: AdamW (+ optional Muon) step, then the post-step spectral projection."""
 
     def __init__(self, adamw, muon, cap):
         self.adamw = adamw
@@ -190,25 +155,25 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30,
          rms_match=0.2, spectral_cap=4.0, spectral_iters=2):
     params = [p for p in params]
 
-    # -- addressing keys -> Muon (exactly the r8 routing) --
     cand = [p for p in params
             if p.ndim == 2 and p.shape[0] == key_d
             and p.shape[1] != key_d and p.shape[1] != D]
+    # Sibling rule: addressing projections always come as identical-shape read/write pairs, so a
+    # lone tensor matching the signature (Embedding(key_d, d)) is not addressing and must not route.
     shape_counts = {}
     for p in cand:
         shape_counts[tuple(p.shape)] = shape_counts.get(tuple(p.shape), 0) + 1
     keys = [p for p in cand if shape_counts[tuple(p.shape)] >= 2]
     key_ids = {id(p) for p in keys}
 
-    # -- (D,D) square transition readout(s) -> spectral cap (unique signature) --
     dd = [p for p in params if p.ndim == 2 and p.shape[0] == D and p.shape[1] == D]
     dd_ids = {id(p) for p in dd}
 
-    rest = [p for p in params if id(p) not in key_ids]  # (D,D) stays trained by AdamW too
+    rest = [p for p in params if id(p) not in key_ids]
 
     lr_lambda = _schedule_lambda(steps, warmup_frac, hold_frac, floor_ratio)
 
-    if not keys and not dd:  # exact carried baseline (plain AdamW)
+    if not keys and not dd:
         opt = torch.optim.AdamW(params, lr=lr, weight_decay=wd, betas=(0.9, beta2))
         return opt, torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
 
@@ -219,7 +184,7 @@ def make(params, steps, lr=5e-4, wd=5e-4, warmup_frac=0.04, hold_frac=0.30,
         muon = _MuonKeys(keys, lr=lr, momentum=momentum, ns_steps=ns_steps, rms_match=rms_match)
         scheds.append(torch.optim.lr_scheduler.LambdaLR(muon, lr_lambda))
 
-    if not dd:  # keys present, no readout -> exact r8 Muon path
+    if not dd:
         from types import SimpleNamespace
         cap = SimpleNamespace(project=lambda: None)
         return _CapOpt(adamw, muon, cap), _MultiSched(*scheds)
