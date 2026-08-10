@@ -42,6 +42,13 @@ EYE_TREE_SHA=b0379d30034f9f2a9359ba5c9c7b5933b06822f3982e06d5857ecfb0c15d6fd1
 
 export TJ_FT_ENCODER="$EYE"
 export TWM_CUPS_ROOT="$ENC_ROOT"
+# The blend lane, off by default. TWM_TRAIN_ROOT points the training set at a blend SPEC root
+# (evolve/blend_root.py) instead of the cups pack, and TWM_FRAME_ROOT names the frozen reference
+# root whose train statistics standardize the training set and every pack's windows. Passed
+# through so the runner's children inherit them; deliberately NOT defaulted, because a frame
+# guessed for you is the one failure that raises nothing and yields plausible numbers.
+export TWM_TRAIN_ROOT="${TWM_TRAIN_ROOT:-}"
+export TWM_FRAME_ROOT="${TWM_FRAME_ROOT:-}"
 export TWM_EYE=enc_e5_ft_nocwd_hf
 export TWM_EYE_TREE_SHA="$EYE_TREE_SHA"
 export TWM_PYTHON="${TWM_PYTHON:-uv run python}"

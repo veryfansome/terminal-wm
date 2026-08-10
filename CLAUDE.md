@@ -41,7 +41,8 @@ The point is what cancels. A model that keys on the *name* being asked about pre
 | `eval/smoke.py`, `eval/guard_leakage.py` | the pre-eval gates every candidate pays |
 | `evolve/evolve.json` | the contract (engine-owned format) |
 | `evolve/genomes/` | the starting population |
-| `cloud/build_context.py` | derives the shared lane context once — standardized splits, window layouts, role-swap chains — so no candidate re-pays it |
+| `evolve/blend_root.py` | writes a blend **spec**: the constituent packs, their ratios, the seed and the sampled indices for a training set composed at load time |
+| `cloud/build_context.py` | derives the shared lane context once — the composed training set, standardized splits, window layouts, role-swap chains — so no candidate re-pays it. Resolves a blend spec and pins the standardization frame |
 | `cloud/runner.py` | runs (genome, seed) jobs concurrently against that shared context |
 | `cloud/pack_lane.sh` | the GPU lane: pull + pin the eye, encode the root, measure, ingest |
 | `research/compositional-selection-design.md` | why the objective is shaped this way |

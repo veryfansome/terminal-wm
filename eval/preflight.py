@@ -36,7 +36,8 @@ def embedding_sha(root):
 
 
 def main():
-    root, eye = preflight()                     # env vars, root shards, table presence, eye sha
+    # env vars, root shards, blend constituents, the frame, table presence, eye sha
+    root, eye, train_root, frame_root = preflight()
     rp = pathlib.Path(root)
 
     # The ceiling table defines the eligible slice. If it was built for a different mint, the
@@ -59,8 +60,8 @@ def main():
             f"encoded-root embedding sha {got} != pinned {want}. These are not the tensors this "
             f"campaign was measured against, so nothing scored here is comparable to it.")
 
-    print(json.dumps({"ok": True, "root": root, "eye": eye,
-                      "embedding_sha": got, "pinned": bool(want)}))
+    print(json.dumps({"ok": True, "root": root, "eye": eye, "train_root": train_root,
+                      "frame_root": frame_root, "embedding_sha": got, "pinned": bool(want)}))
     return 0
 
 

@@ -4,7 +4,8 @@ Invoked by the evolve engine, once per seed, as:
 
     python -m eval.adapter {results_dir} {genome} {seed} {split} {mode}
 
-It trains ONE net on the cups pack root and emits {results_dir}/metrics.json:
+It trains ONE net on the training root — the cups pack, or a BLEND of capability packs when
+TWM_TRAIN_ROOT names a blend spec — and emits {results_dir}/metrics.json:
 
     combined_score = comp_ca   (evolve/cups_ca.py — the compositional-depth differential)
 
@@ -37,6 +38,7 @@ import traceback
 
 import torch
 
+from cloud import build_context as BC
 from evolve import cdh_probe as CDH, cups_ca as CA, cups_probe as CP, genome as G, harness as H
 from realenv import seq_worldmodel as M
 
@@ -55,21 +57,42 @@ def _env(name, default=None, required=False):
     return v
 
 
-def preflight():
-    """Environment checks. These RAISE — they are never a candidate's fault."""
-    root = _env("TWM_CUPS_ROOT", required=True)
-    eye = _env("TWM_EYE", "enc_e5_ft_nocwd_hf")
+def _require_encoded(root, var):
+    """Half-present roots are worse than absent ones: the manifests resolve and then the loader
+    dies deep inside a paid run. Check the shards up front."""
     rp = pathlib.Path(root)
     if not rp.is_dir():
-        raise RuntimeError(f"TWM_CUPS_ROOT={root} is not a directory")
-    # Half-present roots are worse than absent ones: the manifests resolve and then the loader
-    # dies deep inside a paid run. Check the shards up front.
+        raise RuntimeError(f"{var}={root} is not a directory")
     for f in ("summary.json", "cache_meta.json", "emb-seq-train.pt", "emb-seq-val.pt",
               "train.jsonl", "val.jsonl"):
         if not (rp / f).exists():
             raise RuntimeError(
                 f"{root} is missing {f} — this is an ENCODED pack root, not a raw mint. Build it "
                 f"with evolve.reencode (see cloud/pack_lane.sh) before scoring anything.")
+
+
+def preflight():
+    """Environment checks. These RAISE — they are never a candidate's fault.
+
+    Returns (cups pack root, eye, training root, frame root). The training root is the cups pack
+    root unless TWM_TRAIN_ROOT names another — a blend spec, whose constituents are checked in its
+    place and which requires TWM_FRAME_ROOT to say what frame everything is standardized in."""
+    root = _env("TWM_CUPS_ROOT", required=True)
+    eye = _env("TWM_EYE", "enc_e5_ft_nocwd_hf")
+    _require_encoded(root, "TWM_CUPS_ROOT")
+
+    train_root = _env("TWM_TRAIN_ROOT") or root
+    frame_root = _env("TWM_FRAME_ROOT")
+    blend = BC.load_blend_spec(train_root)
+    if blend is None:
+        _require_encoded(train_root, "TWM_TRAIN_ROOT")
+    else:
+        for entry in [blend["base"]] + blend["packs"]:
+            _require_encoded(BC.resolve_constituent(entry, train_root, "constituent"),
+                             "blend constituent")
+    frame_root = BC.resolve_frame_root(train_root, blend, frame_root)
+    _require_encoded(frame_root, "TWM_FRAME_ROOT")
+
     if not CEILING_TABLE.exists():
         raise RuntimeError(f"missing frozen ceiling table {CEILING_TABLE}")
 
@@ -82,7 +105,7 @@ def preflight():
             raise RuntimeError(
                 f"encoder tree sha {got} != pinned {want} (TJ_FT_ENCODER={percep.MODEL}). The eye "
                 f"IS the frame: a different checkpoint silently re-defines every embedding.")
-    return root, eye
+    return root, eye, train_root, frame_root
 
 
 def write(results_dir, payload):
@@ -101,7 +124,8 @@ def fail(results_dir, reason, detail=""):
 
 def main(argv):
     results_dir, genome_path, seed, split, mode = argv[1], argv[2], int(argv[3]), argv[4], argv[5]
-    root, eye = preflight()                              # raises on environment problems
+    # raises on environment problems
+    root, eye, train_root, frame_root = preflight()
 
     gen = json.load(open(genome_path))
     table = json.load(open(CEILING_TABLE))
@@ -134,34 +158,46 @@ def main(argv):
                     "the head declares itself unsafe against the no-future-leakage contract")
 
     try:
-        # Frame discipline: the net trains on the pack root's OWN train statistics, and the probe
-        # windows are standardized in that same frame. Borrowing another root's stats here is the
-        # documented way to collapse two incomparable frames into one silent number.
+        # Frame discipline: ONE root supplies the train statistics, and the training set and every
+        # pack's probe windows are standardized in that one frame. Mixing frames here is the
+        # documented way to collapse two incomparable spaces into one silent number — it raises
+        # nothing and yields plausible readings. The frame is the training root on the single-pack
+        # lane and an explicit reference root whenever a blend is in play (see preflight).
         #
-        # TWM_CONTEXT points at a prebuilt lane context (cloud/build_context.py): the standardized
-        # splits, the window layout, and the role-swap chains already synthesized and encoded. All
-        # of that is a property of (root, split, eye, swap-seed) and none of it is a property of
-        # the genome, so a campaign derives it once and memory-maps it into every worker instead of
-        # reloading the encoder and re-encoding every alternative chain per candidate.
+        # TWM_CONTEXT points at a prebuilt lane context (cloud/build_context.py): the composed and
+        # standardized training set, the window layouts, and the role-swap chains already
+        # synthesized and encoded. All of that is a property of the roots, eye, split and swap seed
+        # and none of it is a property of the genome, so a campaign derives it once and memory-maps
+        # it into every worker instead of reloading the encoder and re-encoding every alternative
+        # chain per candidate.
         cpath = _env("TWM_CONTEXT")
         if cpath:
             blob = torch.load(cpath, map_location="cpu", weights_only=False, mmap=True)
-            if (blob["root"], blob["eye"], blob["split"]) != (root, eye, split):
+            # contexts built before the blend lane carry no train/frame keys; what they used then
+            # is what the defaults say now
+            built = (blob["root"], blob["eye"], blob["split"],
+                     blob.get("train_root", blob["root"]),
+                     blob.get("frame_root", blob["root"]))
+            here = (root, eye, split, train_root, frame_root)
+            if built != here:
                 raise RuntimeError(
-                    f"context {cpath} was built for {(blob['root'], blob['eye'], blob['split'])} "
-                    f"but this run is {(root, eye, split)} — a context from another frame would "
-                    f"silently score in that frame")
+                    f"context {cpath} was built for {built} but this run is {here} — a context "
+                    f"from another frame would silently score in that frame")
             train_full, ctx, swap_cache = blob["train_full"], blob["ctx"], blob["swap"]
             cdh_ctx = blob.get("cdh")
         else:
-            train_full = H._cached_encode(root, "train", eye, device)
-            mo, so, mc, sc = M.standardize_stats(train_full)
+            blend = BC.load_blend_spec(train_root)
+            train_full = (BC.compose_train_seqs(blend, train_root, eye, device) if blend
+                          else H._cached_encode(train_root, "train", eye, device))
+            stats_src = (train_full if not blend and frame_root == train_root
+                         else H._cached_encode(frame_root, "train", eye, device))
+            mo, so, mc, sc = M.standardize_stats(stats_src)
             M.apply_stats(train_full, mo, so, mc, sc)
-            ctx = CP.load_cups_context(root, split, eye, device, stats_data=root)
+            ctx = CP.load_cups_context(root, split, eye, device, stats_data=frame_root)
             swap_cache = None
             cdh_root = _env("TWM_CDH_ROOT")
             cdh_ctx = (CDH.load_cdh_context(cdh_root, split, eye, device, redir_only=True,
-                                            stats_data=root) if cdh_root else None)
+                                            stats_data=frame_root) if cdh_root else None)
         if ctx is None:
             raise RuntimeError(f"no cups windows in the {split} split of {root}")
     except Exception as e:
@@ -259,6 +295,10 @@ def main(argv):
             "wm_health": health,
             "cdh": cdh,
             "root": root, "eye": eye,
+            # what this net was trained on and what frame it all lives in — a reading is only
+            # comparable to another taken in the same frame
+            "train_root": train_root, "frame_root": frame_root,
+            "n_train_seqs": len(train_full),
         }},
         "text_feedback": feedback,
     })

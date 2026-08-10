@@ -53,8 +53,13 @@ The eval needs three things that are NOT in this repo and cannot be, because the
 | `TWM_PYTHON` | absolute interpreter with torch. The clone is a bare export; do not build a venv per candidate |
 | `TWM_CONTEXT` | optional: a prebuilt lane context (`cloud/build_context.py`). Workers memory-map it instead of each deriving the splits, window layouts and role-swap chains |
 | `TWM_CDH_ROOT` | optional: the second capability pack's root. When set, every candidate also carries a command-history routing reading — reported, never scored |
+| `TWM_TRAIN_ROOT` | optional: the root the net trains on. Unset, it is `TWM_CUPS_ROOT` — the single-pack lane. Set it to a **blend spec** root (`evolve/blend_root.py`) to train one net on a mixture of packs |
+| `TWM_FRAME_ROOT` | the frozen reference root whose train statistics standardize the training set and every pack's windows. **Required whenever `TWM_TRAIN_ROOT` is a blend spec** — a spec root has no statistics of its own and no pack may frame the others |
 
 Optional: `TWM_EYE_TREE_SHA` to assert the encoder's identity at preflight, `TWM_STEPS` to shorten training for a wiring test only.
+
+### Training one net on several packs
+`evolve/blend_root.py` writes a blend **spec** — the constituents, each pack's ratio, the sample seed and the exact sampled sequence indices — and no data. `cloud/build_context.py` composes the training set at load time from the constituents' already encoded caches, so each pack is encoded once and every arm shares bit-identical embeddings for the sequences they have in common: a difference between two arms cannot ride on encode noise. The val side is never blended; the evaluation split stays the frozen reference. `tests/test_blend.py` covers the composition, the integrity assertions and the frame requirement on synthetic roots.
 
 `eval/adapter.py::preflight` checks all of this **before** any candidate code runs and raises, so an environment problem surfaces as a broken run instead of being recorded as some candidate's null.
 
