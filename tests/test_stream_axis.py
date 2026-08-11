@@ -163,6 +163,47 @@ def main():
     ok, why = SG.stream_scoreable(obs, dev)
     check("a stream that edits OBSERVATION tokens is refused", not ok)
 
+    print("\none-armed coding is refused on every route (this regression shipped once)")
+    try:
+        CP.stream_coded_toks(ctx, None, make_coding_stream(with_hook=True))
+        check("coding stream with no swap cache raises", False, "no error")
+    except ValueError as e:
+        check("coding stream with no swap cache raises", "swap cache" in str(e))
+    t, t2 = CP.stream_coded_toks(ctx, None, BASE)
+    check("baseline with no swap cache is still the identity", t is ctx["tok"] and t2 is None)
+
+    print("\nstream_matches_context: the decisive check, on real-shaped sequences")
+    ok, why = SG.stream_matches_context(BASE, ctx, dev)
+    check("baseline passes", ok, why)
+    ok, why = SG.stream_matches_context(make_coding_stream(with_hook=True), ctx, dev)
+    check("coding stream WITH code_cmds passes", ok, why)
+    ok, why = SG.stream_matches_context(make_coding_stream(with_hook=False), ctx, dev)
+    check("coding stream WITHOUT code_cmds is refused", not ok)
+    check("  and it names code_cmds", "code_cmds" in why, why)
+
+    mut = make_coding_stream(with_hook=True)
+
+    def mutating_collate(batch, device):
+        for s in batch:
+            s["z_cmd"].mul_(2.0)
+        return M.collate(batch, device)
+    mut.collate = mutating_collate
+    before = ctx["seqs"][0]["z_cmd"].clone()
+    ok, why = SG.stream_matches_context(mut, ctx, dev)
+    check("a collate that edits its input in place is refused", not ok)
+    check("  and the shared context is left unpoisoned",
+          torch.equal(ctx["seqs"][0]["z_cmd"], before))
+
+    obs = make_coding_stream(with_hook=True)
+
+    def obs_edit(batch, device):
+        b = M.collate(batch, device)
+        b["tok"][:, 1::2] += 1.0
+        return b
+    obs.collate = obs_edit
+    ok, why = SG.stream_matches_context(obs, ctx, dev)
+    check("an observation coding is refused on real sequences", not ok)
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: {FAILED}")

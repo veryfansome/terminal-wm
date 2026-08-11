@@ -118,7 +118,6 @@ def _seqs(gen):
         z_cmd = torch.stack([_cmd_vec(c) for c in cmds])
         z_obs = torch.stack([_dir("obs:" + o) for o in obs_keys])
         z_cmd = z_cmd + 0.05 * torch.randn(n, D, generator=gen)
-        z_obs = z_obs + 0.05 * torch.randn(n, D, generator=gen)
         out.append({"z_obs": z_obs, "z_cmd": z_cmd, "cmds": list(cmds), "image": f"img{k}"})
     return out
 
@@ -147,13 +146,18 @@ def _advance_ramps(head_state):
 
     Auxiliary losses in this lineage ramp in over a few hundred steps, so at step one the aux is
     damped by four or five orders of magnitude and the gradient it contributes is a rounding
-    error. This can only turn an "untrained" verdict into a trained one, never the reverse, so it
-    strictly reduces false failures."""
+    error. The advance is bounded by the head's own declared ramp rather than set to a huge
+    number: a head that sizes or indexes a schedule by its counter would raise on a fabricated
+    step, and the gate would then report a well-formed batch as the cause."""
     if not isinstance(head_state, dict):
         return
+    ramps = [int(v) for k, v in head_state.items()
+             if isinstance(v, (int, float)) and not isinstance(v, bool)
+             and "ramp" in k.lower() and 0 < float(v) < 10 ** 6]
+    target = max(ramps) + 1 if ramps else 1000
     for k, v in list(head_state.items()):
         if isinstance(v, int) and not isinstance(v, bool) and "step" in k.lower():
-            head_state[k] = 10 ** 6
+            head_state[k] = target
 
 
 def _zero_grad_names(net):

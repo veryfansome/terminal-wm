@@ -56,37 +56,80 @@ def _toy(seed=0):
 @torch.no_grad()
 def stream_matches_context(stream, ctx, device, n_seqs=4):
     """The decisive check, once real sequences exist: run the genome's OWN collate over them and
-    compare its command tokens to what code_cmds reproduces.
+    compare BOTH halves of its output to what the instrument will reconstruct.
 
-    A toy batch can only rule out the codings it happens to exercise. This rules out the whole
-    class, because it asks the question on exactly the data the measurement will use -- real
-    lengths, real verbs, real observations, real batch composition."""
+    A toy batch can only rule out the codings it happens to exercise. This asks the question on
+    the data the measurement will actually use -- real lengths, real verbs, real observations.
+
+    Everything handed to collate is a clone and every expected value is computed from a pristine
+    copy BEFORE collate runs, so a collate that edits its input in place is caught rather than
+    validating itself -- and cannot poison ctx['seqs'], which flatten_predictions still reads.
+    The coding is also checked at two batch sizes, because training always collates at the
+    genome's bs (64 for every archived genome) while a gate naturally runs at three or four."""
     fn = getattr(stream, "code_cmds", None)
-    seqs = ctx.get("seqs") or []
-    batch = [{"z_cmd": s["z_cmd"], "z_obs": s["z_obs"],
-              "cmds": [st["cmd"] for st in s["steps"]], "image": s.get("image", "x")}
-             for s in seqs[:n_seqs]]
-    if not batch:
+    seqs = (ctx.get("seqs") or [])[:n_seqs]
+    if not seqs:
         return True, ""
-    try:
-        b = stream.collate(batch, device)
-    except Exception as e:
-        return False, f"stream.collate raised on real sequences: {type(e).__name__}: {e}"
-    tok = b["tok"].detach().cpu()
-    for i, s in enumerate(batch):
-        n = len(s["cmds"])
-        got = tok[i, 0:2 * n:2]
-        want = s["z_cmd"] if fn is None else fn(list(s["cmds"]), s["z_cmd"].clone())
-        want = want.detach().cpu().to(got.dtype)
-        if got.shape != want.shape or not torch.allclose(got, want, atol=1e-4):
-            worst = ((got - want).abs().max().item()
-                     if got.shape == want.shape else float("nan"))
-            return False, (
-                f"on real sequence {i} ({n} steps), stream.collate's command tokens differ from "
-                f"what code_cmds reproduces (max abs diff {worst:.3g}). The instrument builds its "
-                f"tokens from the cache and replays the coding through code_cmds, so a coding "
-                f"that only appears at real lengths, verbs or batch shapes would be present in "
-                f"training and absent at scoring.")
+    pristine = [{"cmds": [st["cmd"] for st in s["steps"]],
+                 "z_cmd": s["z_cmd"].detach().clone(),
+                 "z_obs": s["z_obs"].detach().clone(),
+                 "image": s.get("image", "x")} for s in seqs]
+
+    want_cmd = []
+    for row in pristine:
+        if fn is None:
+            want_cmd.append(row["z_cmd"].clone())
+            continue
+        try:
+            w = fn(list(row["cmds"]), row["z_cmd"].clone())
+        except Exception as e:
+            return False, f"stream.code_cmds raised on a real sequence: {type(e).__name__}: {e}"
+        if not torch.is_tensor(w) or tuple(w.shape) != tuple(row["z_cmd"].shape):
+            return False, ("stream.code_cmds must return a tensor shaped like z_cmd "
+                           f"{tuple(row['z_cmd'].shape)}, got "
+                           f"{tuple(getattr(w, 'shape', ()))}")
+        want_cmd.append(w.detach())
+
+    for reps in (1, 2):
+        batch = []
+        for _ in range(reps):
+            batch += [{k: (v.clone() if torch.is_tensor(v) else
+                           (list(v) if isinstance(v, list) else v))
+                       for k, v in row.items()} for row in pristine]
+        try:
+            b = stream.collate(batch, device)
+        except Exception as e:
+            return False, (f"stream.collate raised on real sequences at batch size {len(batch)}: "
+                           f"{type(e).__name__}: {e}")
+        tok = b["tok"].detach().cpu()
+        for i, row in enumerate(pristine):
+            n = len(row["cmds"])
+            got_c = tok[i, 0:2 * n:2]
+            exp_c = want_cmd[i].cpu().to(got_c.dtype)
+            if got_c.shape != exp_c.shape or not torch.allclose(got_c, exp_c, atol=TOL):
+                worst = ((got_c - exp_c).abs().max().item()
+                         if got_c.shape == exp_c.shape else float("nan"))
+                return False, (
+                    f"on real sequence {i} ({n} steps, batch of {len(batch)}), collate's COMMAND "
+                    f"tokens differ from what code_cmds reproduces (max abs diff {worst:.3g}). "
+                    f"The instrument builds its tokens from the cache and replays the coding "
+                    f"through code_cmds, so a coding that only appears at some lengths, verbs or "
+                    f"batch sizes is present in training and absent at scoring.")
+            got_o = tok[i, 1:2 * n:2]
+            exp_o = row["z_obs"].cpu().to(got_o.dtype)
+            if got_o.shape != exp_o.shape or not torch.allclose(got_o, exp_o, atol=TOL):
+                return False, (
+                    f"on real sequence {i}, collate altered the OBSERVATION tokens. The target "
+                    f"and the forced-choice candidate bank live in that space and the instrument "
+                    f"builds both from the cache, so an observation coding is unreproducible "
+                    f"there by construction.")
+
+    for i, row in enumerate(pristine):
+        if not torch.equal(row["z_cmd"], seqs[i]["z_cmd"]) or \
+                not torch.equal(row["z_obs"], seqs[i]["z_obs"]):
+            return False, ("stream.collate mutated the sequences it was handed. The context is "
+                           "shared by every later readout, so an in-place edit would leak into "
+                           "the health metric and into any candidate measured after this one.")
     return True, ""
 
 

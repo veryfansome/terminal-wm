@@ -15,7 +15,10 @@ thing: which content the chain routes to the test location.
 WHY THIS IS HARD TO FAKE
   A name-keyed non-tracker predicts the exposure at the name index. That is identical under both
   arms (only mv embeddings change), so native_hit_i == swap_stayed_i EXACTLY, per window, and the
-  window contributes exactly zero. The cancellation is structural, not statistical.
+  window contributes exactly zero. The cancellation is structural, not statistical, for as
+  long as the read's own token is the same in both arms — true whenever the genome's
+  stream declares no code_cmds, and worth re-checking for one that does, since the swapped
+  arm is re-coded from the full swapped command list including the read.
   A chain-position non-tracker (first/last/deepest/eliminate) attends to mv tokens. Under the
   routed<->partner exchange it mimics a tracker on routed-marker windows and anti-mimics on the
   symmetric partner windows, so its EXPECTATION is zero — but only over an exchangeable

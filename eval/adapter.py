@@ -119,11 +119,20 @@ def main(argv):
     except Exception as e:
         return fail(results_dir, "genome_invalid", f"{type(e).__name__}: {e}")
 
-    ok, why = SG.stream_scoreable(stream, device)
+    try:
+        ok, why = SG.stream_scoreable(stream, device)
+    except Exception as e:
+        return fail(results_dir, "candidate_raised_in_gate",
+                    f"this genome's stream raised while being checked: {type(e).__name__}: {e}")
     if not ok:
         return fail(results_dir, "stream_layout_unsupported", why)
 
-    ok, why = GR.reachable(genome_path)
+    try:
+        ok, why = GR.reachable(genome_path)
+    except Exception as e:
+        return fail(results_dir, "candidate_raised_in_gate",
+                    f"building or exercising this genome raised before training: "
+                    f"{type(e).__name__}: {e}\n{traceback.format_exc()[-2000:]}")
     if not ok:
         return fail(results_dir, "unreachable_mechanism", why)
 
@@ -141,8 +150,10 @@ def main(argv):
             here = (BC.CONTEXT_SCHEMA, root, eye, split, train_root, frame_root)
             if built != here:
                 raise RuntimeError(
-                    f"context {cpath} was built for {built} but this run is {here} — a context "
-                    f"from another frame would silently score in that frame")
+                    f"PREFLIGHT FAILED: context {cpath} was built for {built} but this run is "
+                    f"{here} — a context from another frame, or from before the swapped chain was "
+                    f"retained, would silently score in that frame. Delete it and rebuild "
+                    f"(cloud/build_context.py refuses to overwrite an existing blob).")
             train_full, ctx, swap_cache = blob["train_full"], blob["ctx"], blob["swap"]
             cdh_ctx = blob.get("cdh")
         else:
@@ -163,9 +174,13 @@ def main(argv):
     except Exception as e:
         raise RuntimeError(f"pack-lane setup failed (environment, not candidate): {e}") from e
 
-    ok, why = SG.stream_matches_context(stream, ctx, device)
+    try:
+        ok, why = SG.stream_matches_context(stream, ctx, device)
+    except Exception as e:
+        return fail(results_dir, "candidate_raised_in_gate",
+                    f"this genome's stream raised on real sequences: {type(e).__name__}: {e}")
     if not ok:
-        return fail(results_dir, "stream_layout_unsupported", why)
+        return fail(results_dir, "stream_coding_mismatch", why)
 
     try:
         fit, _ = M.split_train_dev(train_full, seed=seed)
