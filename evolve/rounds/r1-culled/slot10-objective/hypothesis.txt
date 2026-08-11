@@ -1,0 +1,109 @@
+CANDIDATE
+  objective  hopcarry_partialled_ring_negatives   (new, assigned axis)
+  arch       r23_composition_prefix_content_xattention   (new, the crossover of the two parents)
+  optim/target/batcher/stream/head: inherited unchanged.
+
+
+1. THE MECHANISM — WHAT THE CODE COMPUTES THAT THE PARENTS DO NOT
+
+The objective opts into WANTS_CTX and adds two terms on top of the inherited
+confusability-ring focal listwise contrastive (which is kept verbatim: precision weights,
+ring-reweighted in-batch negatives, focal listwise NLL, mse anchor, repulsion hinge).
+
+(a) HOP-CARRY (_hop_track, weight 1.0). The harness builds ctx["prev"] as the strict-causal
+shift of the target inside each padded sequence, so the first command row of every sequence has
+prev exactly all-zero and every other row has prev == the previous step's observation, bitwise.
+`_segments` therefore recovers the episode segmentation of the flattened batch exactly:
+start = (prev.abs().sum(1) == 0), seq_id = cumsum(start) - 1. My test on a 64-sequence collate
+recovered all 64 episode lengths exactly. With episode ids and row order in hand the term builds,
+for every row i:
+    cand_i = all strictly earlier steps of i's own episode (delta >= 1)      <- the choice set
+    hop_i  = the subset at least TWO steps back        (delta >= 2)          <- the positive set
+    a[i,.] = softmax over hop_i of -(tt[i,.] - min_hop tt[i,.]) / (0.05*mean_off)
+    gate_i = sigmoid( (tt[i, i-1] - min_hop tt[i,.]) / (0.10*mean_off) )
+and minimises gate_i * CE( softmax over cand_i of -dist2[i,.]/(0.125*mean_off) , a[i,.] ).
+In words: over the episode's OWN earlier observations, the prediction must land on the one whose
+CONTENT matches the answer, the positive is only ever an observation from >= 2 hops back, the
+immediately preceding observation stays in the denominator as the competing candidate, and the row
+is weighted by how much better the far match is than that immediately preceding observation. Rows
+where copying the previous state is already right get gate ~ 0 and contribute nothing.
+
+(b) PARTIALLED RECONSTRUCTION (weight 0.5). `_partial_operator` forms Z = [cmd, prev, 1]/sqrt(D)
+from the two causal ctx channels and returns the dual ridge residual-maker
+M = lambda (Z Z^T + lambda I)^-1 with lambda = ridge * mean(diag(Z Z^T)); the identity
+I - Z(Z^T Z + lambda I)^-1 Z^T = lambda (Z Z^T + lambda I)^-1 is what makes this one n x n solve
+instead of a 1536 x 1536 one. M is built under no_grad, so it is a constant linear operator; the
+term is || M pred - M tgt ||^2 divided by a detached scale. That is a reconstruction loss on the
+component of the observation that the command embedding and the previous observation cannot
+LINEARLY explain, i.e. the model is scored on residual content, not on the verb prototype plus the
+carried-over state.
+
+The arch is the literal crossover: R23 inherits from BOTH r22 archs (cooperative MRO
+prefix-xattention.forward -> retrieval-composition-renderer.forward -> r18), so the net gets the
+partner's nonlinear composition renderer over the retrieved-content channels AND the parent's
+cross-attention that copies raw earlier observation embeddings into the command prediction. Both
+readouts are zero-init; I verified the composed net's forward is bit-identical (max abs diff 0.0,
+eval mode) to plain r18 at init, and that stream.leakage_ok passes on it.
+
+
+2. WHY THIS SHOULD MOVE THIS SCORE
+
+The score is a paired difference between the native move-chain and a chain in which two files
+swapped their moves, over the same board. Anything invariant to that swap — the queried name, the
+verb, which file moved first or last, the previous state at the queried location — appears in both
+arms and subtracts to zero. Only "the content that is at this location now is the content I saw
+N hops ago at some other location" survives. Both parents' loss is blind to this: it receives a
+flat matrix of rows with no episode structure and no command input, so its only notion of a
+negative is "some other row somewhere in the batch", and its only notion of a positive is the row's
+own target. It cannot ask a row to choose between two contents drawn from its own trajectory, and
+it cannot know which part of its target was already implied by the command and the previous state.
+Term (a) is exactly that missing question, and it is posed only on rows where the answer is NOT the
+previous observation — the training-side analogue of the deep earnable windows the metric is
+measured on. Term (b) removes the gradient mass that the analytic non-tracker already accounts for,
+so the remaining gradient buys content discrimination instead of prototype fitting.
+
+Directed probe of the mechanism (synthetic episodes where step 5's content equals step 2's / 0's
+and differs from step 4's; mechanism check only, NOT a score estimate): the track term scores a
+copy-the-previous-observation predictor at 7.44, a copy-the-matching-content-from->=2-hops-back
+predictor at 3.00, and the exact target at 0.30. Started from the midpoint of the two candidates,
+its gradient on the query rows has projection +0.00257 toward the >=2-hop matching content and
+-0.00257 toward the 1-hop-back observation. That is the sign the metric pays for.
+
+Cost, measured on CPU: the objective is ~2.4x the parent objective (14 ms vs 7 ms at n=416,
+63 ms vs 25 ms at n=1500) against ~258 ms for one arch forward+backward at bs=64, so ~3-15%
+added step time. The n x n solve is guarded to n <= 4096. I have NOT measured end-to-end training
+time or any fitness number.
+
+
+3. WHAT I EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST OBSERVATION THAT SHOWS IT
+
+The single cheapest check: instrument `_hop_track` for one training run and log
+(i) the fraction of rows with gate_i > 0.5 and (ii) the term's value over steps. If the gate-active
+fraction on real capability-pack batches is below ~2%, the centrepiece never fires and this
+candidate is the parent's objective plus a small conditional-MSE regulariser; expect fitness within
+noise of the parent, and the fix is to widen the positive set (delta >= 2 back to delta >= 1) or
+drop the gate. If the gate-active fraction is healthy but the term plateaus near log|cand_i| while
+next-obs retrieval health is unchanged, the model is satisfying the listwise term and ignoring the
+track term, and the weight is too low. If instead retrieval health COLLAPSES while comp_ca stays
+near zero, term (b) is over-removing: the ridge is stripping content-carrying directions and the
+prediction has drifted off the eval's full-space geometry — visible as mse_cond falling while
+latent_mse to the true observation rises. Second cheapest: assert that segment recovery matches the
+true sequence lengths on one real batch; if a real z_obs row is ever exactly all-zero the
+segmentation silently merges episodes and (a) becomes cross-episode nonsense.
+
+
+4. THE BIGGEST RISK I SEE
+
+Term (a) supervises "point at the earlier observation whose content matches the answer", and in
+real shell trajectories the commonest way for two observations to be near-identical is not a file
+moving but a command being repeated with no state change (two `ls` of the same directory, `pwd`
+twice, repeated failures with the same stderr). If that is what the gate mostly selects, I have
+trained a duplicate-detector over episode history rather than a content-transporter, and the
+duplicate-detector is invariant to the role swap — it cancels, and the term is at best wasted
+capacity and at worst a distractor that costs the listwise term gradient. The delta >= 2 restriction
+and the gate against the immediately-previous observation remove the most degenerate version of
+this (adjacent repeats) but not the general one. A secondary risk: term (a) and the inherited
+dupmask pull in opposite directions on near-identical targets — dupmask zeroes them as negatives
+while (a) makes them positives — and although they act on different index sets (cross-batch vs
+within-episode), a batch that is heavily image-blocked by the inherited batcher puts many
+same-episode-like pairs into the cross-batch set too, so the two can partially fight.

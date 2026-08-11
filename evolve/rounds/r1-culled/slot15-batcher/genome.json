@@ -1,0 +1,17 @@
+{
+  "chunks": {
+    "objective": {"impl": "r12_antiretrieval_ring_negatives", "params": {}},
+    "arch": {"impl": "r20_interventional_gain_shell_worldmodel", "params": {}},
+    "optim": {"impl": "r18_spectral_capped_transition_readout", "params": {}},
+    "target": {"impl": "identity", "params": {}},
+    "stream": {"impl": "baseline_interleave", "params": {}},
+    "batcher": {
+      "impl": "r23_placefield_chainyield_replay",
+      "params": {"hard_frac_max": 0.75, "ramp_frac": 0.3, "n_cliques": 6, "clique_cap": 8, "sys_frac": 0.5, "gamma_chain": 0.25}
+    },
+    "head": {
+      "impl": "r23_multihop_silent_chain_trunk",
+      "params": {"chain_weight": 0.5, "chain_max_hops": 3, "chain_gate_floor": 0.8}
+    }
+  }
+}

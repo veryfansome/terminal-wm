@@ -1,0 +1,116 @@
+CANDIDATE: partialled-out identity residuals (objective) + a calibrated counterfactual gap (head)
+
+AXES CHANGED: objective, head.  Inherited unchanged: arch (r18_pathstate_latent_transition_
+worldmodel), optim (r18_spectral_capped_transition_readout), batcher (r6_sysblock_hardneg_
+curriculum, hard_frac_max 0.75 / n_block_images 1 / ramp_frac 0.3), target (identity), stream
+(baseline_interleave).
+
+WHAT THE CROSSOVER IS.  The two parents share objective, arch, optim and batcher; they differ in
+exactly one place - the head.  My parent carries r22_masked_endpoint_trunk_task, which TRAINS the
+trunk on the frozen instrument's own obs-missing layout.  The partner carries r21_counterfactual_
+history_guidance, which at EVAL time runs the same odd layout twice, once with the prefix present
+and once with everything before the last mutation command padded away, and pushes the read-position
+prediction along (conditional - no_history), capped at 0.2 RMS.  Neither parent trains the arm the
+other one relies on: r21 extrapolates along a direction the trunk was never optimised for, and r22
+never exercises the history-masked arm at all.  My head runs both mechanisms and adds the term that
+joins them.
+
+
+1. MECHANISM - WHAT THE CODE COMPUTES THAT THE PARENTS DO NOT
+
+(a) objective r23_partialled_identity_residual_contrast (WANTS_CTX = True).  From ctx["cmd"] - the
+causal command embedding of each command row - it builds, under no_grad, a leave-one-out
+Nadaraya-Watson estimate of the command-conditional mean target:
+    q = softmax_j( cos(cmd_i, cmd_j) / 0.08 ),  diagonal set to -inf
+    mhat_i = sum_j q_ij tgt_j
+    tightness_i = ( sum_j q_ij cos(cmd_i,cmd_j) )^4  in [0,1]
+    centre_i = tightness_i * mhat_i
+and subtracts the SAME centre_i from both pred_i and tgt_i.  The focal listwise L2-InfoNCE, the
+repulsion hinge and a new residual-direction cosine term all run on those residuals; the per-row
+diagonal is algebraically unchanged (pred_i - centre_i) - (tgt_i - centre_i) = pred_i - tgt_i, so
+what moves is only the geometry of the NEGATIVES and the direction term.  Two further pieces:
+in-batch negatives are boosted not only by the parent's target-target confusability ring but by
+relu(cos(cmd_i,cmd_j))^2 with kappa 6, so the hardest negatives are the observations produced by
+the SAME command in a different history; and rows are reweighted by the conditional variance of the
+target inside their own command neighbourhood (cvar_i = sum_j q_ij ||tgt_j - mhat_i||^2 / D,
+row_w = 1 + 3 * tightness_i * cvar_i / mean_cvar, capped at 6, mean-normalised), so gradient mass
+goes to the rows where the command does NOT determine the answer.  Near-duplicate targets are
+masked out of the softmax with -inf so genuine repeats are not punished as negatives.  A raw-space
+listwise term (weight 0.35) and the MSE anchor (0.05) are retained.
+
+(b) head r23_calibrated_counterfactual_gap.  r22's aux_loss verbatim, r21's eval-time guidance
+wrapper verbatim, plus one new train-time term.  On the same in-batch masked-endpoint layout that
+r22 constructs (prefix through the last gated mutation command c_m, obs_m padded away, the later
+read command spliced onto position 2m+2), it forwards the trunk ONCE MORE with every position
+before 2m additionally padded - exactly r21's counterfactual pad - and regresses that history-
+masked read prediction onto a detached leave-one-out command-kernel estimate of E[z_obs | read
+command] taken from the batch's own command rows, weighted by the same neighbourhood-tightness
+factor.  Ramped over 800 steps, weight 0.25, every second step, at most 48 pairs, deterministic
+top-k selection (no RNG draw of its own).  The conditional arm keeps its r22 supervision toward the
+true later observation z_j.
+
+2. WHY THIS SHOULD MOVE comp_ca
+
+The score is a paired difference: the same board, the same query, the native move chain versus a
+chain in which two files exchanged their moves.  The queried command is IDENTICAL in both arms.
+Therefore E[z_obs | read command] is identical in both arms, and the entire scored quantity lives
+in the residual  z_obs - E[z_obs | read command].  Everything the parents' loss spends on the
+command-predictable component is, by construction, spent on a quantity the metric differences away.
+My objective removes that component from both sides of the contrast, boosts the negatives that
+share the command, and up-weights precisely the rows whose command neighbourhood disagrees about
+the answer - which is the operational definition of "the answer depends on which file got carried
+here".  The parents structurally cannot express this: r12's negative weighting is a function of
+target-target distance only, so it cannot tell "close because the same command always produces this"
+from "close because a different file could be sitting here", and it has no notion of a
+command-conditional mean to subtract.
+
+Two loss-surface properties, measured directly on synthetic rows (this is a property of the loss,
+not a training extrapolation):
+  - Predictor A knows E[t|cmd] exactly and carries zero identity; predictor B has the SAME raw MSE
+    (0.8525 vs 0.8530) but its error is isotropic noise around the true target.  Parent separates
+    them by 2.20; mine by 7.97.
+  - Swapping the targets of two rows that share a command (the metric's own counterfactual) moves
+    the parent's loss by 0.0276 and mine by 0.0884 at a fixed prediction.
+That ~3x sharper sensitivity to exactly the perturbation the metric applies is the whole claim.
+
+For the head: r21's guided read is pred_c + clip(gain*(pred_c - pred_n)).  It improves the pick iff
+(pred_c - pred_n) has positive projection on (z_true - pred_c).  If pred_n is trained to output what
+is knowable WITHOUT the history - the command-conditional mean - while pred_c is trained toward the
+true z_j, then pred_c - pred_n converges to z_j - E[z|cmd], the history-carried content, and the
+extrapolation amplifies the swap-sensitive coordinate rather than an arbitrary difference of two
+arms.  This is the same partialling-out identity as the objective, applied to the instrument's own
+layout, which is why the two axes are one design and not two edits.  Note the head's term regresses
+pred_n onto a finite, well-defined target rather than pushing it away from z_j; there is no
+degenerate "make the no-history arm worse" direction.
+
+3. WHAT I WOULD EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST CHECK
+
+If the mechanism is wrong, the most likely reason is that the command-kernel neighbourhoods inside a
+training batch are not the "same command, different history" sets I am assuming, but sets of merely
+similar commands, so centre_i is a noisy quantity and subtracting it injects variance into the
+negatives instead of removing a nuisance.  The cheapest observation: log, for one training batch,
+the distribution of tightness_i and of the top off-diagonal cosine per row.  If tightness_i is
+below ~0.3 for the large majority of rows, the residual space is nearly the raw space with added
+noise, row_w is nearly uniform, and the objective degenerates to a slightly noisier r12 - the score
+should then sit at or just under the parent's +0.0037 rather than above it.  A second, cheaper
+signal: next-obs retrieval health (top1_sameverb) should be roughly preserved.  If it drops
+markedly, the residual contrastive has decalibrated the raw prediction space that the eval's
+squared-L2 decision variable lives in, and the raw-space listwise weight of 0.35 was too small.
+For the head, the falsifier is that the score is unchanged relative to a plain r22+r21 merge, which
+would say the gap was already well-oriented and training it bought nothing.
+
+4. THE BIGGEST RISK I SEE
+
+Interference between the two arms through shared parameters.  The head asks the SAME trunk to be
+maximally history-sensitive on the full-prefix layout and deliberately history-blind (output the
+command-conditional mean) on the padded layout.  Those two demands differ only in the key-padding
+mask; if the trunk cannot separate them it will regress toward the conditional mean everywhere,
+which is exactly the failure the metric punishes hardest, and the candidate could score BELOW its
+parent rather than above it.  I have bounded this with a small weight (0.25), a 800-step smoothstep
+ramp, a period of 2 and a 48-pair cap, and the term is silent until r22's own mutation gate matures
+(gate floor 0.8) - but the weight is unmeasured on the real harness and I cannot rule out that it is
+still too large.  Secondary risks: the objective's kernel constants (tau 0.08, tightness power 4,
+kappa_cmd 6) are set from the geometry of per-dimension-standardised mean-pooled embeddings and are
+untuned; and cost is up (measured on CPU with synthetic batches of B=64: objective 7.3 ms vs the
+parent's 3.0 ms, and one extra ~60 ms trunk forward every second step against a ~96 ms main forward,
+so roughly +10-15% wall clock - unmeasured on the real harness and its device).

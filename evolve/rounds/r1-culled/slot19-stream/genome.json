@@ -1,0 +1,12 @@
+{
+  "chunks": {
+    "objective": {"impl": "r12_antiretrieval_ring_negatives", "params": {}},
+    "arch": {"impl": "r23_slot_addressed_transport_worldmodel", "params": {}},
+    "optim": {"impl": "r18_spectral_capped_transition_readout", "params": {}},
+    "target": {"impl": "identity", "params": {}},
+    "batcher": {"impl": "r6_sysblock_hardneg_curriculum",
+                "params": {"hard_frac_max": 0.75, "n_block_images": 1, "ramp_frac": 0.3}},
+    "stream": {"impl": "r23_pathslot_interleave", "params": {}},
+    "head": {"impl": "r23_slot_transport_consistency", "params": {}}
+  }
+}

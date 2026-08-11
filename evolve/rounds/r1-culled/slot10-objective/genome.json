@@ -1,0 +1,11 @@
+{
+  "chunks": {
+    "objective": {"impl": "hopcarry_partialled_ring_negatives", "params": {}},
+    "arch": {"impl": "r23_composition_prefix_content_xattention", "params": {}},
+    "optim": {"impl": "r18_spectral_capped_transition_readout", "params": {}},
+    "target": {"impl": "identity", "params": {}},
+    "batcher": {"impl": "r6_sysblock_hardneg_curriculum", "params": {"hard_frac_max": 0.75, "n_block_images": 1, "ramp_frac": 0.3}},
+    "stream": {"impl": "baseline_interleave", "params": {}},
+    "head": {"impl": "r18_transition_forwardmodel_consistency", "params": {}}
+  }
+}

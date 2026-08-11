@@ -1,0 +1,117 @@
+CANDIDATE: crossover of g0-16-retrieval-composition (parent) with the r21 evidence-gated
+imagination-write / algebraic-observer design (partner).
+AXES CHANGED: optim (assigned), arch. head is taken from the partner unchanged; objective and
+batcher are identical in both parents and are inherited unchanged.
+
+1. MECHANISM — what this code computes that neither parent does
+
+ARCH (r23_transition_fed_composition_imagwrite). The class is the C3 join of the parent's
+R22RetrievalCompositionRenderer and the partner's R21EvidenceGatedImagWrite, so it runs r22's
+forward with r21's evidence-gated `_transition_reads`. On top of the join it adds ONE wire: the
+per-path latent-transition read `tr_reads` becomes a fourth D-wide input to the composition
+renderer (comp_in_dim goes 3D -> 4D, comp_ln/comp_in are rebuilt at that width; comp_out stays
+zero-init and RMS-capped, comp_gate is untouched). In both parents `tr_reads` reaches the
+prediction only through the linear zero-init (D,D) `tr_read` map added at the very end; here it
+can also be composed nonlinearly with r_obs, r_view and read_path before target_read is formed.
+
+OPTIM (r23_zeroinit_channel_boost_stiefel_addressing_polyak). Keeps the parents' shared skeleton
+(AdamW + Muon on the sibling-paired (key_d x d) addressing projections + a spectral cap on (D,D)
+readouts + warmup-hold-cosine) and adds three things:
+ (a) ZERO-INIT CHANNEL DETECTION. At make() time — which the harness calls after head.wrap and
+     after net.to(device) — every parameter that is exactly zero is split out of the main AdamW
+     group. Zero MATRICES get weight_decay 0 and lr * zero_lr_mult (2.0); zero VECTORS get
+     weight_decay 0 at the base lr. Nothing about the arch is hard-coded; exact-zero is the
+     detector.
+ (b) STIEFEL PULL. After every optimizer step (post-warmup) each Muon-routed addressing matrix W
+     gets one relaxed Bjorck step, W <- W + (eta/2)(W - (WW^T / s) W) with s = tr(WW^T)/rows,
+     followed by a rescale back to its original Frobenius norm. Singular values above the RMS
+     shrink, those below grow, the total energy is held fixed; the fixed point is a flat singular
+     spectrum. It is sync-free (no .item() in the step path), as are the rewritten spectral cap
+     and Muon guards.
+ (c) TAIL POLYAK. The returned scheduler object also maintains an EMA of all parameters over the
+     last 40% of `steps` (beta set from the window, horizon window/3) and copies it into the live
+     weights once, at the final step. Paired with it, the cosine floor is raised 0.05 -> 0.15, so
+     the tail keeps exploring and the averaging does the final annealing instead of the LR decay.
+
+2. WHY THIS SHOULD MOVE comp_ca (carrying identity across hops)
+
+The metric cancels anything keyed on the queried name or on move order, so the only earning path
+is: the right file's content must be sitting in the transition memory at the query command, and it
+must reach the prediction. This design attacks both, plus the fixed step budget.
+
+ADDRESSING (mechanism b). The delta-rule read for path k is sum_i decay^(k-i) (p_k . p_i) corr_i.
+Cross-path leakage is governed entirely by the Gram matrix of the key set, and every key is
+L2-normalized downstream — `_unit` for path_read/path_write/tr_path, `_quotient` (which ends in
+`_unit`) for file_read/file_write — so the SCALE of these matrices is functionally inert and only
+the direction spread matters. A poorly conditioned d->key_d map squashes distinct command features
+into nearly parallel keys; the resulting leakage enters every hop and compounds, which is exactly
+why it should show up on d3/d4+ windows and not on shallow ones. Semi-orthogonality of a 64x176
+matrix constrains only the 64-dim retained subspace and leaves a 112-dim null space, so the pull
+does NOT prevent the map from quotienting out the verb direction (this is the algebraic reason the
+constraint is cheap here and would not be on a square map). Muon — present in both parents —
+orthogonalizes the UPDATE; nothing in either parent conditions the MAP itself. On an untrained net
+this pull took the six routed matrices from condition number ~3.7 to ~1.17 in ~40 applications with
+Frobenius norm unchanged to three decimals (smoke test, not the real harness).
+
+READOUT / BUDGET (mechanism a). Every channel by which multi-hop content reaches the prediction in
+this family is born at exactly zero: tr_read.weight/bias, comp_out.weight/bias, film_out,
+sysfilm_out, and the partner head's observer .out.weight. Under the parents' single AdamW group
+these grow at trunk LR against weight_decay 5e-4, which is a force pointing back at zero for
+precisely the channels that must switch on. Exact-zero-at-construction is an arch-free detector for
+that set, and freeing them from decay plus doubling their LR should bring them on earlier inside a
+fixed step budget. If the composition channel is still small when the budget ends, the score cannot
+be earned at all.
+
+COMPOSITION (arch wire). The parent renders a nonlinear composition of the retrieval channels but
+its renderer cannot see the transition read; the partner fills the transition memory during
+unobserved hops (imagined write, gated by accumulated observed-write evidence) but can deliver that
+content only through a linear map. Neither parent can express "nonlinear composition of the
+imagined multi-hop content with the retrieved prefix content". That is what the new comp_z channel
+is. It stays causal: `_transition_reads` appends s_pre (the memory content BEFORE step i's write)
+to `reads` and only then folds in obs_i, so tr_reads[:, i] depends on observations strictly before
+i; moving its computation earlier in forward() changes nothing it depends on.
+
+GENERALIZATION (mechanism c). The measurement is on windows held out BY IMAGE, and comp_ca is a
+paired difference of two nearly-equal quantities, so run-to-run jitter in the learned key geometry
+costs directly. Tail averaging with a raised floor is the standard trade of LR annealing for
+iterate averaging; it reduces that jitter without shortening the exploration phase.
+
+3. WHAT I EXPECT IF I AM WRONG, AND THE CHEAPEST OBSERVATION
+
+- Addressing claim false: comp_ca will not improve preferentially at depth. Cheapest check is the
+  per-depth split already in the eval feedback — if d4+ (n=29) does not gain relative to d3 (n=60),
+  the "leakage compounds with depth" story is dead. Second cheapest: the condition numbers of the
+  six routed (64,176) matrices at end of a real run; if they are still > 3 the gradient is simply
+  overwhelming eta=0.08 and the mechanism never engaged, which is a tuning failure, not a
+  refutation.
+- Zero-init boost false: expect next-obs retrieval health and the native pick rate to drop below
+  the parent's while comp_ca is flat — over-eager injection channels overfitting the fit split.
+  The native-pick-vs-chance line reports this directly.
+- Polyak/floor false: the whole run shifts rather than the deep windows, and the last training loss
+  (post-merge) is worse than the step-before-merge loss. That single comparison is the cheapest
+  observation and it also detects the merge silently not firing.
+- Renderer wire false: comp_out grows but under role-swap the pick follows the swapped content
+  LESS than the parent's — i.e. the renderer learned a shortcut on the prefix rather than on the
+  transition content.
+
+4. RISK
+
+Biggest: four changes land at once, and three of them (LR floor, EMA merge, zero-group LR) are
+global, so a loss is unattributable. The sharpest single technical risk is a known false positive
+in the routing rule: `sys_val.weight` is nn.Linear(d=176, sys_d=64) and therefore has the same
+(64,176) shape as the five real addressing projections, so the sibling rule routes it to Muon
+(already true in the parent) and now also to the Stiefel pull — and unlike the addressing maps its
+output is not unit-normalized, it feeds tanh, so for that one tensor the pull is a genuine function
+change rather than pure conditioning. The Frobenius-preserving construction bounds the damage (the
+RMS gain over random inputs is held fixed, only the spread moves), but the constraint is not inert
+there and I cannot separate it from a flat parameter list. Secondary: the raised LR floor is only
+safe BECAUSE the terminal merge fires; the merge is keyed on the scheduler being stepped `steps`
+times, which is what evolve/harness.py::_train does today, but if a caller ever steps fewer times
+the run simply ends at a 3x higher LR than the parent's with no averaging — a pure loss. Third: the
+r21 head's observer adds ~5.5M parameters on top of a ~1.3M-parameter trunk, so the zero-matrix LR
+boost applies to observer.out as well; if the observer is the thing that overfits, the boost makes
+it worse.
+
+UNMEASURED. No number here comes from the real harness or the real metric. The conditioning figures
+and the timing (my optim adds ~1 ms to a ~140 ms CPU step at B=32, L=16; the arch wire adds <1% to
+forward+backward) come from a synthetic smoke run on random tensors and say nothing about comp_ca.

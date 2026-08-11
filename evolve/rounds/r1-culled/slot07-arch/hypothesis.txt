@@ -1,0 +1,122 @@
+CANDIDATE: r23_transport_register_xattention (axes changed: arch, head)
+
+CROSSOVER SUMMARY
+Parent = r22_prefix_content_xattention arch + r18_transition_forwardmodel_consistency head.
+Partner = plain r18 arch + r21_counterfactual_history_guidance head.
+I keep the parent's arch mechanism (the prefix-observation cross-attention copy channel) IN FULL
+by subclassing it, I take the partner's head (r21, which is itself a strict superset of the
+parent's r18 head: it calls BASE.wrap and BASE.aux_loss, so the transition-consistency aux the
+parent's arch was co-designed with is still trained), and I add one new arch mechanism that is
+the thing neither parent has.
+
+1. THE MECHANISM
+The new module maintains a per-sequence occupancy register R of shape [S+1, S]: rows are
+LOCATIONS (one slot per fully-observed prefix pair, plus one null/off-board row), columns are
+CONTENT ITEMS (the raw 768-d observation embedding shown at that prefix pair). R is initialised
+to the identity on live pairs: location j holds item j. At every command position i the module
+computes, from a shared GELU body over [raw command embedding ; causal hidden state], two cosine
+address distributions over slots strictly earlier than i plus the null slot -- a source address
+alpha_i and a destination address omega_i -- and two scalar gates, a move gate g_i and an
+overwrite gate o_i. It then does a pre-write read and a rank-one soft-permutation write:
+
+    c_i = alpha_i^T R                                   (item distribution at the source location)
+    R  <- R * (1 - g_i*alpha_i) * (1 - g_i*o_i*omega_i) + (g_i*omega_i) c_i^T
+    R[null_row, :] <- 0
+
+With hard one-hot alpha=e_s, omega=e_d, g=1, o=1 this is exactly the permutation matrix of
+"move whatever is at s to d, overwriting d"; composing k commands multiplies k such operators.
+The entries stay in [0, clamp] and each item's column mass is non-increasing (moving to the null
+row is the only sink), so the recurrence is bounded without any renormalisation hack. The read
+c_i is decoded to 768-d as sum_k c_i[k] * V_k, where V_k is the RAW observation embedding of
+prefix pair k, and injected into the command-position prediction through a small-identity (D,D)
+readout (0.25*I) under a sigmoid gate with bias -3.
+
+Two implementation choices carry the whole design:
+  (a) the WRITE is gated by valid_cmd only, not by valid_obs. A command whose observation is
+      masked still transports content. Every existing pathway in the r18/r22 lineage -- the
+      delta-rule file memory (beta = 0 when write_active is false), the delta-rule path memory,
+      the latent-transition memory (active = valid_obs & valid_cmd), and the parent's
+      cross-attention keys (valid_obs) -- is switched OFF by exactly the mask the deep eval
+      windows apply to the silent move commands.
+  (b) the READ is masked to slots strictly earlier than the current command. I checked the
+      induction: column i of R can hold mass only at row i before step i (a write at step t<i
+      can only source from rows < t and can only write into rows <= t or the null row), and
+      alpha_i cannot address row i. So a command position provably never reads its own or any
+      later observation. This is what makes the mechanism legal, not just gated.
+
+2. WHY THIS SHOULD MOVE comp_ca
+The eval window is: several pairs fully shown, then a chain of commands whose observations are
+key_pad-masked, then one read command. The score is a paired difference between the native chain
+and a chain in which two files exchanged their moves, over the same board -- so anything that
+depends only on the queried name, on the board, or on which item moved first or last cancels.
+Only the composed assignment can differ.
+
+The parent CAN emit a specific prefix observation (that is exactly its cross-attention over
+prefix-observation values), but it has no writable state: its attention weights are produced in
+one shot from h at the read position, so the entire permutation has to be solved inside a 4-layer
+d=176 causal transformer state and merely read out. The r18 file memory can bind "location X holds
+obs_j" but its only write value is an observation, so it has no operation that MOVES a content
+from one key to another, and its writes are dead on the masked chain anyway. My register adds
+precisely the missing operator: a command writes into a state that a later command reads, and the
+value written is a transported content distribution rather than an observation. The weights that
+finally select the answer are a PRODUCT of per-hop transports, so depth-k composition is
+represented by k rank-one updates instead of having to be inferred in one attention step. Swapping
+the roles of two moves changes two (alpha, omega) pairs and therefore changes the product -- the
+pick changes, which is the only thing this metric pays for.
+
+Credit assignment exists at training time, which is the second reason I expect this to work and
+the reason I did NOT use the r20 imagination-write idea. The register runs identically on ordinary
+even, fully observed training streams: g and o are read off the command, not off the mask. With
+the move gate initialised at sigmoid(-3) ~ 0.05, R stays near the identity early, so the channel
+degenerates to "retrieve the observation of the most lexically-similar earlier command", which is
+a strong, directly-supervised base skill in real shell trajectories (repeated cat/ls of the same
+path). Once that addressing substrate exists, the only gradient that can raise g is the one that
+comes from a LATER read being predicted better -- exactly the multi-hop credit path. The readout
+is initialised to 0.25*I rather than to zero (as the parent's x_out and r18's tr_read are) so that
+alpha, omega and g receive non-zero gradient from step 1; at init the injected term is roughly
+0.3% of the prediction RMS (gate 0.047 x 0.25 x the ~0.3 per-dim std of a diffuse mixture of
+standardized embeddings), so this is a negligible perturbation of the parent's init function but
+removes the dead-gradient bootstrap that a zero readout imposes under a fixed step budget.
+
+The partner's head is not decoration here. r21 runs the trunk twice on the odd masked-endpoint
+window: once natively and once with every position before the LAST masked mutation command
+intervention-masked, then adds a 0.2-RMS-capped (native - no_history) to the read position. In the
+no-history arm my register has no prefix slots at all, so its output is ~0; the difference the head
+amplifies is therefore almost exactly the register's plus the cross-attention's history-dependent
+content term. It is classifier-free guidance pointed at the compositional channel. That is a
+sharper reason to take the partner's head than "the partner had it".
+
+Optimizer routing was checked against the inherited optim: reg_slot_k, reg_qsrc, reg_qdst are all
+(64, 192), three tensors of identical shape, so the sibling rule routes the new addressing
+projections to Muon exactly as it routes r18's file/path/tr keys; reg_out is (768, 768) so the
+spectral cap covers it. No optim change was needed.
+
+3. WHAT I EXPECT IF I AM WRONG, AND THE CHEAPEST CHECK
+The load-bearing assumption is that a learned projection of the frozen mean-pooled command
+embedding can separate the SOURCE path from the DESTINATION path inside a single `mv A B` string.
+If it cannot, alpha and omega collapse onto the same address, (1-g*alpha)(1-g*o*omega) and
+(g*omega)c cancel each other, the register becomes an identity operator, and the whole channel
+reduces to a slower copy of the parent's cross-attention -- comp_ca should then land within noise
+of the parent's +0.0112, NOT below it, since the channel is gated and additive.
+Cheapest observation: on trained weights, dump alpha and omega at the mutation-command positions
+of the deep windows and measure (i) their mean cosine / total-variation distance to each other and
+(ii) the mean of g at mutation commands versus at read commands. If alpha ~ omega, or if g stays
+at its sigmoid(-3) ~ 0.05 initialisation on mutation commands, the transport never turned on and
+the mechanism is inert. A second, even cheaper check: the entropy of the final read weights c_r
+over items -- if it is near log(S) the addressing never became crisp enough to compose.
+
+4. THE RISK I SEE IN MY OWN DESIGN
+The single biggest risk is exactly the one above, and it is a source/destination DISENTANGLEMENT
+risk, not a stability risk. A mean-pooled sentence embedding of `mv /a/f /b/g` is close to
+order-insensitive; if the encoder has thrown away which path came first, no linear or 2-layer head
+can recover the direction of the move, and a symmetric alpha/omega turns a real permutation into a
+symmetric mixing that DESTROYS the identity information the register was supposed to carry
+(content gets smeared across both endpoints at every hop, and smearing compounds multiplicatively
+with depth). That would hurt most on exactly the d4+ windows I am targeting. The gate structure
+bounds the damage -- both the write gate g and the output gate can be learned to zero and the
+channel is purely additive on top of an unchanged r22 -- but it does not guarantee a gain. A
+secondary risk is the sequential n_cmd loop: it adds a second Python-level recurrence next to
+r18's existing _transition_reads loop, so per-step wall clock rises (the tensors are tiny,
+[B, S+1, S] with S <= ~32, and the only new large op is one (768,768) readout, so I expect the
+added cost to be comparable to one tr_read -- but this is UNMEASURED, and if the fixed step budget
+is wall-clock rather than step-count bound it would cut training short.

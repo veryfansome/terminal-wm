@@ -1,0 +1,93 @@
+CANDIDATE: batcher = r23_aliaschain_collision_replay (new), arch = r22_prefix_content_xattention
+(taken from the crossover partner). objective / optim / head / target / stream inherited unchanged.
+
+WHAT THE CROSSOVER IS
+The two parents differ on exactly one axis: arch. The parent carries
+r18_pathstate_latent_transition_worldmodel (per-path delta-rule slots whose written value is a
+learned command-conditioned affine transition of the slot's current content). The partner carries
+r22_prefix_content_xattention, which is a SUBCLASS of that same r18 module: it calls
+super().forward() and then adds one channel — single-head cross-attention from causal command
+hidden states over the strictly-earlier prefix OBSERVATION embeddings, injected through a zero-init
+(D,D) readout. r22 is therefore the literal union of the two parents' arch mechanisms, and it is
+bit-identical to r18 at init, so nothing the parent could express is lost. Both parents already
+share the r6_sysblock_hardneg_curriculum batcher, so the batcher axis has no partner mechanism to
+merge and is where I spend my invention; I keep its system-blocking arm as one of two arms inside
+the new impl rather than discarding it.
+
+1. MECHANISM (what the code computes that neither parent does)
+r23 parses each TRAINING trajectory's command strings once at construction and runs a
+last-mutating-touch recurrence over argument tokens (each argument contributes both its full token
+and its basename, so a rename/move that preserves the basename links the two steps). For step t,
+depth(t) = max over t's argument keys k of reached[k], where reached[k] is the hop count stored the
+last time a MUTATING command (mv/cp/rm/... or a `>` redirect) touched k; a mutating step then writes
+reached[k] = depth(t)+1 for all its keys. From this it derives, per trajectory, carry = sum over
+NON-mutating (read) steps of max(0, depth-1) and max_depth, and sets score = carry + 0.5*max_depth.
+Sampling weight w_i = (1 + clamp(score_i, 0, 8))^2. Second, it builds an inverted index over
+argument tokens and keeps every posting list with 2 <= document frequency <= 0.2*N as a "collision
+group". Each batch is then three parts under a shared ramp (full strength at 30% of training):
+(a) a uniform iid remainder (>= 25% of the batch at full ramp), (b) a depth-prioritized arm drawn
+from w, and (c) up to half the batch as collision blocks — anchor drawn from w, then the block is
+filled WITHOUT replacement from one of the anchor's rare-token posting lists (or, one draw in four,
+from the anchor's image group, which is the parent's sysblock mechanism retained).
+The parents' batcher computes none of this: it groups only by s["image"] and is blind to command
+content, so it can express "same system" but not "same path" and not "this trajectory contains deep
+carry chains".
+
+2. WHY THIS SHOULD MOVE comp_ca
+Two distinct levers, both aimed at carrying identity across hops.
+(i) Row mix. The loss is a mean over cmd-position ROWS in the batch. The scored eval windows are
+d3/d4+ (60 and 29 of 89); shell trajectories are dominated by depth-0/1 steps, so under uniform
+sampling deep rows are a small minority of the gradient and the deep behaviour is undertrained
+relative to what is measured. Weighting trajectories by carry raises the share of deep rows
+directly. On a synthetic trajectory set built for this check the measured deep-row rate went from
+0.017 (uniform) to 0.030 (defaults) while index coverage stayed at 900/900 — the ratio on the real
+capability-pack root is UNMEASURED.
+(ii) Negative geometry. The inherited objective is band-pass: it reweights in-batch negatives by
+target-target distance, giving ~0 weight to near-duplicate targets (false negatives) and up to
+(1+kappa)=5x weight to close-but-DISTINCT targets. Uniform batches rarely produce that band, and
+same-image blocking mostly produces the two useless ends of it — either byte-identical outputs
+(zeroed by the dupmask) or unrelated commands (weight ~1). Two trajectories that touch the SAME
+rare path token are exactly the close-but-distinct case: the same `cat /b/f.cfg`, the same system,
+but different content sitting there because a different chain of moves preceded it. Those rows
+cannot be separated by the queried name, by the verb, or by which file moved first or last — the
+only separating variable is which file's content the path now holds. So the batcher supplies
+precisely the negatives the ring objective was built to upweight and that the metric's role-swap
+construction rewards, and it supplies them against anchors chosen for having deep carry chains.
+That pairing is what r22's prefix-content cross-attention and r18's transition slots need gradient
+on: both read content out of the prefix, and neither gets a discriminative signal unless the batch
+contains a row whose content differs from the anchor's at the same address.
+
+3. WHAT I EXPECT IF I AM WRONG, AND THE CHEAPEST CHECK
+If wrong, the failure will look like one of these, in decreasing order of likelihood:
+- comp_ca stays at ~0 while next-obs retrieval health DROPS versus the parent. That means the
+  reweighting cost generalization (fewer effective trajectories, more duplicated addresses) without
+  buying compositional depth. Cheapest observation: the reported retrieval-health number next to
+  comp_ca; a drop with no comp_ca gain falsifies lever (ii).
+- comp_ca stays at ~0 and retrieval health is unchanged. That means batch composition is not the
+  binding constraint at all and the arch/head are the bottleneck. Cheapest observation: run the same
+  batcher genome against the parent arch (r18) — if both are ~0, the batcher axis is inert here.
+- The d3 bucket improves but d4+ does not, or the native-pick rate rises while the swap-following
+  rate does not. That would say the model learned "deep windows are special" rather than routing
+  content, i.e. it is keying on disturbance, and the paired difference will not move.
+A directly checkable prediction about the code itself: on the real train split the distribution of
+score_i must be non-degenerate. If nearly all trajectories score 0 (my token parser fails to
+recognize the mutating verbs actually present in this data root, or the arguments are not
+whitespace-separated paths), then w is uniform, the deep arm collapses to uniform sampling, and the
+candidate degrades to sysblock-without-the-image-restriction — a small loss, not a crash. Printing
+the score histogram at construction time is the cheapest observation that separates "mechanism ran"
+from "mechanism was a no-op".
+
+4. THE RISK I SEE
+The parser is a heuristic over command surface strings, and it is the single point on which
+everything rests. Two ways it bites. First, over-linking: including basenames as alias keys means
+common names (`config`, `x.txt`, `.`) chain unrelated steps and inflate score for shallow
+trajectories, diluting the deep arm toward noise; the df<=0.2*N filter protects the collision groups
+from this but the depth score has no equivalent filter. Second, sampling concentration: at alpha=2
+with a score cap of 8 the weight ratio inside the deep arm reaches 81:1, so if only a handful of
+trajectories carry deep chains the deep arm effectively trains on a tiny subset, which is exactly
+the wrong thing for a metric held out BY IMAGE. The uniform arm's >=25% floor and the score cap are
+the mitigations, but they are calibrated blind — I have not seen the real score distribution, and
+the whole design is unmeasured on the real data root. A secondary, smaller risk: prioritizing deep
+trajectories correlates with prioritizing long ones, and collate pads to the batch maximum, so the
+per-step cost can rise inside a fixed step budget. On the synthetic check maxn was unchanged, but
+that set had a narrow length range and the real effect is unmeasured.

@@ -1,0 +1,151 @@
+CANDIDATE: r23 imagination-composition renderer + power-law consolidation optimiser
+AXES CHANGED: arch (new), optim (new, my assigned axis). objective / batcher / head inherited
+unchanged. The head is inherited from the PARENT and is already a strict superset of the
+PARTNER's head (r20_masked_window_imagination_consistency contains the r18 transition-forward-
+model aux verbatim and adds the imagination aux), so the head crossover is satisfied by keeping
+the parent's. Both parents already carry the same optim, so the optim crossover is "keep it
+whole and add".
+
+---------------------------------------------------------------------------------------------
+1. THE MECHANISM — what this code computes that neither parent does
+
+ARCH (arch__r23_imagination_composition_renderer.py). One class on the shared r18 path-state
+latent-transition trunk, inheriting from the parent's R20EndpointImaginationWorldModel, doing
+two things at once:
+
+  (a) PARTNER'S MECHANISM, KEPT: the r22 composition renderer verbatim — a zero-init,
+      RMS-capped MLP over [r_obs, r_view, read_path, h_cmd0, r_ctx, s_cmd] added into
+      target_read through a sigmoid gate, so the three retrieved-content channels can interact
+      vector-wise instead of only being scalar-mixed by read_mix.
+
+  (b) PARENT'S MECHANISM, PROMOTED FROM DEAD TO LIVE: in the parent, the imaginer is reachable
+      only inside `if bool(missing_pair.any())`, and the parent's own source states that on
+      training and fitness streams missing_pair is identically False. So on every scored
+      forward the parent's r20 arch is bit-for-bit the r18 arch, and the imaginer is a
+      disconnected sub-network trained by the head aux and never read. `_imagine_stream` makes
+      it a channel that fires at EVERY command position j:
+        m_j  = max{ m < j : cos(cmd_m, cmd_j) > 0.60 and cmd_m valid }        (hard argmax)
+        mask = { pair p : p < m_j and pair p observed }
+        a_m  = MHA(query = qm(cmd_{m_j}), keys/values = k_proj/v_proj([cmd_p ; obs_p]), mask)
+        a_r  = MHA(query = qr(cmd_j),     same keys/values,                     mask)
+        out  = mlp(LN([a_m ; a_r ; tanh(qf([cmd_{m_j} ; cmd_j]))]))  , zeroed where mask is empty
+        pred_cmd_j += sigmoid(imag_gate([h_cmd0_j ; read_feat_j])) * (out * imag_gain)
+      imag_gain is a zero-init (D,) parameter, so the whole channel contributes exactly 0 at
+      init and the model starts as r18+comp-renderer. The m_j rule is the inverse of the rule
+      the inherited head uses to MINE its imagination training pairs (it pairs each k with the
+      nearest LATER same-path j at the same 0.60 cosine threshold), so the eval-time query
+      distribution is the training-time one, read backwards.
+      Also: k_proj/v_proj are computed once per pair and shared across all query positions, so
+      the whole-stream read costs one extra attention, not one per position.
+      The imaginer's internal widths are reduced (dk 192->128, dv 256->192, qf 256->192,
+      hid 512->384) so total parameter count is 5.239M vs the parent's 5.241M — the crossover
+      adds the renderer without growing the model.
+
+OPTIM (optim__r23_powerlaw_consolidation_capped_readout.py). The parent's optimiser is carried
+whole — AdamW(warmup/hold/cosine-to-floor) + Muon on the (key_d x d) addressing projections
+with the sibling rule + power-iteration spectral cap on (D,D) readouts — and one new stage runs
+between the parameter update and the cap. Every parameter carries a Benna-Fusi style cascade of
+m=4 exponential iterate averages
+        u_k <- (1 - a_k) u_k + a_k p ,   a_k = 0.25 * 4^-k   (windows ~4, 16, 64, 256 steps)
+lazily initialised to p at 30% of training. In the last 30% of steps the live weight is pulled
+onto the capacity-weighted mixture
+        ubar = sum_k w_k u_k ,   w_k proportional to 2^k   (w = 1/15, 2/15, 4/15, 8/15)
+        p <- (1 - beta_t) p + beta_t ubar ,  beta_t = 0.04 * smoothstep(tail progress)
+so the deployed weight becomes a POWER-LAW trailing average of its own trajectory (a mixture of
+exponential windows spanning two orders of magnitude) rather than one minibatch-noisy iterate.
+Two structural properties I checked by construction, not by measurement:
+  - the pull is a convex combination of averages of p, so its DC gain in the drift direction is
+    1: under a constant drift it costs a one-off positional lag, not a rate reduction. A
+    straight Benna-Fusi cascade on the WEIGHTS (input into u_1, coupling back from u_2) would
+    NOT have this property: conservation of sum_k C_k u_k forces the steady-state drift rate of
+    the deployed weight down by the total capacity (15x at m=4). That is why the cascade here
+    is over averages with a rare pull, not over the weights themselves.
+  - the pull is confined to the last 30% of steps, where the schedule is already between 0.2
+    and 0.05 of peak LR, so whatever closed-loop drag remains is paid where there is least
+    optimisation progress left to lose.
+Deterministic, no RNG drawn, no global RNG touched, scheduler contract unchanged.
+
+---------------------------------------------------------------------------------------------
+2. WHY THIS SHOULD MOVE comp_ca
+
+The score is a paired difference between the native move chain and a chain in which two files
+swapped their moves, over the SAME board and the same queried location. Anything keyed on the
+queried name, or on move order, is identical in both arms and cancels. Only a quantity that
+changes when the two files' CONTENTS are routed differently can score.
+
+The imaginer is, of the mechanisms in either parent, the only module trained explicitly on the
+map (contents of the prefix before the mutation, the mutating command, the reading command) ->
+the content actually observed at the read. The head supervises it with an eval-geometry
+L2-InfoNCE against obs_j on mined (k -> next same-path j) pairs. That is precisely
+"carry a file's identity from where it was shown, through the mutation, to the read", learned
+as one function instead of as a chain of delta-rule writes. Under the role swap, the prefix
+pair contents entering `mask` are unchanged but the mutating command c_m differs, so a_m, the
+qf term, and hence `out` differ — the channel's contribution is a function of BOTH the routing
+and the contents, so it does not cancel. The parent structurally cannot express any of this at
+eval time (the branch is unreachable on both-valid even-length streams); the partner has no
+imaginer at all. This is the one thing the crossover can say that neither parent can.
+
+The delta-rule + latent-transition machinery reaches a read at hop depth n by composing n
+writes; the imaginer reaches it in ONE cross-attention hop conditioned on the endpoint pair.
+Those two routes fail differently, and read_mix / imag_gate let the model weight them per
+position. On the reported window mix (d3 n=60, d4+ n=29, d2 n=0) the composed route is exactly
+where error accumulates, which is where an independent single-hop route should pay.
+
+The composition renderer contributes the partner's half: the three retrieved-content channels
+currently combine only through a scalar softmax over 3 weights, which cannot express "take the
+identity from channel A but the location context from channel B". A gated MLP over the
+concatenation can, and it is zero-init so it costs nothing if it is not used.
+
+The optimiser change is the smaller lever and I say so. Its argument is that composition error
+is multiplicative in depth: if the deployed transition/readout parameters sit at theta* + delta
+with delta the residual minibatch noise, the error at a read behind n hops grows with n (and
+faster if the recurrence gain exceeds 1), so iterate noise costs deep windows more than shallow
+ones — and comp_ca is measured only on deep windows. Trailing-averaging the tail of the
+trajectory shrinks delta with essentially no optimisation cost. In a synthetic noisy
+least-squares probe (NOT the real harness, and explicitly not extrapolated to it) the
+consolidation reduced final parameter MSE by 25-40% across pull in [0.03, 0.08] and tail in
+[0.15, 0.40], and never increased it; the defaults sit in the middle of that plateau.
+
+---------------------------------------------------------------------------------------------
+3. WHAT I EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST OBSERVATION
+
+Cheapest observation, three numbers taken from one trained net, no extra training:
+  (i)   ||imag_gain||_inf and the mean of sigmoid(imag_gate(.)) at scored command positions.
+        If the gain is below ~1e-3 the imagination channel learned to switch itself off, the
+        arch change is a no-op, and comp_ca should be at parent level (+0.011) with the run
+        merely ~20% slower. That is the single clearest falsification.
+  (ii)  the fraction of scored command positions where `live` is True (an m_j above the 0.60
+        cosine threshold exists AND at least one observed pair precedes it). If that fraction
+        is near zero on the deep windows, the m-selection rule is mismatched to real shell
+        commands ("cat B" not within cosine 0.60 of "mv A B"), the channel emits zero exactly
+        where the score is measured, and again nothing moves. I would then expect a lower
+        threshold, or selection on the arch's own tr_path key geometry rather than raw command
+        cosine, to be the fix — not abandoning the channel.
+  (iii) final training loss versus the parent's at the same step count. If consolidation is the
+        problem, that loss is visibly higher and the whole candidate underperforms uniformly
+        (shallow and deep alike) rather than only on deep windows.
+If comp_ca lands between +0.011 and the 0.0527 bar with a healthy gain and a healthy `live`
+fraction, the mechanism works but is under-trained: the imagination aux ramps over 400 steps
+and only ever sees mined pairs, so the channel would want a larger imag_weight, not a redesign.
+
+---------------------------------------------------------------------------------------------
+4. THE RISK I SEE IN MY OWN DESIGN
+
+The biggest one is train/eval distribution mismatch for the promoted imaginer, compounded by a
+shortcut. The imaginer is trained by the head only on pairs the head mines, weighted by
+sim_kj * (0.15 + mutation gate); at eval it is queried at every command position through a hard
+argmax that I chose to invert the mining rule but which is not the same selection (nearest
+earlier same-path from j is only the same as nearest later same-path from k when no third
+same-path command sits between them). Where they disagree, the channel is queried off its
+training distribution and can inject confident nonsense into pred_cmd. Worse, once imag_gain
+leaves zero the MAIN loss back-propagates into the imaginer for the first time, and the
+imaginer has a name-only escape hatch: the tanh(qf([c_m ; c_r])) branch needs no prefix content
+at all. The main loss could ride that branch, which is exactly a queried-name feature and
+cancels to zero in comp_ca, while degrading the aux's clean composition solution. I mitigated
+the most obvious form of this by zeroing the entire channel when the prefix mask is empty (so
+the name-only path can never be the sole signal), and by the zero-init gain that hands control
+over gradually — but I did not prove the shortcut cannot be learned, and I could not measure
+any of this without the real harness.
+
+Second risk, smaller: this is a two-axis change, so a null result does not tell the search
+whether the renderer, the promoted imaginer, or the consolidation was at fault.

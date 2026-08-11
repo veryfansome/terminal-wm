@@ -197,18 +197,19 @@ def main(argv):
                     f"collapsed or constant, so the differential is not measuring tracking")
 
     pd = ca["per_depth"]
+    # Numbers only, and terse: the engine joins one of these per seed into a single
+    # text_feedback that a brief truncates at 600 characters, so three verbose copies lose the
+    # tail mid-word. The structural caveat about what does and does not cancel is prose that is
+    # identical every run, so it lives once in jail_notes instead of three times here. No arm is
+    # named: a redacted brief keeps the NAME and drops the number, which hands an inventor a
+    # pointer to a shortcut with nothing attached to it.
     feedback = (
-        f"comp_ca {ca['comp_ca']:+.4f} over n={ca['n']} deep earnable windows "
-        f"(for reference, the strongest analytic non-tracker on the same windows, "
-        f"{ca['best_analytic_arm']}, sits at "
-        f"{ca['analytic_band'][ca['best_analytic_arm']]:+.4f}) "
-        f"(d2 n={pd['d2']['n']}, d3 n={pd['d3']['n']}, d4+ n={pd['d4plus']['n']}); "
-        f"native picks {ca['native_wm']:.3f} vs chance {g['chance']:.3f}; "
-        f"under role-swap the same pick is held {ca['swap_stayed']:.3f} and follows the swapped "
-        f"content {ca['swap_follow']:.3f}. Next-obs retrieval health "
-        f"{health['top1_sameverb']:.3f}."
-        + (f" Command-history routing on the other capability pack, reported not scored: "
-           f"{cdh['nav']['nav_differential_unmasked_matched']:+.3f}." if cdh else ""))
+        f"comp_ca {ca['comp_ca']:+.4f} n={ca['n']} (d3 {pd['d3']['n']}, d4+ {pd['d4plus']['n']}); "
+        f"native {ca['native_wm']:.3f} vs chance {g['chance']:.3f}; "
+        f"swapped: held {ca['swap_stayed']:.3f}, follows {ca['swap_follow']:.3f}; "
+        f"health {health['top1_sameverb']:.3f}"
+        + (f"; cd-pack {cdh['nav']['nav_differential_unmasked_matched']:+.3f} (not scored)"
+           if cdh else "") + ".")
 
     write(results_dir, {
         "combined_score": ca["comp_ca"],
@@ -232,6 +233,7 @@ def main(argv):
         # let the last seed silently overwrite the others.
         "private": {f"seed{seed}": {
             "guards": g,
+            "shortcut_leaning": ca["shortcut_leaning"],
             "slice": ca["slice"],
             "comp_ca_alt_only": ca["comp_ca_alt_only"],
             "role_swap_seed": ca["role_swap_seed"],

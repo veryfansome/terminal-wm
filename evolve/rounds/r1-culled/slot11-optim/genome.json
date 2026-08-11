@@ -1,0 +1,9 @@
+{
+  "chunks": {
+    "objective": {"impl": "r12_antiretrieval_ring_negatives", "params": {}},
+    "arch": {"impl": "r23_imagination_composition_renderer", "params": {}},
+    "optim": {"impl": "r23_powerlaw_consolidation_capped_readout", "params": {}},
+    "batcher": {"impl": "r6_sysblock_hardneg_curriculum", "params": {"hard_frac_max": 0.75, "n_block_images": 1, "ramp_frac": 0.3}},
+    "head": {"impl": "r20_masked_window_imagination_consistency", "params": {}}
+  }
+}

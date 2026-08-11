@@ -1,0 +1,143 @@
+CANDIDATE  r23  "slot transport"
+axes changed: stream (assigned), arch, head.  objective / optim / batcher / target inherited
+unchanged from the genome both parents share.
+
+------------------------------------------------------------------------------------------
+1. THE MECHANISM  (what the code computes that neither parent can)
+------------------------------------------------------------------------------------------
+(a) stream r23_role_slot_transport_channels.  collate() parses the RAW command string of each
+step (which it already receives in s["cmds"]) into two roles: the location the command reads
+from / moves from (SRC) and the location the content ends up at (DST; for a read command DST
+is set equal to SRC, for `rm` it is null, for `mv A DIR/` it is normpath(join(DIR, base(A)))).
+Each path string is mapped by a blake2b-seeded generator to a fixed +-1 Rademacher vector of
+48 dims -- a pure content-free identity code, the same vector every time the same string
+appears anywhere.  The cmd token's LAST 112 dims are overwritten with
+[SRC code 48 | DST code 48 | 8 role flags duplicated to 16].  Observation tokens, tgt,
+cmd_mask, types and the interleave2 geometry are untouched, so CUPS_LAYOUT is unchanged and
+the target/eval space is bit-identical to the baseline.  collate also emits four causal,
+prefix-only annotations per step -- slot_id, step_kind, chain_src, chain_depth -- from a
+simulation of the move chain that reads only commands 0..t.
+
+(b) arch r23_slot_transport_worldmodel.  r20's trunk verbatim except that the in-place
+latent-transition memory becomes a SLOT-TRANSPORT memory.  Slot keys are
+    a_t = unit(R . src_code_t + W_a x_t)      b_t = unit(R . dst_code_t + W_b x_t)
+with R a FIXED (non-parameter) random 64x48 buffer SHARED by the source and destination map,
+and W small-initialised.  Because R is shared and the code is a function of the string alone,
+b of `mv A B` and a of `mv B C` are the same key by construction.  Per step the memory is
+    s_pre = a_t^T M                       (read at the source slot, before any write)
+    v     = g_mv * f(s_pre, x_t) + (1-g_mv) * obs_t
+    M     <- lam M + b_t (v - b_t^T M) * valid_cmd_t      (delta-rule write at the DESTINATION)
+    M     <- M - a_t (lam s_pre) * g_mv * g_erase * valid_cmd_t     (gated erase at the source)
+and the prediction consumes s_pre.  The write activates on a valid COMMAND, not on a valid
+observation, so transport still happens when the mutation's obs is masked.  f is r18's
+command-conditioned FiLM transition, and the (D,D) readout is identity-initialised instead of
+zero-initialised.  The r20 imaginer is kept verbatim but contributes as a gated ADDITIVE
+correction rather than replacing the trunk prediction in the obs-missing layout.
+
+(c) head r23_chain_endpoint_board_task.  r18's forward-model consistency term + r22's in-layout
+masked-endpoint trunk task + r20's direct imaginer supervision, with two changes: the endpoint
+task's (mutation m, read j) pairs are taken from the stream's ground-truth chain annotations
+(j a read whose content arrived through >= 1 move, m the last move before it, weighted by
+depth) unioned with r22's gate-mined pairs; and its contrastive candidate set is augmented
+with SAME-SEQUENCE, OTHER-SLOT contents, so the discrimination is between the files on one
+board instead of across the batch.
+
+------------------------------------------------------------------------------------------
+2. WHY THIS SHOULD MOVE comp_ca
+------------------------------------------------------------------------------------------
+Read r18's `_transition_reads` and r20's copy of it: the read key and the write key are the
+SAME vector p_i = unit(tr_path(x_cmd_i)).  Every write lands in the slot it was read from.
+The same holds for the file/path delta-rule memories: the value written is always obs_tok.
+Consequence, stated flatly: NEITHER PARENT HAS ANY OPERATION THAT MOVES CONTENT FROM ONE SLOT
+TO ANOTHER.  They can record "the thing at this path changed" and they can imagine an endpoint
+with one cross-attention hop over the prefix, but they cannot represent `mv A B` as
+"whatever was at A is now at B".  The scored windows are exactly d3 (n=60) and d4+ (n=29) --
+there are no d2 windows at all -- so a single hop is not enough and a same-slot edit is not
+the right operator.  That is the structural gap I close.
+
+Two things had to change together and neither is useful alone.  Transport needs an addressing
+scheme in which the destination of one command and the source of the next are literally the
+same key; a learned linear projection of a mean-pooled sentence embedding of "mv A B" cannot
+supply that, because pooling superposes the two operands.  Conversely, separable keys buy
+nothing if the write always goes back to the slot it was read from.  The stream supplies the
+keys, the arch supplies the operator.
+
+I verified the composition by construction, not by extrapolation.  On a 9-step board with a
+depth-3 chain (cat A; cat B; cat C; mv A->X; mv B->Y; mv X->Z; mv Z->W; uname; cat W), using
+the actual _slot_keys of a freshly initialised net and only forcing the move gate to 1 on
+moves, the memory read at the final `cat W` has cosine 0.79 to z_obs of the step where the
+file was shown and is the nearest of all nine observations by squared L2 (next nearest 1.27 vs
+0.44).  Read-key/write-key agreement across a hop is cos 0.98 and cross-slot agreement is
+cos 0.06.  This is the whole claim: content identity survives three hops, from a mechanism
+whose addressing is correct at initialisation and whose only learning burden is the two gates.
+
+Why it should not be a shortcut that cancels under the role swap: the codes carry no semantics
+(a Rademacher hash of a string), so nothing about the queried NAME can be exploited -- the
+answer is whatever content the chain deposited there, and the swapped chain deposits a
+different file at the same queried name with the same first and last movers.  And because the
+code is a hash, nothing image-specific can be memorised, which is what the held-out-by-image
+split demands.
+
+The head change targets the same quantity from the loss side: the endpoint task now fires on
+real move chains from step one instead of waiting for a gate to cross 0.8, and its negatives
+are the other files on the same board, which is the cups decision exactly.
+
+------------------------------------------------------------------------------------------
+3. WHAT I EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST CHECK
+------------------------------------------------------------------------------------------
+The single cheapest observation that would falsify me: the eval feedback's "under role-swap
+the same pick is held / follows the swapped content" pair.  If comp_ca stays at the parent's
+level AND the swapped-chain pick still tracks the native pick, then either the mechanism never
+turned on or the codes never reached the scored forward.  Two concrete failure modes, each
+with its own signature:
+
+ (i) THE CODES ARE NOT PRESENT AT SCORING TIME.  The strongest risk (see 4).  Signature:
+     next-obs retrieval health roughly normal, comp_ca at the parent's floor, and the parent
+     genome's numbers essentially reproduced.  Cheapest check: score a genome that keeps my
+     arch and head but uses baseline_interleave.  If that scores the same as my full
+     candidate, the cups instrument is not routing through stream.collate.
+ (ii) THE MOVE GATE NEVER SATURATES, so v = obs_t and the memory degenerates into r18's
+     "last observation at this path" store.  Signature: comp_ca near the h_first analytic
+     non-tracker, d4+ no better than d3.  Cheapest check: print
+     sigmoid(tr_mut_gate(x_cmd)) on mv commands vs read commands at the end of training; if
+     the two distributions overlap, the gate never learned the role flag that is sitting in
+     the token in plain sight, and the transport branch is dead weight.
+
+If instead the mechanism works, the diagnostic I would expect is that the d4+ bucket improves
+at least as much as d3 -- a per-hop-constant-cost mechanism should not degrade with depth the
+way an attention-hop-limited one does.
+
+------------------------------------------------------------------------------------------
+4. THE RISK I ACTUALLY SEE
+------------------------------------------------------------------------------------------
+The biggest one, and I want it on the record: I DO NOT KNOW whether the cups scoring
+instrument builds its token tensor by calling stream.collate or by interleaving z_cmd/z_obs
+itself.  CUPS_LAYOUT exists precisely so the instrument can refuse a layout it cannot build,
+which is weak evidence that it builds the tensor itself -- in which case my codes are present
+during training and ABSENT during scoring, and the model is measured out of distribution.
+I hedged rather than guessed: collate withholds the codes on 30% of rows, chosen by a private
+generator and applied ONLY when gradients are live (every eval and probe path in this
+repository runs under no_grad, so scoring always gets full codes if it goes through collate).
+The arch degrades gracefully because the code slice is read through learned linear maps that
+still receive z_cmd values when the codes are absent, and I confirmed by running that my arch
+trains and passes leakage_ok under baseline_interleave and that the parent's arch/head train
+under my stream.  So the downside is bounded near the parent rather than catastrophic -- but
+if the instrument does build its own tokens, 70% of my training signal is spent on a channel
+that is not there at test time, and this candidate will land at or slightly below its parent.
+
+Secondary risks, honestly: (1) the parser is heuristic -- real capability-pack commands may be
+pipelines, redirections or relative paths whose slot identity my normpath-only resolution gets
+wrong, in which case the codes become noise rather than signal on those steps (the flags let
+the gates down-weight them, but nothing forces that); (2) overwriting 112 of 768 embedding
+dims removes ~15% of the frozen sentence embedding from the command token, which could cost
+verb/semantic accuracy on the ordinary next-obs prediction that the primary objective
+optimises; (3) the identity-initialised (D,D) readout injects 0.25 * s_pre into the prediction
+from step one, which is a stronger prior than r18's zero-init and could hurt early if the
+gates mis-route -- I measured 150 steps of stable finite training with the readout's spectral
+norm settling at 1.07, well under the optim's 4.0 cap, but 150 steps is not 4000 and I am not
+extrapolating from it.
+
+PERFORMANCE NUMBERS: none of comp_ca is measured. The only measurements I report are the
+initialisation-time transport probe above, and wall time -- 0.67 s/step for this candidate
+against 0.64 s/step for the parent with its endpoint gate forced live, on CPU with bs=64, so
+the fixed step budget is not at risk.

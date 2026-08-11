@@ -1,0 +1,94 @@
+CANDIDATE: stream = r23_pathchain_occlusion_curriculum
+CROSSOVER: parent arch (r22_prefix_content_xattention, a prefix-observation content read inside
+the trunk) x partner mechanism (r22_observation_occlusion_denoising, training under stochastic
+observation removal), with the partner's mechanism MOVED off the arch axis onto the stream axis
+and upgraded from uniform to structure-targeted. The two parents differ only in their arch slot
+and cannot be combined there; relocating occlusion into the token layout is what lets both
+mechanisms run in one genome. All other axes are inherited from the parent unchanged.
+
+1. MECHANISM
+On every TRAINING collate (and only there: eval/probe collation is gated off by
+torch.is_grad_enabled()), each trajectory in the batch is partitioned into reference classes over
+its own command strings — one class per exact normalised command, and one class per filesystem
+path an argument names, where a token containing "/" contributes both itself and its parent
+directory as class keys (so "mv /a/f.txt /b/", "cat /a/f.txt", "ls /a" and "ls /b" all land in
+the classes of the directories they touch). For every class with at least three members the
+MIDDLE members are marked; the FIRST member of every class of size >= 2 is protected and removed
+from the marked set. Marked observations are dropped at a ramped rate (0 -> 0.55 over steps
+300..1200, smoothstep), all remaining observations at a ramped background rate (0 -> 0.08, the
+partner's uniform regime kept as a floor), capped at 40% of the observations in a row and
+resolved deterministically from the run's own RNG stream. A drop is expressed purely as
+key_pad = True on that observation token; tok/types/tgt/cmd_mask and the interleave2 layout are
+byte-for-byte the baseline's, so CUPS_LAYOUT is honestly "interleave2".
+
+Two properties I verified by reading and by direct execution rather than asserting:
+ - For the genome's arch (the r18 path-state trunk and its r22 cross-attention child) a key_pad'd
+   observation is fully invisible: with randomised (non-zero) parameters, replacing the content of
+   a key_pad'd observation token with a random vector changes the command-position predictions by
+   exactly 0.0, while flipping the same position from live to padded changes them by ~1.6. The
+   trunk excludes padded keys, h_base is multiplied by valid, the delta-rule write amount beta is
+   masked by active_pair, prev_obs is masked by valid_obs, and the cross-attention "allowed" mask
+   is intersected with valid_obs.
+ - Because the drop is key_pad-only and the raw token values are left intact, the co-designed head
+   (r18_transition_forwardmodel_consistency), which mines (pre, cmd, future) triples straight out
+   of batch["tok"] using cmd_mask rather than key_pad, keeps supervising the shared transition
+   operator on UNCORRUPTED observation content. The trunk is blinded; the auxiliary that teaches
+   the transition operator is not. That asymmetry is the point, and it is why I do not zero the
+   token as the partner arch did.
+
+2. WHY THIS SHOULD MOVE comp_ca
+The score is a paired difference between the native move chain and a chain in which two files
+exchange their moves, so everything that does not depend on WHICH content is bound to the queried
+location cancels. The two shortcuts that survive ordinary next-observation training are (a) copy
+the previous observation and (b) copy the most recent observation of a visually similar command.
+Under this curriculum both are removed exactly where they would otherwise be sufficient: the most
+recent same-path observation is the marked middle, and the earliest one is protected, so the
+evidence the model needs for a re-read still exists in the prefix but only several hops further
+back, with all the intervening commands (including the mutating ones) standing between it and the
+query. That manufactures cups-shaped windows — content shown at a location, mutations, then a
+re-read of that location — out of ordinary shell trajectories, and it makes the deep-window regime
+in-distribution instead of an extrapolation. The parent arch is the one that can express the
+answer: its cross-attention values are the raw prefix observation embeddings, addressed by the
+causal hidden states, and blinding the nearest key forces that addressing to select a strictly
+earlier content-bearing observation instead of the adjacent one. Structurally, neither parent can
+express this: the partner's occlusion is i.i.d. per observation and is as likely to delete the
+only copy of a piece of content as to lengthen a chain (it earns robustness, not depth, and it also
+corrupts the tokens the head mines), while the parent trains entirely on unblinded prefixes where
+the nearest observation is always a valid, cheaper answer.
+
+3. WHAT I EXPECT IF I AM WRONG, AND THE CHEAPEST CHECK
+If I am wrong, the most likely shape of the failure is that the marked set is nearly empty on this
+data root — real capability-pack trajectories may simply not revisit a path three times inside a
+window — in which case the candidate degenerates to the partner's uniform occlusion at rate 0.08
+and lands at or just below the parent, not above it. The cheapest observation that shows this is
+purely offline and needs no training: load the fit split's sequences, call
+_middle_candidates(s["cmds"]) on each, and report the fraction of observations that are marked and
+the distribution of class sizes. Under 2% marked means the mechanism never fired and the number is
+uninformative about the idea. The second failure shape is that blinding hurts rather than helps:
+next-obs retrieval health (top1_sameverb from flatten_predictions, which runs on the clean stream)
+would drop clearly below the parent's while comp_ca does not rise — that is the "too much evidence
+removed" signature and it argues for a lower _TARGET_P, not against the targeting.
+
+4. THE RISK I SEE
+The biggest risk is that the protection rule is not strong enough to keep the task solvable. A
+class's first member is protected, but an intervening command can have destroyed the content that
+first observation showed, in which case the surviving anchor is not evidence for the query, it is
+stale evidence, and I am training the model to answer from a state that has since changed — which
+is the wrong inductive bias for a metric that rewards applying the moves rather than ignoring them.
+The 40% cap, the ramp and the retained background rate bound the damage, and the target
+supervision itself is always the true post-mutation observation, so the gradient still points at
+"apply the intervening commands"; but the possibility that blinding teaches confident staleness
+instead of transport is the failure mode I would look for first if the number comes in below the
+parent while retrieval health is intact. Two smaller risks: the path-key extractor is a syntactic
+heuristic and will build spurious classes from repeated non-path arguments (harmless in the limit,
+since a spurious class only degrades the targeted rate toward the uniform rate), and the ramp
+counter is keyed on torch.initial_seed() so that separate seeds trained in one process each get
+their own schedule — correct for the harness's per-seed torch.manual_seed(seed), but it would
+mis-ramp if some future caller trained two nets under one seed without reseeding.
+
+UNMEASURED: no fitness number here is measured. I could not run the real harness from the jail.
+What I did run: a CPU smoke test of collate + the parent arch + the r12 objective + the r18 head
+(finite loss, finite grads, head layout check still passes under occlusion, leakage_ok True on both
+the clean and the occluded path, clean collate confirmed under no_grad), and the key_pad-invisibility
+test described above. Collate overhead measured at ~0.5 ms/step over the baseline collate at B=64
+on CPU, with per-sequence class structure cached, so the fixed step budget is not at risk.

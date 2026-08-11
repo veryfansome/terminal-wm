@@ -1,0 +1,134 @@
+CANDIDATE: r22_slot_permutation_transport_tracker (axis: head)
+CROSSOVER: parent g0-00-baseline (all-baseline, head = baseline_passthrough)
+           x partner (r12 objective / r18 pathstate arch / r18 spectral optim /
+             r6 sysblock batcher / r18 transition-forwardmodel head)
+AXES CHANGED vs my parent: objective, arch, optim, batcher, head  (target, stream unchanged)
+AXES CHANGED vs the partner: head only.
+
+WHAT I KEPT FROM EACH PARENT
+  From the partner: its whole co-designed stack (r18 latent-transition arch, spectral-capped
+  readout optim, ring-negative contrastive objective, image-blocked hard-negative batcher) and
+  its head mechanism verbatim -- BASE.aux_loss (the transition forward-model consistency on
+  net.transition_from_emb) is called first in my aux_loss and its term is always added.
+  From the baseline parent: the passthrough principle. The arch's own prediction path is never
+  recomputed or replaced; my head only ADDS a gated residual at command positions, and the
+  D-by-D part of that residual is zero-initialised, so at step 0 the model is the partner's
+  model plus a scalar-gain 0.05 nudge.
+
+1. THE MECHANISM (what the code computes that neither parent does)
+
+A private recurrent LOCATION-SLOT memory with MOVE SEMANTICS, run over the interleaved stream
+inside the wrapped forward (_run_slots). State is a mass matrix A [B, slots, content-atoms]:
+slot j = "the location that command j addresses", content atom c = "the content that was
+displayed at step c". A starts at zero. At command t, from the raw command embedding only, the
+module forms three unit-normalised addresses -- a READ query, a SOURCE query, and its own SLOT
+key -- and computes over the slots j < t (softmax, each with a learnable null logit so it can
+abstain):
+
+    w_read  = softmax( s0 * <q_read_t , k_j>  + a0 * log(occ_j + eps) )
+    w_src   = softmax( s1 * <q_src_t  , k_j>  + a1 * log(occ_j + eps) )
+    w_clear = softmax( s2 * <k_t      , k_j> )                with occ_j = sum_c A[j,c]
+
+    content_t = w_read^T A                       (prediction: a distribution over content atoms)
+    moved_t   = w_src^T  A                       (what is currently sitting at the source)
+    A        <- A * (1 - move_t * w_clear)       (this command vacates every location it names)
+    A[t]      = move_t * moved_t                 (transport: the source's content arrives here)
+    A[t]     <- (1 - write_t) A[t] + write_t e_t (an informative observation installs a new atom)
+
+move_t = sigmoid(move_gate(cmd_t)); write_t = sigmoid(obs_write_gate(cmd_t, obs_t)) * obs_valid_t.
+The prediction at command t is mix_t = content_t @ Obs, injected as
+pred[:,0::2] += sigmoid(inject(cmd_feat, h_cmd, [read mass, content mass, top atom]))
+               * (gain * mix + V(mix)), V zero-init.
+Reads at t use only A built from steps < t and the write at t happens after the read, so a
+command position never sees its own or a later observation.
+
+Two supports keep the transport path load-bearing: (a) train-time OBSERVATION DROPOUT (p=0.2)
+on the tracker's obs-validity mask inside forward -- it perturbs only my residual, never the
+trunk; (b) a MASKED-CHAIN aux (_mine_chains + _chain_loss) that follows, per row, the
+nearest-later-same-path-command chain up to 5 hops from an anchor with a visible observation,
+HIDES the observations of every intermediate hop, and asks the tracker's mixture at the chain
+endpoint to retrieve the true observation there against the other observations of the SAME
+window (dup-masked cross-entropy in the eval's squared-L2 geometry + a small MSE anchor,
+weighted by chain depth). That is a synthetic reconstruction of the scored window geometry
+built out of real training trajectories, and it is what the eval's masked hops look like.
+
+2. WHY THIS SHOULD MOVE THIS SCORE
+
+The score is a paired difference between the native chain and a chain in which two files
+exchanged their moves, over the same board. Everything that is common to the two arms cancels:
+the queried name, the board, which file moved first or last. The only surviving signal is
+WHICH content the chain routes to the queried location.
+
+My predicted content is literally sum_c content_w[c] * Obs[c], and content_w is produced by
+command-derived addressing and by state occupancy -- it reads the observation embeddings only
+through the scalar informativeness gate write_t. So the identity of a file is carried in the
+CONTENT AXIS of A, while the chain is applied as a product of soft permutation-like updates on
+the SLOT AXIS. Exchanging two files' moves changes the source queries of those two moves,
+therefore changes which column of A lands in the queried slot, therefore changes the picked
+content. That is the whole mechanism, and it is what the paired difference pays for.
+
+What the parents structurally cannot express:
+  - baseline_passthrough: nothing at all; it is the arch's Linear readout.
+  - The r18 arch (both parents' best content machinery) writes into its associative memory at
+    the SAME key it read from: value = (1-w) obs_i + w f(s_pre_i, cmd_i) at key tr_path(cmd_i).
+    It is a per-location content EDIT operator. A move needs v[dst] <- v[src] with src != dst;
+    that is not in the arch's algebra at any parameter setting.
+  - The r18 head aux supervises exactly that same-key edit operator, so it cannot teach
+    transport either.
+  - The observer heads in my brief (r20/r21) correct one masked endpoint at a time from the raw
+    prefix pairs and the two commands; they carry NO state between hops, so hop 3 cannot consume
+    hop 2's result. Mine is a single recurrence applied H times, so depth composes.
+  - The occupancy log-bias is a piece of mv physics that no parent has: a file moves FROM a
+    location that holds something TO one that (usually) does not, and the vacate step means the
+    stale slot for an overwritten destination carries ~0 mass, which is how the read resolves
+    to the most recent write without any recency feature.
+
+Anti-collapse: a constant prediction is punished by the in-window cross-entropy of the aux and
+by the r12 listwise objective; the aux's candidate set is the other observations of the same
+window, i.e. the eval's own foil geometry.
+
+MEASURED (capacity check on SYNTHETIC data, not a fitness estimate, and NOT a claim about the
+real root): training only the slot module on hand-built windows -- 5 locations shown, then 1-3
+silent moves, then one read, 768-d embeddings of the form verb_code + path_code(s) + noise --
+it reaches 95% / 88% / 77% top-1 among the 5 file contents at 1 / 2 / 3 hops (chance 20%), and
+70% at 4 hops which it never trained on. So the algebra does compose across hops. Under a fully
+SYMMETRIC move encoding (source and destination path codes weighted identically, so the command
+embedding cannot say which path is which) it still reaches 68% / 56% at 2 / 3 hops, because the
+occupancy prior alone resolves source from destination. Everything else in this note about the
+real data root is UNMEASURED; I cannot run the real harness from here.
+
+3. WHAT I EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST OBSERVATION
+
+If I am wrong, comp_ca lands at or below the partner stack's own score and the native-vs-swap
+picks stay locked together (the "held" rate stays high, "follows the swapped content" stays at
+the parent's level) even though overall next-obs retrieval health is unchanged or better.
+
+Cheapest observations, in order:
+  a) Print net.r22_slot_transport_memory.mix_gain and mix_out.weight.abs().mean() at the end of
+     training. If the gain has not grown well past its 0.05 init and V is still ~0, the head
+     never entered the prediction and the run is just the partner stack -- the failure is the
+     injection bootstrap, not the tracker.
+  b) Print the mean of sigmoid(move_gate(cmd)) over a batch, split by whether the command's
+     observation is empty-ish. If it has not separated, the module never learned that some
+     commands transport and the state is a pure per-location cache -- then the mechanism is
+     inert and I predict comp_ca equals the partner's within noise.
+  c) Log the aux term. If _chain_loss returns 0.0 on most steps, the same-path chain miner found
+     no depth>=2 chains at threshold 0.60 on this root, and the transport path was trained only
+     by observation dropout.
+
+4. THE BIGGEST RISK I SEE
+
+Source/destination disambiguation from a mean-pooled sentence embedding. "mv A B" must yield a
+source address pointing at A and a slot key that a later "cat B" will match, out of ONE frozen
+pooled vector; if the encoder pools A and B nearly symmetrically, the source read becomes a
+50/50 blend of the two files and the transported identity is half wrong. The occupancy prior is
+my hedge and it held up in the symmetric synthetic case, but the real windows may move files
+onto occupied locations, where occupancy cannot break the tie.
+
+Secondary risks: (i) the injection bootstrap in 3(a) -- the addressing gets its first gradient
+from the aux at step 100, and if the scalar gain is driven to zero before then the head is a
+no-op; (ii) the Python loop over command positions adds roughly 15-25% to forward time on top
+of an arch that already loops (measured on CPU with B=16, n=8: 0.040s vs 0.032s bare, aux
+0.008s) -- on the real budget this is unmeasured; (iii) train/eval geometry mismatch, since in
+training a silent mv still carries an (uninformative) observation while at eval it is a PAD, and
+I am relying on the write gate plus observation dropout to make those the same thing.
