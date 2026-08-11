@@ -73,7 +73,8 @@
   "gate_timeout_s": 1200,
   "smoke": "${TWM_PYTHON:-python3} -m eval.smoke {genome}",
   "guardrails": [
-   "${TWM_PYTHON:-python3} -m eval.guard_leakage {genome}"
+   "${TWM_PYTHON:-python3} -m eval.guard_leakage {genome}",
+   "${TWM_PYTHON:-python3} -m eval.guard_reach {genome}"
   ],
   "proxy": {
    "cmd": "${TWM_PYTHON:-python3} -m eval.adapter {results_dir} {genome} {seed} {split} {mode}",
