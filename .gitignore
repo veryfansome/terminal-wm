@@ -22,6 +22,11 @@ evolve/.cache/
 .results/
 cloud/podresults/
 
+# Real trajectories copied into inventor jails so a mechanical question about the data is
+# answered by looking rather than inferred. Regenerated from a data root by evolve/jail_sample.py,
+# which is tracked; the sample itself is derived and is not.
+evolve/jail_data/
+
 # Derived lane artifacts. build_context writes .cache/ at the repo root; an encoded context
 # is around a gigabyte and is rebuilt on demand.
 .cache/

@@ -7,11 +7,10 @@ from evolve.chunks.arch.r18_pathstate_latent_transition_worldmodel import (
 NAME = "r22_observation_occlusion_denoising"
 DESCRIPTION = (
     "The r18 path-state world model trained under ramped stochastic observation "
-    "occlusion: in training mode each obs token is independently removed (zeroed + "
-    "key-padded — the frozen instrument's exact masked-slot semantics, verified "
-    "bit-identical) with probability ramping to occ_p, so occluded-evidence prediction — "
-    "including the mutation->read imagination condition — becomes an in-distribution "
-    "training regime for the SAME trunk the instrument measures. Eval forward is the "
+    "occlusion: in training mode each obs token is independently removed (zeroed and "
+    "key-padded) with probability ramping to occ_p, so predicting from a prefix with "
+    "observations missing becomes an in-distribution training regime for the SAME trunk "
+    "the instrument measures. Eval forward is the "
     "bit-for-bit identical to the r18 forward; zero new trainable parameters; loss/head/batcher untouched."
 )
 

@@ -19,8 +19,6 @@ DESCRIPTION = (
 
 
 class R20ImagWritePathState(R18PathStateLatentTransition):
-    # Training and fitness streams are even-length with pairs both-valid or both-padded, so
-    # [valid_cmd & ~valid_obs] is identically False and the write below never runs when scored.
     def _transition_reads(self, x_cmd, obs_tok, valid_cmd, valid_obs, n_cmd, n_pair):
         B = x_cmd.size(0)
         dtype = x_cmd.dtype

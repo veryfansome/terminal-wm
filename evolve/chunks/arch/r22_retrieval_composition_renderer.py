@@ -13,10 +13,8 @@ DESCRIPTION = (
     "RENDERER over the retrieved-content channels (raw file-memory retrieval, FiLM view, "
     "path-memory read; conditioned on trunk state, retrieval context and system summary), "
     "injected into target_read so retrieved prefix contents can interact vector-wise instead "
-    "of only scalar-mixing. Grounded in the R22 pathway decomposition (the delta-rule memories "
-    "carry the masked-endpoint content differential; the shared diagonal FiLM is family-"
-    "conflicted) and R20 finding 7 (the affine transform saturates where an MLP adds +0.057). "
-    "Bit-identical to the r18 forward at init; trained by the main loss; no aux, no new forward."
+    "of only scalar-mixing. Bit-identical to the r18 forward at init; trained by the main "
+    "loss; no aux, no new forward."
 )
 
 

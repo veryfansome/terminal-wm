@@ -1,0 +1,19 @@
+{
+ "_doc": "Impls whose mechanism keys on a condition the scored instrument does not produce: a command step whose paired observation token is absent. In training that condition is identically false (realenv/seq_worldmodel.py collate marks key_pad False for a command and its observation together). At scoring it is true at exactly one position per row, the final read command, whose observation is the withheld answer. Every move step carries an observation; it is exit 0 with empty output, byte-identical across all 23,874 move steps in the pack, so it binds a constant rather than the identity of what moved. A mechanism built on the absent-observation condition therefore trains without gradient and cannot act before the scored read. Retirement stops these entering new candidates; the archive keeps every record and score they earned. Source is retained so archived genomes stay resolvable and reproducible.",
+ "retired": {
+  "head/r20_bounded_native_innovation_observer": {"reason": "_detect_masked_endpoint returns None on every cups layout"},
+  "head/r20_predictive_state_counterfactual_renderer": {"reason": "obs-missing predictive-state route gated on a condition the layout does not produce"},
+  "head/r20_privileged_modular_innovation": {"reason": "_detect_masked_endpoint returns None on every cups layout"},
+  "head/r21_causal_matched_prefix_prototype": {"reason": "_detect_masked_endpoint returns None on every cups layout"},
+  "head/r21_counterfactual_history_guidance": {"reason": "_detect_masked_endpoint returns None on every cups layout"},
+  "head/r21_evidencegated_imagwrite_algebraic_observer_head": {"reason": "_detect_masked_endpoint returns None on every cups layout"},
+  "head/r22_masked_endpoint_trunk_task": {"reason": "trains the trunk on an in-batch layout with a key-padded observation slot between mutation and read, which the instrument never produces"},
+  "arch/r20_contentcond_transition_imagwrite": {"reason": "imagination write gated on valid_cmd & ~valid_obs"},
+  "arch/r20_endpoint_imagination_worldmodel": {"reason": "imagination write gated on missing_pair"},
+  "arch/r20_imagwrite_pathstate_worldmodel": {"reason": "imagination write gated on valid_cmd & ~valid_obs"},
+  "arch/r20_interventional_gain_shell_worldmodel": {"reason": "imagination branch gated on valid_cmd & ~valid_obs"},
+  "arch/r20_native_imagwrite_observer_worldmodel": {"reason": "imagination write gated on valid_cmd & ~valid_obs"},
+  "arch/r21_evidencegated_imagwrite_algebraic_observer_arch": {"reason": "evidence-gated imagination write gated on valid_cmd & ~valid_obs"},
+  "arch/r21_sourcefused_imagwrite_pathstate": {"reason": "source-fused imagination write gated on valid_cmd & ~valid_obs"}
+ }
+}

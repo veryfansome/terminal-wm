@@ -10,10 +10,9 @@ DESCRIPTION = (
     "The r18 arch with the transition operator's functional form upgraded from command-only "
     "affine to CONTENT-CONDITIONED: delta = affine(s_pre, cmd) + cap*tanh(MLP([rms(s_pre); "
     "cmd_feat])/cap), MLP zero-init (exact r18 function at init), trained by the r18 stack's "
-    "own main loss + forward-model head aux — targeting the measured +0.057 operator-form "
-    "headroom (brief finding 7) that every endpoint corrector works around; plus the r20 "
-    "parameter-free imagination write (reused, attributed) so the net natively forwards the "
-    "obs-missing endpoint layout (measurement path b). Bounded residual, unchanged interfaces, "
+    "own main loss + forward-model head aux; plus the r20 parameter-free imagination write "
+    "(reused, attributed), which commits a transition into memory at a command position whose "
+    "paired observation token is key-padded. Bounded residual, unchanged interfaces, "
     "Muon/spectral-cap routing verified safe."
 )
 
