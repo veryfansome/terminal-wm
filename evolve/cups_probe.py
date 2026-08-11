@@ -149,11 +149,101 @@ def _nway(pred_obs, ctx):
     return picks
 
 
-def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None):
+def _code_fn(stream):
+    return getattr(stream, "code_cmds", None) if stream is not None else None
+
+
+def _coded(fn, cmds, z_cmd, what):
+    z = fn(list(cmds), z_cmd.clone())
+    if not torch.is_tensor(z) or tuple(z.shape) != tuple(z_cmd.shape):
+        raise ValueError(
+            f"stream.code_cmds returned {type(z).__name__} shaped "
+            f"{tuple(getattr(z, 'shape', ()))} for {what}; expected a tensor shaped "
+            f"{tuple(z_cmd.shape)}")
+    if not torch.isfinite(z).all():
+        raise ValueError(f"stream.code_cmds produced non-finite values for {what}")
+    return z.to(z_cmd.dtype)
+
+
+def stream_coded_toks(ctx, cache, stream):
+    """Per-genome command tokens under the genome's stream coding, for BOTH arms.
+
+    The shared lane context is genome-independent and holds raw standardized command
+    embeddings, so a stream that writes into command-token coordinates is invisible to it.
+    Reconstruct that coding here, each arm from its OWN command strings: the native chain for
+    ctx['tok'], the role-swapped chain for the swap arm. Coding one arm and not the other turns
+    the differential into codes-present-versus-absent; coding the swapped arm from the native
+    strings scores the wrong chain. Both are silent and they move the score in opposite
+    directions.
+
+    A stream declaring no code_cmds gets the context's own tensors back, unchanged and
+    un-cloned, so every score taken before this hook existed replays bit-identically."""
+    fn = _code_fn(stream)
+    tok = ctx["tok"]
+    tok2 = cache["tok2"] if cache is not None else None
+    if fn is None:
+        return tok, tok2
+
+    seqs, wins = ctx["seqs"], ctx["wins"]
+    native = {}
+    for w in wins:
+        si = w["si"]
+        if si not in native:
+            s = seqs[si]
+            native[si] = _coded(fn, [st["cmd"] for st in s["steps"]], s["z_cmd"],
+                                f"sequence {si}")
+
+    # A scored window is a PREFIX of its sequence, so the code at a command position may depend
+    # only on commands up to it. Cut each sampled sequence at several interior points: cutting
+    # only at the read is vacuous whenever the read is the sequence's last step.
+    for si in list(native)[:4]:
+        s = seqs[si]
+        cmds = [st["cmd"] for st in s["steps"]]
+        n = len(cmds)
+        for k in sorted({n // 4, n // 3, n // 2, n - 2, n - 1}):
+            if not 0 <= k < n:
+                continue
+            pre = _coded(fn, cmds[:k + 1], s["z_cmd"][:k + 1], "prefix causality check")
+            if not torch.equal(native[si][:k + 1], pre):
+                raise ValueError(
+                    f"stream.code_cmds is not prefix-causal: for sequence {si}, coding the whole "
+                    f"sequence and coding its first {k + 1} commands disagree on those commands. "
+                    f"A scored window is a prefix, so the code at a command position may depend "
+                    f"only on the commands up to it.")
+
+    tok = tok.clone()
+    for i, w in enumerate(wins):
+        z = native[w["si"]]
+        for j in range(w["r"] + 1):
+            tok[i, 2 * j] = z[j]
+    if tok2 is None:
+        return tok, None
+
+    tok2 = tok2.clone()
+    for i in cache["idxs"]:
+        cmds2 = cache["swapped_cmds"].get(i)
+        if cmds2 is None:
+            continue
+        w = wins[i]
+        s = seqs[w["si"]]
+        cmds_sw = [st["cmd"] for st in s["steps"]]
+        z_sw = s["z_cmd"].clone()
+        for kd, (t, _, _) in enumerate(w["mvs"]):
+            cmds_sw[t] = cmds2[kd]
+            z_sw[t] = cache["swapped_z"][i][kd]
+        z_sw = _coded(fn, cmds_sw, z_sw, f"role-swapped chain for {w['id']}")
+        for j in range(w["r"] + 1):
+            tok2[i, 2 * j] = z_sw[j]
+    return tok, tok2
+
+
+def measure(net, ctx, target_mod, device, gauntlet_h=2, ceiling_table=None,
+            tok=None):
     """The capability measurement: per-window N-way picks for the WM + the computed arms,
     stratified by (N, depth). Returns per-window rows + stratified aggregates."""
     wins = ctx["wins"]
-    pred = _fwd_pred(net, ctx["tok"], ctx["types"], ctx["key_pad"], ctx["rpos"], device)
+    pred = _fwd_pred(net, ctx["tok"] if tok is None else tok, ctx["types"], ctx["key_pad"],
+                     ctx["rpos"], device)
     pred_obs = target_mod.to_obs(pred, ctx["z_prev"]) if target_mod is not None else pred
     wm_pick = _nway(pred_obs, ctx)
     cp_pick = _nway(ctx["z_prev"], ctx)
@@ -404,7 +494,7 @@ def build_swap_cache(ctx, percep_name, device, seed=20260806, max_windows=None):
             f"encode does not reproduce the cached z_cmd — wrong encoder/render/stats frame")
     tok2 = ctx["tok"].clone()
     alts, partner_mover, name_skip = {}, 0, 0
-    alt_marks = {}
+    alt_marks, swapped_cmds, swapped_z = {}, {}, {}
     for i in idxs:
         w = wins[i]
         s = ctx["seqs"][w["si"]]
@@ -462,14 +552,17 @@ def build_swap_cache(ctx, percep_name, device, seed=20260806, max_windows=None):
         z = encode_cmds(cmds2)
         for kd, t in enumerate(mv_steps):
             tok2[i, 2 * t] = z[kd]
+        swapped_cmds[i] = list(cmds2)
+        swapped_z[i] = z
         alts[i] = routed2
     return {"tok2": tok2, "alts": alts, "alt_marks": alt_marks, "idxs": idxs,
             "name_skip": name_skip, "partner_mover": partner_mover,
+            "swapped_cmds": swapped_cmds, "swapped_z": swapped_z,
             "self_parity_cos": self_parity_cos, "eye_tree_sha": eye_tree_sha, "seed": seed}
 
 
 def alt_chain(net, ctx, target_mod, device, percep_name=None, seed=20260806, max_windows=None,
-              ceiling_table=None, cache=None):
+              ceiling_table=None, cache=None, tok2=None):
     """Score a trained net against the role-swapped chains.
 
     `cache` is the output of build_swap_cache. Pass it: it is net-independent, and rebuilding it
@@ -479,7 +572,8 @@ def alt_chain(net, ctx, target_mod, device, percep_name=None, seed=20260806, max
     if cache is None:
         cache = build_swap_cache(ctx, percep_name, device, seed=seed, max_windows=max_windows)
     wins = ctx["wins"]
-    tok2, alts, alt_marks = cache["tok2"], cache["alts"], cache["alt_marks"]
+    tok2 = cache["tok2"] if tok2 is None else tok2
+    alts, alt_marks = cache["alts"], cache["alt_marks"]
     idxs, name_skip, partner_mover = cache["idxs"], cache["name_skip"], cache["partner_mover"]
     self_parity_cos, eye_tree_sha = cache["self_parity_cos"], cache["eye_tree_sha"]
 

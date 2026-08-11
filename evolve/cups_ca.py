@@ -181,7 +181,8 @@ def assert_slice_matches_table(knobs):
 
 
 def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
-                        seed=20260806, ceiling_table=None, swap_cache=None, knobs=None):
+                        seed=20260806, ceiling_table=None, swap_cache=None, knobs=None,
+                        stream=None):
     """comp_ca for ONE trained net on ONE (root, split). Returns unrounded per-seed values.
 
     The scored scalar is the raw differential. `analytic_band` travels with it as a reference —
@@ -192,9 +193,10 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     their frozen-ceiling columns; comp_ca itself never reads a ceiling value arithmetically.
     """
     assert_slice_matches_table(knobs)
-    cap = CP.measure(net, ctx, target_mod, device, ceiling_table=ceiling_table)
+    tok, tok2 = CP.stream_coded_toks(ctx, swap_cache, stream)
+    cap = CP.measure(net, ctx, target_mod, device, ceiling_table=ceiling_table, tok=tok)
     alt = CP.alt_chain(net, ctx, target_mod, device, percep_name, seed=seed,
-                       ceiling_table=ceiling_table, cache=swap_cache)
+                       ceiling_table=ceiling_table, cache=swap_cache, tok2=tok2)
 
     native = {r["id"]: r for r in cap["rows"]}
     swap = {r["id"]: r for r in alt["rows"]}

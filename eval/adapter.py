@@ -21,6 +21,7 @@ import traceback
 import torch
 
 from cloud import build_context as BC
+from eval import guard_stream as SG
 from evolve import cdh_probe as CDH, cups_ca as CA, cups_probe as CP, genome as G, harness as H
 from realenv import seq_worldmodel as M
 
@@ -118,14 +119,9 @@ def main(argv):
     except Exception as e:
         return fail(results_dir, "genome_invalid", f"{type(e).__name__}: {e}")
 
-    # The scoring instrument reads predictions at strided positions of a fixed [cmd,obs,...]
-    # layout; any other layout would be scored on a sequence the net never trained on, and no
-    # guard can see that.
-    if getattr(stream, "CUPS_LAYOUT", None) != "interleave2":
-        return fail(results_dir, "stream_layout_unsupported",
-                    "the scoring instrument pins a strided [cmd,obs,...] layout; this stream "
-                    "declares a different one, so the measurement would not correspond to the "
-                    "trained net")
+    ok, why = SG.stream_scoreable(stream, device)
+    if not ok:
+        return fail(results_dir, "stream_layout_unsupported", why)
 
     if not head.leak_safe(head, head_p):
         return fail(results_dir, "head_leak_fail",
@@ -178,7 +174,8 @@ def main(argv):
         tm = getattr(net, "target_module", None)
         tmod = copy.deepcopy(tm).cpu() if tm is not None else target_mod
         ca = CA.measure_trained_net(net, ctx, tmod, device, eye, cells,
-                                    ceiling_table=cells, swap_cache=swap_cache, knobs=knobs)
+                                    ceiling_table=cells, swap_cache=swap_cache, knobs=knobs,
+                                    stream=stream)
 
         flat = stream.flatten_predictions(net, H._strip_target_only(ctx["seqs"]), device)
         pred_obs = tmod.to_obs(flat["pred"], flat["prev"]) if tmod is not None else flat["pred"]
