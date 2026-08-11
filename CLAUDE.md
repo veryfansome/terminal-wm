@@ -38,7 +38,7 @@ The point is what cancels. A model that keys on the *name* being asked about pre
 | `evolve/cdh_probe.py` | a second capability pack — does a read route through the navigation history that actually happened. Reported for every candidate, never scored. |
 | `evolve/cups_ca.py` | **the objective** — `comp_ca`, built by intersecting the two arms per window |
 | `eval/adapter.py` | the fitness oracle the engine calls: one net per seed, one `metrics.json` |
-| `eval/smoke.py`, `eval/guard_leakage.py`, `eval/guard_stream.py`, `eval/guard_reach.py` | the pre-eval gates every candidate pays: it builds, it cannot see the future, its tokens are ones the instrument can reproduce, and the parameters it introduces can actually affect something |
+| `eval/smoke.py`, `eval/guard_leakage.py`, `eval/guard_stream.py`, `eval/guard_reach.py` | the gates: it builds, it cannot see the future, its tokens are ones the instrument can reproduce, and the parameters it introduces can actually affect something. Which path pays which differs — `evolve score` runs all four in its guardrail phase, while the pack lane calls `eval/adapter.py` directly, so there only the stream and reachability gates (called from the adapter, pre-training) and the leakage check (post-training) run |
 | `evolve/evolve.json` | the contract (engine-owned format) |
 | `evolve/retired_impls.json` | impls whose mechanism is retired — kept on disk so archived genomes stay resolvable, but never offered to a new candidate. Retiring an impl and retracting the candidates selecting it are two separate acts; doing only the first leaves the mechanism reachable as a parent |
 | `evolve/jail_sample.py` | writes the real trajectories an inventor reads inside its jail, from the train split only |

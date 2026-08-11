@@ -142,14 +142,7 @@ def analytic_band(win_by_id, swap, W):
     for arm in ANALYTIC_ARMS:
         tot = 0.0
         for i in W:
-            w, s = win_by_id[i], swap[i]
-            routed = w["routed"]
-            if arm.startswith("trace_h"):
-                cap = int(arm[len("trace_h"):])
-                tot += _trace_arm(w, cap, True) - _trace_arm(w, cap, False)
-            else:
-                tot += (_arm_hit(_native_marks(w), arm, routed)
-                        - _arm_hit(s["alt_marks"], arm, routed))
+            tot += arm_diff(win_by_id[i], swap[i], arm)
         band[arm] = tot / len(W)
     return band
 
@@ -229,6 +222,8 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     their frozen-ceiling columns; comp_ca itself never reads a ceiling value arithmetically.
     """
     assert_slice_matches_table(knobs)
+    if CP._code_fn(stream) is not None and swap_cache is None:
+        swap_cache = CP.build_swap_cache(ctx, percep_name, device, seed=seed)
     tok, tok2 = CP.stream_coded_toks(ctx, swap_cache, stream)
     cap = CP.measure(net, ctx, target_mod, device, ceiling_table=ceiling_table, tok=tok)
     alt = CP.alt_chain(net, ctx, target_mod, device, percep_name, seed=seed,

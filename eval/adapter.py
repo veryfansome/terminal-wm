@@ -21,7 +21,7 @@ import traceback
 import torch
 
 from cloud import build_context as BC
-from eval import guard_stream as SG
+from eval import guard_reach as GR, guard_stream as SG
 from evolve import cdh_probe as CDH, cups_ca as CA, cups_probe as CP, genome as G, harness as H
 from realenv import seq_worldmodel as M
 
@@ -123,6 +123,10 @@ def main(argv):
     if not ok:
         return fail(results_dir, "stream_layout_unsupported", why)
 
+    ok, why = GR.reachable(genome_path)
+    if not ok:
+        return fail(results_dir, "unreachable_mechanism", why)
+
     if not head.leak_safe(head, head_p):
         return fail(results_dir, "head_leak_fail",
                     "the head declares itself unsafe against the no-future-leakage contract")
@@ -131,10 +135,10 @@ def main(argv):
         cpath = _env("TWM_CONTEXT")
         if cpath:
             blob = torch.load(cpath, map_location="cpu", weights_only=False, mmap=True)
-            built = (blob["root"], blob["eye"], blob["split"],
+            built = (blob.get("schema", 1), blob["root"], blob["eye"], blob["split"],
                      blob.get("train_root", blob["root"]),
                      blob.get("frame_root", blob["root"]))
-            here = (root, eye, split, train_root, frame_root)
+            here = (BC.CONTEXT_SCHEMA, root, eye, split, train_root, frame_root)
             if built != here:
                 raise RuntimeError(
                     f"context {cpath} was built for {built} but this run is {here} — a context "
@@ -158,6 +162,10 @@ def main(argv):
             raise RuntimeError(f"no cups windows in the {split} split of {root}")
     except Exception as e:
         raise RuntimeError(f"pack-lane setup failed (environment, not candidate): {e}") from e
+
+    ok, why = SG.stream_matches_context(stream, ctx, device)
+    if not ok:
+        return fail(results_dir, "stream_layout_unsupported", why)
 
     try:
         fit, _ = M.split_train_dev(train_full, seed=seed)

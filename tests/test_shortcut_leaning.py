@@ -15,8 +15,9 @@ def check(name, cond, detail=""):
         FAILED.append(name)
 
 
-def win(wid, routed, first_src, name=9, last_src=None, last_mover=9, deepest=None):
-    return {"id": wid, "routed": routed, "first_src": first_src, "name": name,
+def win(wid, routed, first_src, name=9, last_src=None, last_mover=9, deepest=None, depth=4):
+    # depth is what the trace arms read; the scored slice is depth 3 and 4, both above their caps
+    return {"id": wid, "routed": routed, "first_src": first_src, "name": name, "depth": depth,
             "last_src": last_src, "last_mover": last_mover, "deepest": deepest or []}
 
 
@@ -84,6 +85,19 @@ def main():
     r = shortcut_leaning(fw, fs, ["f"], {"f": 1.0}, "deepest")
     check("classified by sign, it lands in 'pays'", r["pays"]["n"] == 1,
           str({k: v["n"] for k, v in r.items()}))
+
+    print("\nthe band is the mean of arm_diff, and the strata reconstruct the score")
+    from evolve.cups_ca import analytic_band
+    band = analytic_band(wins, sw, W)
+    for arm in ("h_first", "at_name"):
+        mean_diff = sum(arm_diff(wins[i], sw[i], arm) for i in W) / len(W)
+        check(f"analytic_band[{arm}] == mean(arm_diff)", abs(band[arm] - mean_diff) < 1e-12,
+              f"{band[arm]} vs {mean_diff}")
+    r = shortcut_leaning(wins, sw, W, only, "h_first")
+    recon = sum(v["n"] * v["mean"] for v in r.values() if v["mean"] is not None) / len(W)
+    overall = sum(only[i] for i in W) / len(W)
+    check("count-weighted strata reconstruct the overall differential",
+          abs(recon - overall) < 1e-12, f"{recon} vs {overall}")
 
     print()
     if FAILED:

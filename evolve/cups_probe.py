@@ -183,6 +183,12 @@ def stream_coded_toks(ctx, cache, stream):
     tok2 = cache["tok2"] if cache is not None else None
     if fn is None:
         return tok, tok2
+    if cache is None:
+        raise ValueError(
+            "stream.code_cmds is present but no swap cache was given, so only the native arm "
+            "could be coded. The differential would then compare a coded native chain against an "
+            "uncoded swapped one and measure codes-present-versus-absent instead of the chain. "
+            "Build the cache first and pass the SAME object to alt_chain.")
 
     seqs, wins = ctx["seqs"], ctx["wins"]
     native = {}
