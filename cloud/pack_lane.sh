@@ -208,9 +208,20 @@ campaign() {
   say "(the lane context — splits, windows, role-swap chains — is derived once and shared)"
   $TWM_PYTHON -m cloud.runner --genomes "$@" --seeds "$seeds" \
       --gpus "${TWM_GPUS:-1}" --out "$REPO/.results" --split inner --mode full
-  echo
-  echo "Fold each genome into an ingestable record with:  pack_lane.sh score <genome.json> <id>"
-  echo "(the per-seed work is already cached, so that step just aggregates)"
+
+  # Fold every genome here, as part of the campaign. The per-seed metrics live under .results/,
+  # which `runpod.sh pull` does NOT copy; only cloud/podresults/ comes home. Leaving the fold as a
+  # separate manual step means a terminated pod takes the whole measurement with it, having
+  # already been paid for. It is cheap — the per-seed work is cached, this is arithmetic.
+  rm -f cloud/podresults/.done
+  local g
+  for g in "$@"; do
+    score "$g" "$(basename "$g" .json)"
+  done
+  # The marker is what a poller waits on: the absence of a tmux session cannot distinguish
+  # "finished" from "died on job 1", and a poll that guesses wrong terminates a live box.
+  date -u +%FT%TZ > cloud/podresults/.done
+  say "campaign complete; $# record(s) in cloud/podresults/ and .done written"
 }
 
 case "${1:-}" in
