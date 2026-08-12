@@ -1,0 +1,147 @@
+{
+ "round": "r2",
+ "slots_file": "evolve/rounds/r2-db77fd01-slots.json",
+ "note": "operator forced to cross; partners drawn from the engine's weighted parent distribution under a global uniqueness constraint (pairs are unordered, so a parent's pair budget is 8 and a greedy pass can exhaust it)",
+ "slots": [
+  {
+   "slot": 0,
+   "axis": "arch",
+   "seed": "r2:0",
+   "operator": "cross",
+   "parent": "g0-12-obs-occlusion-denoising",
+   "cross_with": "g0-00-baseline",
+   "inspirations": [
+    "g0-16-retrieval-composition",
+    "g0-15-prefix-content-xattention",
+    "g0-00-baseline",
+    "g0-05-dualpre-transition"
+   ]
+  },
+  {
+   "slot": 1,
+   "axis": "batcher",
+   "seed": "r2:1",
+   "operator": "cross",
+   "parent": "g0-00-baseline",
+   "cross_with": "g0-08-exact-target-equivalence",
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-15-prefix-content-xattention",
+    "g0-05-dualpre-transition"
+   ]
+  },
+  {
+   "slot": 2,
+   "axis": "head",
+   "seed": "r2:2",
+   "operator": "cross",
+   "parent": "g0-14-pathstate-rssm",
+   "cross_with": "g0-00-baseline",
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-13-obspresent-imagination",
+    "g0-15-prefix-content-xattention"
+   ]
+  },
+  {
+   "slot": 3,
+   "axis": "objective",
+   "seed": "r2:3",
+   "operator": "cross",
+   "parent": "g0-05-dualpre-transition",
+   "cross_with": "g0-00-baseline",
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-02-causal-variance-film",
+    "g0-13-obspresent-imagination"
+   ]
+  },
+  {
+   "slot": 4,
+   "axis": "optim",
+   "seed": "r2:4",
+   "operator": "cross",
+   "parent": "g0-14-pathstate-rssm",
+   "cross_with": "g0-08-exact-target-equivalence",
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-00-baseline",
+    "g0-13-obspresent-imagination"
+   ]
+  },
+  {
+   "slot": 5,
+   "axis": "stream",
+   "seed": "r2:5",
+   "operator": "cross",
+   "parent": "g0-16-retrieval-composition",
+   "cross_with": "g0-00-baseline",
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-15-prefix-content-xattention",
+    "g0-02-causal-variance-film",
+    "g0-05-dualpre-transition"
+   ]
+  },
+  {
+   "slot": 6,
+   "axis": "target",
+   "seed": "r2:6",
+   "operator": "cross",
+   "parent": "g0-16-retrieval-composition",
+   "cross_with": "g0-08-exact-target-equivalence",
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-15-prefix-content-xattention",
+    "g0-02-causal-variance-film",
+    "g0-08-exact-target-equivalence"
+   ]
+  },
+  {
+   "slot": 7,
+   "axis": "arch",
+   "seed": "r2:7",
+   "operator": "cross",
+   "parent": "g0-15-prefix-content-xattention",
+   "cross_with": "g0-00-baseline",
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-14-pathstate-rssm",
+    "g0-00-baseline"
+   ]
+  },
+  {
+   "slot": 8,
+   "axis": "batcher",
+   "seed": "r2:8",
+   "operator": "cross",
+   "parent": "g0-14-pathstate-rssm",
+   "cross_with": "g0-16-retrieval-composition",
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-00-baseline",
+    "g0-02-causal-variance-film"
+   ]
+  },
+  {
+   "slot": 9,
+   "axis": "head",
+   "seed": "r2:9",
+   "operator": "cross",
+   "parent": "g0-08-exact-target-equivalence",
+   "cross_with": "g0-15-prefix-content-xattention",
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-05-dualpre-transition",
+    "g0-13-obspresent-imagination"
+   ]
+  }
+ ]
+}

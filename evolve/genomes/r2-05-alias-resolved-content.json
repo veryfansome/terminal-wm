@@ -1,0 +1,31 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives"
+  },
+  "arch": {
+   "impl": "r22_retrieval_composition_renderer"
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "bs": 64
+  },
+  "target": {
+   "impl": "identity"
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "alias_resolved_content_codes"
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency"
+  }
+ }
+}

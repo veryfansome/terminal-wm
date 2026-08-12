@@ -1,0 +1,155 @@
+{
+ "seed": "r2",
+ "slots": [
+  {
+   "slot": 0,
+   "parent": "g0-12-obs-occlusion-denoising",
+   "parent_fitness": 0.029963,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "g0-16-retrieval-composition",
+    "g0-15-prefix-content-xattention",
+    "g0-00-baseline",
+    "g0-05-dualpre-transition"
+   ],
+   "seed": "r2:0",
+   "axis": "arch"
+  },
+  {
+   "slot": 1,
+   "parent": "g0-00-baseline",
+   "parent_fitness": 0.003745,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-15-prefix-content-xattention",
+    "g0-05-dualpre-transition"
+   ],
+   "seed": "r2:1",
+   "axis": "batcher"
+  },
+  {
+   "slot": 2,
+   "parent": "g0-14-pathstate-rssm",
+   "parent_fitness": 0.0,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-13-obspresent-imagination",
+    "g0-15-prefix-content-xattention"
+   ],
+   "seed": "r2:2",
+   "axis": "head"
+  },
+  {
+   "slot": 3,
+   "parent": "g0-05-dualpre-transition",
+   "parent_fitness": 0.0,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-02-causal-variance-film",
+    "g0-13-obspresent-imagination"
+   ],
+   "seed": "r2:3",
+   "axis": "objective"
+  },
+  {
+   "slot": 4,
+   "parent": "g0-14-pathstate-rssm",
+   "parent_fitness": 0.0,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-00-baseline",
+    "g0-13-obspresent-imagination"
+   ],
+   "seed": "r2:4",
+   "axis": "optim"
+  },
+  {
+   "slot": 5,
+   "parent": "g0-16-retrieval-composition",
+   "parent_fitness": 0.029963,
+   "operator": "cross",
+   "cross_with": "g0-15-prefix-content-xattention",
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-15-prefix-content-xattention",
+    "g0-02-causal-variance-film",
+    "g0-05-dualpre-transition"
+   ],
+   "seed": "r2:5",
+   "axis": "stream"
+  },
+  {
+   "slot": 6,
+   "parent": "g0-16-retrieval-composition",
+   "parent_fitness": 0.029963,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-15-prefix-content-xattention",
+    "g0-02-causal-variance-film",
+    "g0-08-exact-target-equivalence"
+   ],
+   "seed": "r2:6",
+   "axis": "target"
+  },
+  {
+   "slot": 7,
+   "parent": "g0-15-prefix-content-xattention",
+   "parent_fitness": 0.011236,
+   "operator": "cross",
+   "cross_with": "g0-08-exact-target-equivalence",
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-14-pathstate-rssm",
+    "g0-00-baseline"
+   ],
+   "seed": "r2:7",
+   "axis": "arch"
+  },
+  {
+   "slot": 8,
+   "parent": "g0-14-pathstate-rssm",
+   "parent_fitness": 0.0,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-00-baseline",
+    "g0-02-causal-variance-film"
+   ],
+   "seed": "r2:8",
+   "axis": "batcher"
+  },
+  {
+   "slot": 9,
+   "parent": "g0-08-exact-target-equivalence",
+   "parent_fitness": 0.007491,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "g0-12-obs-occlusion-denoising",
+    "g0-16-retrieval-composition",
+    "g0-05-dualpre-transition",
+    "g0-13-obspresent-imagination"
+   ],
+   "seed": "r2:9",
+   "axis": "head"
+  }
+ ]
+}

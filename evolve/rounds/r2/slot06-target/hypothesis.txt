@@ -1,0 +1,121 @@
+CANDIDATE: crossover of the two given programs plus one new mechanism on the target axis.
+
+WHAT I KEPT FROM EACH PROGRAM
+
+From the parent I keep the arch, r22_retrieval_composition_renderer: the r18 path-state delta-rule
+memory plus the capped nonlinear composition renderer over the retrieved-content channels. That is
+the half that can actually carry a particular file's embedding through a chain of mv commands and
+emit it at a read.
+
+From the crossover partner I keep the objective, r22_exact_target_equivalence_quotient. This is not
+a cosmetic swap, and the reason is visible in evolve/jail_data/train_sample.jsonl. render_obs()
+builds the observation text as "cwd=... exit=...\n<output>", so:
+
+  - every silent step (each `mv A B`, each `cat X > Y` redirect) renders to the byte-identical
+    text "cwd=/ exit=0\n" and therefore to the byte-identical target embedding. In the sampled
+    trajectory 6 of 25 steps are silent; across a batch of whole trajectories a large fraction of
+    all target rows are literally the same vector.
+  - the cups_test read step's observation is byte-identical to the observation of the expose step
+    that first showed that content (in the sample: `cat /tmp/w/cups/usr/share/misc/magic.txt.1`
+    returns exactly the text that `cat /tmp/w/cups/g53/f149.tmp` returned earlier).
+
+The parent's objective, r12_antiretrieval_ring_negatives, treats every non-diagonal in-batch row as
+a negative. So on this data it spends much of its gradient pushing the read step's prediction AWAY
+from the expose step's target -- which is the correct answer -- and pushing every silent step away
+from every other silent step's identical target. The quotient objective groups numerically equal
+targets into one multi-positive class (log_num over the equivalent set), divides occurrence mass by
+class size, and masks equivalent pairs out of the ring, so both of those gradients disappear. That
+is a mechanism aimed at exactly the read step comp_ca scores.
+
+THE NEW MECHANISM (target axis): shrunk ZCA metric on the observation target
+
+target__r2_shrunk_zca_content_metric.py estimates the mean mu and covariance C of the training
+targets themselves -- accumulated from z_obs only, never from the model's predictions, so there is
+no feedback loop -- over the first 192 training steps (up to 384 target rows per step, taken by a
+deterministic stride so no RNG is consumed and the batcher/dropout streams are untouched). It then
+forms, once, the symmetric operator
+
+    C = U diag(lam) U^T,  lam_bar = mean(lam)
+    g_i = ( lam_bar / (lam_i + rho*lam_bar) ) ^ (gamma/2)        gamma = 1.0, rho = 0.08
+    g   = g * clamp( sqrt( sum(lam) / sum(g^2 * lam) ), 0.5, 2.0 )
+    W   = U diag(g) U^T,      W^-1 = U diag(1/g) U^T
+
+and from then on trains on make_target(z_obs) = (z_obs - mu) W, frozen for the rest of the run.
+to_obs(pred) = pred W^-1 + mu is the exact algebraic inverse, so the retrieval eval still ranks
+candidates by plain squared L2 in the untouched observation space; nothing about the metric, the
+eligible slice or the candidate sets changes.
+
+WHAT THIS COMPUTES THAT NEITHER PARENT COMPUTES
+
+Neither program changes the geometry of the regression target: both train MSE-like and contrastive
+terms in the per-coordinate-standardized observation basis, whose covariance is strongly
+anisotropic (standardization equalizes coordinate variances but leaves the correlations, so the top
+eigen-directions still hold most of the energy). Training in W-space is exactly training under the
+Mahalanobis metric ||W(p - z)||^2 = (p-z)^T C^-gamma_shrunk (p-z): every independent factor of
+variation of the observation distribution gets comparable loss weight instead of weight
+proportional to its variance. The eigenvalue floor rho bounds the largest gain at
+sqrt(1/rho) ~ 3.5 times the scale factor, so no direction is amplified without limit, and the
+single global rescale keeps the total target variance unchanged so the objective's absolute
+constants (_TEMP 0.25, _MARGIN 0.5, _DUP_DELTA 0.05) stay in the regime they were tuned in. The
+ZCA (symmetric) form rather than PCA whitening is deliberate: it is the whitening closest to the
+identity, so the arch's direct additive copy path (direct_gate * target_read, tr_read, the FiLM
+views) stays approximately aligned with what it has to emit.
+
+WHY THAT SHOULD MOVE comp_ca
+
+comp_ca is decided by which of the N in-window contents the prediction is nearest to. The part of a
+target that decides that is the candidate's offset from the window's own centroid -- the N contents
+in a cups window are all short config-like files, so what they share (it is a file dump, not a
+directory listing, not an empty mv observation) is large and cancels in the comparison, and what
+separates them is small. Under an identity target, a model that emits the window centroid already
+captures most of the available squared-error reduction, and routing the right content buys little
+extra loss; that is the regime in which a name-keyed or order-keyed shortcut is as good as tracking.
+Under the whitened target the shared coarse component sits in high-lam directions and is shrunk,
+while the identity offset sits in lower-lam directions and is amplified, so the loss advantage of
+actually routing the right content over emitting the centroid grows by roughly the ratio of the
+gains. I checked this on a synthetic distribution with a decaying spectrum and windows that share
+their top-48 latent factors: the within-window identity residual's share of target energy went from
+0.109 to 0.722 (numbers from a synthetic construction, NOT a measurement of this eval or of any
+model). A second, smaller effect: the objective's per-coordinate precision weight
+w = (1/(mse_d+eps))^0.5 upweights coordinates the model already fits; in the decorrelated basis
+mse_d is far more uniform, so that "focus on what you can already predict" prior is largely
+neutralized.
+
+VERIFIED PROPERTIES OF THE CODE (checked numerically on synthetic data, not on the real eval)
+
+  - round-trip to_obs(make_target(z)) - z has relative error ~8e-7 (float32 representation limit;
+    W and W^-1 are built in float64 from one eigendecomposition and cast once).
+  - W is exactly symmetric; gains bounded, condition number ~20 on the synthetic spectrum.
+  - bit-identical targets stay bit-identical after the transform, so the quotient objective's
+    equivalence test (tt_raw <= 1e-5) still finds the silent-step class and the expose/read pair.
+  - total target variance preserved to ~1%.
+  - identity until step 192 and frozen after; no RNG drawn; no parameters registered (buffers
+    only, so the optimizer's key_d / (D,D) routing and the spectral cap see nothing new).
+  - apply cost 2.3 ms per step for 4096 rows on CPU; the accumulation phase is 192 steps and the
+    single eigendecomposition is ~1 s. Speed impact on the fixed step budget is small; this is a
+    FLOP/wall-clock estimate off-harness, not a measurement of the real training loop.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+  1. The alignment assumption. If what separates the N in-window contents does NOT sit in
+     below-average-variance directions of the global target distribution -- e.g. if a JSON blob and
+     a shell script differ mostly along the same top eigen-directions that separate them from an
+     empty observation -- then whitening shrinks the discriminative component instead of amplifying
+     it and comp_ca gets worse, not better. This is the load-bearing assumption and I cannot check
+     it from inside the jail.
+  2. Representability. The whitened target is a fixed linear image of the copyable quantity, so the
+     model must learn W on top of routing. The only full-rank D x D learnable path onto a retrieved
+     observation is tr_read, which the optim spectrally caps at 4.0, while the scale-clamped max
+     gain can reach ~5. If that clip binds, part of the transform has to be absorbed by the rank-176
+     head and the rank-192 composition renderer, and the copy path gets noisier.
+  3. Amplified directions being un-learnable rather than merely under-weighted. The frozen encoder
+     is deterministic, so there is no observation noise, but a trailing direction may encode e.g. an
+     unpredictable canary hex string. At a read step that content is copyable from context, so it
+     should be learnable there; at the many non-read steps it is not, and capacity spent there is
+     wasted.
+  4. The step budget. If total steps were below 192 the transform never activates and the candidate
+     degrades exactly to the plain crossover (safe, but then the target axis contributes nothing).
+  5. The eval must route the prediction through the module's own to_obs, as the axis contract
+     states. Module-level make_target/to_obs are provided as a self-consistent identity pair so a
+     path that ignored LEARNED would train and evaluate in the same (identity) space rather than in
+     mismatched spaces.

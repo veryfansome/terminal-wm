@@ -1,0 +1,34 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r22_exact_target_equivalence_quotient"
+  },
+  "arch": {
+   "impl": "r18_pathstate_latent_transition_worldmodel",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r2_spherical_addressing_tail_avg",
+   "params": {},
+   "bs": 64
+  },
+  "target": {
+   "impl": "identity"
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave"
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency",
+   "params": {}
+  }
+ }
+}
