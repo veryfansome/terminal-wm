@@ -147,18 +147,16 @@ publish() {
   uv run python -m cloud.publish_root "$ENC_ROOT" "$repo"
 }
 
-score() {
+# Fold ONLY — no runner. campaign() has already trained every seed, and re-invoking the runner
+# per genome silently re-trains any seed whose .done sentinel is absent, inside what the caller
+# was told is arithmetic.
+_fold() {
   local genome="$1" cand_id="$2"
   local seeds="${TWM_SEEDS:-0,1,2}"
   local out="cloud/podresults/${cand_id}.json"
-  # the runner keys its output by genome stem; the fold reads the same place
   export REPO_RESULTS="$REPO/.results/$(basename "$genome" .json)"
   mkdir -p cloud/podresults "$REPO_RESULTS"
-
   IFS=',' read -ra SEEDLIST <<< "$seeds"
-  # Seeds are independent trains — run them concurrently. One GPU is not saturated by one job.
-  $TWM_PYTHON -m cloud.runner --genomes "$genome" --seeds "$seeds" \
-      --gpus "${TWM_GPUS:-1}" --out "$REPO/.results" --split inner --mode full
 
   # Fold the per-seed metrics into one ingestable record. The engine means the per-seed scores
   # itself when it drives the eval; here we are outside it, so we do the same arithmetic and say
@@ -171,7 +169,14 @@ seeds = [int(s) for s in sys.argv[3:]]
 base = pathlib.Path(os.environ["REPO_RESULTS"])
 per, pub, priv, fb = [], {}, {}, []
 for s in seeds:
-    m = json.loads((base / f"s{s}" / "metrics.json").read_text())
+    mp = base / f"s{s}" / "metrics.json"
+    if not mp.exists():
+        # Never measured (killed, timed out, crashed before writing). Writing a failure record
+        # here would launder "we have no measurement" into "the candidate failed", which is a
+        # verdict about the candidate the run never earned.
+        print(f"NO METRICS for seed {s} — never measured; refusing to write a record")
+        raise SystemExit(1)
+    m = json.loads(mp.read_text())
     if not m.get("correct") or m.get("combined_score") is None:
         json.dump({"fitness": None, "correct": False, "env": os.environ["TWM_ENV_TAG"],
                    "seeds": seeds, "guardrail": m.get("error", "seed_failed"),
@@ -190,6 +195,14 @@ print(json.dumps({"id": cand, "fitness": round(sum(per) / len(per), 6), "per_see
 PY
 
   say "wrote $out"
+}
+
+# Manual single-genome path: train then fold.
+score() {
+  local genome="$1" cand_id="$2"
+  $TWM_PYTHON -m cloud.runner --genomes "$genome" --seeds "${TWM_SEEDS:-0,1,2}" \
+      --gpus "${TWM_GPUS:-1}" --out "$REPO/.results" --split inner --mode full
+  _fold "$genome" "$cand_id"
   echo
   echo "Bring it back with (from a Claude Code session in this repo):"
   echo "  evolve ingest --result $out --id $cand_id --genome $genome --mode full --split inner --env $TWM_ENV_TAG"
@@ -204,6 +217,9 @@ campaign() {
   # first measurement campaign: every genome is unmeasured on this lane, so there is nothing to
   # screen and no reason to serialize.
   local seeds="${TWM_SEEDS:-0,1,2}"
+  # FIRST, before anything long-running: a marker left by an earlier campaign is what a poller
+  # would see the instant this one is dispatched, and it would conclude this run had finished.
+  mkdir -p cloud/podresults && rm -f cloud/podresults/.done
   say "campaign: $# genome(s) x seeds $seeds on ${TWM_GPUS:-1} gpu(s)"
   say "(the lane context — splits, windows, role-swap chains — is derived once and shared)"
   $TWM_PYTHON -m cloud.runner --genomes "$@" --seeds "$seeds" \
@@ -213,15 +229,19 @@ campaign() {
   # which `runpod.sh pull` does NOT copy; only cloud/podresults/ comes home. Leaving the fold as a
   # separate manual step means a terminated pod takes the whole measurement with it, having
   # already been paid for. It is cheap — the per-seed work is cached, this is arithmetic.
-  rm -f cloud/podresults/.done
-  local g
+  local g fold_fail=0
   for g in "$@"; do
-    score "$g" "$(basename "$g" .json)"
+    # One genome that cannot be folded must not cost the others their records: they are trained,
+    # paid for, and live only under .results/, which `runpod.sh pull` does not copy.
+    _fold "$g" "$(basename "$g" .json)" || { fold_fail=1; say "FOLD FAILED: $g"; }
   done
   # The marker is what a poller waits on: the absence of a tmux session cannot distinguish
   # "finished" from "died on job 1", and a poll that guesses wrong terminates a live box.
-  date -u +%FT%TZ > cloud/podresults/.done
-  say "campaign complete; $# record(s) in cloud/podresults/ and .done written"
+  # The marker means "this campaign finished attempting everything", not "everything succeeded".
+  # Whether the box may be stopped is verify's call, made against records on local disk.
+  printf '%s %s\n' "$(date -u +%FT%TZ)" "${TWM_RUN_ID:-norunid}" > cloud/podresults/.done
+  say "campaign complete; $# attempted, $(ls cloud/podresults/*.json 2>/dev/null | wc -l | tr -d ' ') record(s)"
+  [ "$fold_fail" = 0 ] || return 1
 }
 
 case "${1:-}" in

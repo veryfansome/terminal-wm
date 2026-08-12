@@ -47,7 +47,8 @@ The point is what cancels. A model that keys on the *name* being asked about pre
 | `evolve/blend_root.py` | writes a blend **spec**: the constituent packs, their ratios, the seed and the sampled indices for a training set composed at load time |
 | `cloud/build_context.py` | derives the shared lane context once — the composed training set, standardized splits, window layouts, role-swap chains — so no candidate re-pays it. Resolves a blend spec and pins the standardization frame |
 | `cloud/runner.py` | runs (genome, seed) jobs concurrently against that shared context |
-| `cloud/pack_lane.sh` | the GPU lane: pull + pin the eye, encode the root, measure, ingest |
+| `cloud/pack_lane.sh` | the GPU lane: pull + pin the eye, encode the root, measure, fold each genome into a record |
+| `cloud/lane.sh` | **how to run a campaign** — provision, measure, bring results home, stop the box. `verify` gates `terminate`, so a pod is never stopped before its records are on local disk, and a failure leaves the box running and says so. Running the stages by hand is how a campaign was lost and how a box billed for eleven idle hours |
 | `research/compositional-selection-design.md` | why the objective is shaped this way |
 
 ## Rules

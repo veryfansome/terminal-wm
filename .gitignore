@@ -35,3 +35,7 @@ evolve/jail_data/
 *.pt
 *.pth
 *.safetensors
+
+# The lane records its pod id here; a committed id points at a box that may still bill.
+cloud/.lane-pod
+cloud/podresults-archive/

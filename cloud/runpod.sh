@@ -393,6 +393,7 @@ export UV_NO_SYNC=1                 # keep the driver-matched torch bootstrap in
 export TWM_ENV_TAG='$ENV_TAG'       # scores compare only within one environment tag
 export TWM_GPUS='$GPU_COUNT'
 ${SEEDS:+export TWM_SEEDS='$SEEDS'}
+${TWM_RUN_ID:+export TWM_RUN_ID='$TWM_RUN_ID'}   # stamped into .done so a poller can tell THIS campaign's marker from a previous one's
 cd "$POD_REPO"
 mkdir -p cloud/podresults
 exec > >(tee -a "$logfile") 2>&1
