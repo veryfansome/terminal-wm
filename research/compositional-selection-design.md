@@ -177,3 +177,23 @@ These are facts about the instrument as it currently stands, recorded here becau
 **The masked-endpoint detector is inert on the scored path and live elsewhere.** `_detect_masked_endpoint`, carried by five head impls, needs a live token after the key-padded observation slot. The cups layout never provides one, because the read is the last token, so the helper returns `None` on every scored window — verified by running all three variants against a real layout. It does fire on the cd-history probe's key-padded arm, which is reported and never scored. That asymmetry is why the mechanism family reads as plausible from its own source: it is not dead everywhere, only where the score is taken. The family is retired in `evolve/retired_impls.json` and the founders selecting it are retracted.
 
 **A first-mover lookup outscores every measured mechanism on this slice.** The analytic band on the 89-window inner slice reads `h_first +0.1685`, `h_last -0.0899`, `h_lastmv +0.0337`, `deepest +0.0337`, and exactly `0.0` for `at_name`, `trace_h1` and `trace_h2`. The best real candidate is `+0.0300`. Name-keying cancels structurally, per window; chain-position arms cancel only in expectation, and this slice is one frozen realization. The band is reported beside every score and never subtracted, and each candidate's own differential is now also split by what the paying arms score on the same windows, in `private.shortcut_leaning`, because the per-window rows are not persisted and the split cannot be recovered afterwards.
+
+## 12. The eval is not deterministic, and the noise floor already accounts for it (2026-08-12)
+
+Re-measuring the nine selectable founders under identical conditions established two things that had never been tested by remeasurement.
+
+**The same (genome, seed) does not reproduce.** Running `g0-00-baseline` twice on the same box, same code, same seeds: seed 1 gave `-0.011236` then `0.0`, seed 2 gave `+0.022472` then `-0.011236`. Every observed difference is an integer multiple of `1/89`, which identifies the mechanism — the metric picks the nearest exposure candidate by squared distance, so a floating-point difference of order `1e-7` in a GPU reduction flips a near-tied `argmin`, and a continuous perturbation becomes a discrete score change of one whole window. Roughly 1.5% of window picks moved between runs. This is a property of the instrument, not of any candidate or of any change made to the harness: the arms are structurally identical for a genome whose stream declares no `code_cmds`, which is all nine.
+
+**The noise floor is nevertheless correct.** It was derived from the observed per-seed spread, which already contains this run-to-run component, so it does not need widening. Two independent three-seed measurements of the same nine genomes:
+
+| quantity | value |
+|---|---|
+| pooled per-seed sd, both campaigns | 0.02525 |
+| se of a three-seed mean | 0.01458 |
+| predicted rms difference between two such means | 0.02062 |
+| observed rms difference over the nine | 0.02122 |
+| ratio | 1.03 |
+
+One of nine moved by more than the floor, which is what a calibrated floor predicts. Treat `fitness.noise_floor = 0.0227` as measured rather than assumed, and treat any single ordering of the leaderboard as one realization: across the two campaigns the nominal best changed genome, and two genomes that differed by `0.026` in one campaign tied in the other.
+
+The practical consequence for a round is that a candidate's number is a draw, not a reading. A difference smaller than the floor is not evidence, and re-measuring the same id is cheap insurance rather than duplicated work — it costs no full-eval slot, since the engine counts unique ids.
