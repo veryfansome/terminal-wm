@@ -117,8 +117,17 @@ stage_campaign() {
     [ -n "$todo" ] || { log "campaign: nothing pending"; return; }
     # Synchronous with dispatch: clearing it inside campaign() on the box is too late, because
     # `prepare` runs first and can take minutes while the poller is already looking.
-    _ssh "rm -f $POD_REPO/cloud/podresults/.done" \
-        || die "cannot reach the pod to clear the previous completion marker"
+    #
+    # Retried, for the same reason poll retries: a pod's ssh endpoint flaps, and one unreachable
+    # moment is not evidence of anything. Without this a blip here kills a run that has already
+    # paid for provisioning and bootstrap.
+    local i cleared=0
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if _ssh "rm -f $POD_REPO/cloud/podresults/.done" 2>/dev/null; then cleared=1; break; fi
+        log "campaign: pod unreachable clearing the marker (attempt $i) — retrying in 20s"
+        sleep 20
+    done
+    [ "$cleared" = 1 ] || die "pod unreachable for 10 attempts over 200s while clearing the completion marker"
     log "campaign: $(echo "$todo" | wc -l | tr -d ' ') genome(s), run id $TWM_RUN_ID"
     # shellcheck disable=SC2086
     $RP campaign "$(_pod)" $todo
