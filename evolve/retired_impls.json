@@ -1,19 +1,50 @@
 {
- "_doc": "Impls whose mechanism keys on a condition the scored instrument does not produce: a command step whose paired observation token is absent. In training that condition is identically false (realenv/seq_worldmodel.py collate marks key_pad False for a command and its observation together). At scoring it is true at exactly one position per row, the final read command, whose observation is the withheld answer. Every move step carries an observation; it is exit 0 with empty output, byte-identical across all 23,874 move steps in the pack, so it binds a constant rather than the identity of what moved. A mechanism built on the absent-observation condition therefore trains without gradient and cannot act before the scored read. Retirement stops these entering new candidates; the archive keeps every record and score they earned. Source is retained so archived genomes stay resolvable and reproducible.",
+ "_doc": "Impls retired because their mechanism cannot be MEASURED as what it claims to be, not because they scored badly. Two families so far. (1) Most of these key on a command step whose paired observation is absent: identically false in training (collate clears key_pad for a command and its observation together) and true at scoring only at the final read, whose observation is the withheld answer \u2014 so they train without gradient and cannot act before the read. Every move step does carry an observation; it is exit 0 with empty output, identical across all 23,874 of them, so it binds a constant and the identity of what moved lives only in the command text. (2) stream/alias_resolved_content_codes instead solves the objective OUTSIDE the model, resolving the move chain in Python and stamping the answer into the scored read token. Retirement stops an impl entering new candidates and stops its name appearing in a brief; the archive keeps every record and score it earned, and the source stays on disk so archived genomes remain resolvable. Retiring an impl and retracting the candidates selecting it are separate acts \u2014 doing only the first leaves the mechanism reachable as a parent.",
  "retired": {
-  "head/r20_bounded_native_innovation_observer": {"reason": "_detect_masked_endpoint returns None on every cups layout"},
-  "head/r20_predictive_state_counterfactual_renderer": {"reason": "obs-missing predictive-state route gated on a condition the layout does not produce"},
-  "head/r20_privileged_modular_innovation": {"reason": "_detect_masked_endpoint returns None on every cups layout"},
-  "head/r21_causal_matched_prefix_prototype": {"reason": "_detect_masked_endpoint returns None on every cups layout"},
-  "head/r21_counterfactual_history_guidance": {"reason": "_detect_masked_endpoint returns None on every cups layout"},
-  "head/r21_evidencegated_imagwrite_algebraic_observer_head": {"reason": "_detect_masked_endpoint returns None on every cups layout"},
-  "head/r22_masked_endpoint_trunk_task": {"reason": "trains the trunk on an in-batch layout with a key-padded observation slot between mutation and read, which the instrument never produces"},
-  "arch/r20_contentcond_transition_imagwrite": {"reason": "imagination write gated on valid_cmd & ~valid_obs"},
-  "arch/r20_endpoint_imagination_worldmodel": {"reason": "imagination write gated on missing_pair"},
-  "arch/r20_imagwrite_pathstate_worldmodel": {"reason": "imagination write gated on valid_cmd & ~valid_obs"},
-  "arch/r20_interventional_gain_shell_worldmodel": {"reason": "imagination branch gated on valid_cmd & ~valid_obs"},
-  "arch/r20_native_imagwrite_observer_worldmodel": {"reason": "imagination write gated on valid_cmd & ~valid_obs"},
-  "arch/r21_evidencegated_imagwrite_algebraic_observer_arch": {"reason": "evidence-gated imagination write gated on valid_cmd & ~valid_obs"},
-  "arch/r21_sourcefused_imagwrite_pathstate": {"reason": "source-fused imagination write gated on valid_cmd & ~valid_obs"}
+  "head/r20_bounded_native_innovation_observer": {
+   "reason": "_detect_masked_endpoint returns None on every cups layout"
+  },
+  "head/r20_predictive_state_counterfactual_renderer": {
+   "reason": "obs-missing predictive-state route gated on a condition the layout does not produce"
+  },
+  "head/r20_privileged_modular_innovation": {
+   "reason": "_detect_masked_endpoint returns None on every cups layout"
+  },
+  "head/r21_causal_matched_prefix_prototype": {
+   "reason": "_detect_masked_endpoint returns None on every cups layout"
+  },
+  "head/r21_counterfactual_history_guidance": {
+   "reason": "_detect_masked_endpoint returns None on every cups layout"
+  },
+  "head/r21_evidencegated_imagwrite_algebraic_observer_head": {
+   "reason": "_detect_masked_endpoint returns None on every cups layout"
+  },
+  "head/r22_masked_endpoint_trunk_task": {
+   "reason": "trains the trunk on an in-batch layout with a key-padded observation slot between mutation and read, which the instrument never produces"
+  },
+  "arch/r20_contentcond_transition_imagwrite": {
+   "reason": "imagination write gated on valid_cmd & ~valid_obs"
+  },
+  "arch/r20_endpoint_imagination_worldmodel": {
+   "reason": "imagination write gated on missing_pair"
+  },
+  "arch/r20_imagwrite_pathstate_worldmodel": {
+   "reason": "imagination write gated on valid_cmd & ~valid_obs"
+  },
+  "arch/r20_interventional_gain_shell_worldmodel": {
+   "reason": "imagination branch gated on valid_cmd & ~valid_obs"
+  },
+  "arch/r20_native_imagwrite_observer_worldmodel": {
+   "reason": "imagination write gated on valid_cmd & ~valid_obs"
+  },
+  "arch/r21_evidencegated_imagwrite_algebraic_observer_arch": {
+   "reason": "evidence-gated imagination write gated on valid_cmd & ~valid_obs"
+  },
+  "arch/r21_sourcefused_imagwrite_pathstate": {
+   "reason": "source-fused imagination write gated on valid_cmd & ~valid_obs"
+  },
+  "stream/alias_resolved_content_codes": {
+   "reason": "resolves the move chain symbolically in code_cmds (loc[dst] = resolve(src)) and stamps the resolved content identity into the command token, so the scored read token carries the answer. Measured +0.9026 against a best-ever +0.0300. The candidate is retracted; the impl is retired so it is neither selectable nor named in a stream brief."
+  }
  }
 }

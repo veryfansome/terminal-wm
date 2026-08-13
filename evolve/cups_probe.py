@@ -240,6 +240,28 @@ def stream_coded_toks(ctx, cache, stream):
         z_sw = _coded(fn, cmds_sw, z_sw, f"role-swapped chain for {w['id']}")
         for j in range(w["r"] + 1):
             tok2[i, 2 * j] = z_sw[j]
+
+    # The two arms share a board, destinations, depth and READ COMMAND; they differ only in which
+    # content travels which route. So a coding that leaves the READ token different between them
+    # has resolved the chain and written the answer into the position being scored, and the
+    # differential cannot cancel what it never sees. Coding the MOVE tokens stays legal: the model
+    # still has to integrate them.
+    off = []
+    for i in cache["idxs"]:
+        if cache["swapped_cmds"].get(i) is None:
+            continue
+        r = wins[i]["rpos"] if "rpos" in wins[i] else 2 * wins[i]["r"]
+        d = (tok[i, r] - tok2[i, r]).abs().max().item()
+        if d > 1e-4:
+            off.append((wins[i]["id"], d))
+    if off:
+        raise ValueError(
+            f"stream.code_cmds writes chain-dependent information into the SCORED READ token: it "
+            f"differs between the native and role-swapped arms on {len(off)} of "
+            f"{len(cache['idxs'])} windows (e.g. {off[0][0]}, max abs {off[0][1]:.4g}). The read "
+            f"command string is identical in both arms, so any difference is the chain resolved "
+            f"for the model rather than by it, and comp_ca measures whether the MODEL carries "
+            f"content across hops. Code the move commands if you like; leave the read alone.")
     return tok, tok2
 
 

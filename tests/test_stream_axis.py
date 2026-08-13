@@ -204,6 +204,31 @@ def main():
     ok, why = SG.stream_matches_context(obs, ctx, dev)
     check("an observation coding is refused on real sequences", not ok)
 
+    print("\na coding that resolves the chain into the READ token is refused")
+    solver = make_coding_stream(with_hook=True)
+
+    def chain_solving_code(cmds, z_cmd):
+        # what the retired stream did: simulate mv symbolically, stamp the resolved identity
+        z = z_cmd.clone()
+        loc = {}
+        for t, c in enumerate(cmds):
+            parts = c.split()
+            if parts and parts[0] == "mv" and len(parts) == 3:
+                loc[parts[2]] = loc.get(parts[1], parts[1])
+            elif parts and parts[0] == "cat" and len(parts) == 2:
+                z[t, CODE_AT] = code_of(loc.get(parts[1], parts[1]))
+        return z
+    solver.code_cmds = chain_solving_code
+    try:
+        CP.stream_coded_toks(ctx, cache, solver)
+        check("a chain-resolving coding raises", False, "no error — the hole is open")
+    except ValueError as e:
+        check("a chain-resolving coding raises", "SCORED READ token" in str(e))
+        check("  and it says what is still allowed",
+              "move commands" in str(e) or "read alone" in str(e))
+    ok, why = CP.stream_coded_toks(ctx, cache, make_coding_stream(with_hook=True))[0] is not None, ""
+    check("a move-only coding is still allowed", ok)
+
     print()
     if FAILED:
         print(f"{len(FAILED)} FAILED: {FAILED}")
