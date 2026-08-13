@@ -1,0 +1,145 @@
+CANDIDATE  head = r5_move_substitution_paired_read   (only the head axis changed; every other
+axis is the parent's genome verbatim)
+
+--------------------------------------------------------------------------------------------
+1. WHAT I FOUND IN THE TWO PROGRAMS, AND WHAT THE CROSSOVER KEEPS
+--------------------------------------------------------------------------------------------
+
+Parent head (r18_transition_forwardmodel_consistency) supervises `net.transition_from_emb`. That
+entry point is defined on the r18 arch. The parent's arch is r23_dual_address_transport_pointer,
+which subclasses R22PrefixContentXAttention and defines no such method, so
+`cfg["_disabled"] = not callable(getattr(net, "transition_from_emb", None))` is True and the head
+returns a hard 0.0 on every step of every run. The parent's head axis is, as scored, a
+passthrough. What is worth keeping from it is not the transition loss but its SHAPE: a purely
+train-time auxiliary, ramped in with a smoothstep, that supervises the routing machinery the arch
+already has, mined from same-row triples of (earlier state, mutating command, later read), and
+that leaves the eval forward bit-identical.
+
+Partner head (r2_dualaddress_move_transport) contributes two things. Its transport memory
+duplicates, in the head, machinery the r23 arch already runs in its own forward, so I do not keep
+that. What I do keep is its mining, which is the good idea in it: from embeddings alone, with no
+labels and no command text, identify (a) content-free steps as those whose observation is a
+near-exact duplicate of many other observations in the same row, and (b) a carried-content READ
+as a step whose observation duplicates an EARLIER step's observation under a NON-duplicate
+command with at least one content-free step in between. I also keep its within-sequence,
+squared-L2, log-softmax retrieval scoring with a positive-set logsumexp.
+
+I checked that mining against evolve/jail_data/train_sample.jsonl rather than assuming it. A
+mutating step's observation is rendered as "cwd=<cwd> exit=<code>\n" with an empty body — the mv
+and the redirect steps in a real trajectory all render to the identical string and therefore to
+the identical frozen embedding, so the content-free cluster is an EXACT-duplicate cluster, which
+is why a 0.02-of-mean-distance threshold is safe. And a cups_test step ("cat
+/tmp/w/cups/usr/share/misc/magic.txt.1") renders byte-identical to the cups_expose step that
+first showed that content ("cat /tmp/w/cups/g53/f149.tmp"), under a different command, with two
+mv steps in between. So the mined pair is exactly the (expose, read) pair the scored windows are
+built out of. The same pattern holds for the cvar groups.
+
+--------------------------------------------------------------------------------------------
+2. THE MECHANISM I ADD, AND WHAT IT COMPUTES THAT NEITHER PARENT COMPUTES
+--------------------------------------------------------------------------------------------
+
+Neither program ever presents the model with two different move chains over the same board. Both
+train a single arm: "at this read, retrieve this content". The measured quantity is not a single
+arm — it is `native_hit - swap_stayed`, a PAIRED difference between the native chain and a chain
+in which two contents exchange their move positions. A model can be perfect on the native arm and
+still score exactly zero, because if it answers from the read command alone its two arms are
+identical. Nothing in either parent applies any pressure against that.
+
+This head constructs the second arm at train time, label-free, and trains the paired difference
+directly.
+
+Concretely, per training step:
+
+  a. Mine, per row, the deepest (i, j) pair: j is a read whose observation duplicates the
+     observation of the most recent earlier contentful step i under a non-duplicate command, with
+     at least one content-free (mutating) step strictly between them. Deepest = largest j - i,
+     which selects the longest move chain in the row.
+
+  b. Define ON-PATH = the content-free steps strictly between i and j. These are the commands
+     that carried the content from where it was exposed to where it is read.
+
+  c. Build a COUNTERFACTUAL copy of the row in which every on-path command embedding is replaced
+     by the command embedding of a content-free step of the SAME row taken from OUTSIDE (i, j) —
+     a real move command from a different group in the same trajectory. If the row has no
+     off-path mutating step, the donor comes from another selected row's on-path set. Nothing
+     else changes: same number of steps, same pad pattern, same positions, same observation
+     tokens, same non-mutating commands. The two arms differ ONLY in which moves were issued.
+
+  d. Run both arms through the unmodified net in ONE concatenated forward (batch dim 2R), with
+     dropout switched off for that forward so the pair is a clean comparison, then restored.
+
+  e. Score each arm's prediction at position j as a log-probability over the row's contentful
+     observations at or before j, by negative mean-squared distance / temperature — the same
+     functional form the scoring instrument uses to pick among candidates.
+
+  f. Loss = nat_weight * (-log p_native(c))                       [identity anchor]
+          + ca_weight  * relu(margin - (log p_native(c) - log p_swap(c)))   [paired term]
+          + mse_weight * ||pred_native(j) - c||^2                 [small scale anchor]
+     all times a smoothstep ramp.
+
+The paired term is the thing that is new. It computes, at train time, an unbiased stand-in for
+`native_hit - swap_stayed`: the same board, the same read command, the same destinations, the
+same depth, only the move commands re-drawn. A predictor that keys on WHICH LOCATION is read
+produces identical logits in both arms, so `log p_native - log p_swap` is exactly 0 and the hinge
+pays the full margin on every mined example — that is the largest gradient this loss can produce,
+and it is aimed precisely at the analytic non-tracker. A predictor that keys on WHERE IN THE MOVE
+ORDER a content sits also cannot satisfy it, because the substitution preserves every move
+position and changes only which move sits there. The only way to drive the hinge to zero while
+the anchor term keeps `log p_native(c)` high is for the read at j to actually depend on the
+identity of the intervening move commands — which is the quantity being measured.
+
+Note also that the aligned degenerate solution is fine: if the model becomes merely UNINFORMATIVE
+in the counterfactual arm rather than correctly picking the partner content, `swap_stayed` falls
+to about 1/K instead of 0, and comp_ca is still strongly positive. There is no version of
+satisfying this hinge that does not require reading the moves.
+
+Why the r23 arch is the right host and stays untouched: r23 already carries the machinery this
+loss needs — per-command source and destination addresses, a delta-rule transport store, and a
+pointer softmax over strictly-earlier raw observations. Its only training signal today is MSE to
+the next-observation embedding, in which the difference between two `cat` outputs is a small
+fraction of a vector dominated by shared format, so there is essentially no gradient telling the
+move gates to move anything. This head supplies the missing gradient, at exactly the positions
+where routing happened, in a scale-free (log-softmax) form where content identity is the whole
+signal.
+
+--------------------------------------------------------------------------------------------
+3. WHAT THE CODE DOES NOT DO
+--------------------------------------------------------------------------------------------
+
+- It resolves nothing. No command text is parsed anywhere; the mining is pure embedding-distance
+  clustering. Nothing about which content ends where is computed by me and handed to the model:
+  the counterfactual is an INPUT PERTURBATION over the same token stream, and the label used is
+  the observation the trajectory itself recorded at step j. The model still has to route.
+- It never touches the eval. `wrap` registers no parameters, adds no module to `net`, and does
+  NOT re-point `net.forward`. The scored forward is bit-identical to the arch's own, so there is
+  no parent-child module cycle and no forward-recursion hazard, and `leak_safe` is a pure
+  parameter-range check.
+- Nothing in the mechanism is gated on an observation being present at the scored position.
+  `aux_loss` is called only from the training loop; at scoring time this head contributes
+  literally nothing. The withheld-observation position (an odd-length token stream, last command
+  with no following observation) never reaches this code.
+
+--------------------------------------------------------------------------------------------
+4. WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+--------------------------------------------------------------------------------------------
+
+- If the content-free cluster is not detected — e.g. a row whose mutating steps number fewer than
+  three, or a root where `cd` makes the mutating observations differ by cwd so they do not form
+  one cluster — the row mines nothing and contributes nothing. Density therefore matters: if most
+  training rows mine no pair, the aux is near-dead and the candidate reduces to the parent (whose
+  head is already dead), i.e. a null result rather than a regression.
+- If the substituted donor move happens to route the same content to the same location, the
+  counterfactual label is wrong for that example and the hinge pushes in the wrong direction.
+  With distinct per-group paths this should be rare, but it is the main source of label noise.
+- The hinge could in principle be satisfied by a shallow "an unfamiliar command appeared, so be
+  uncertain" detector rather than by routing. I chose SAME-ROW donors specifically to close that:
+  the substituted command is a real move command from the same trajectory over the same style of
+  paths, so there is no out-of-distribution cue to key on. If the model nonetheless finds one,
+  the candidate will look good on this loss and not move comp_ca.
+- Cost. The extra concatenated forward is over 2R rows with R = min(ceil(0.5*B), 24), so roughly
+  one extra full-batch forward and backward per step under the default batch size — call it about
+  2x step time, unmeasured, since I cannot run anything here. If that does not fit the step
+  budget, `row_frac` and `max_rows` are the two knobs that scale it down linearly.
+- `net.eval()` around the aux forward assumes the arch has no batch-norm-like state that eval
+  mode would change. The archs in this project use dropout only, so this is safe for them, but it
+  is an assumption a different arch could break.

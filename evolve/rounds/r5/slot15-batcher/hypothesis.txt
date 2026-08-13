@@ -1,0 +1,116 @@
+CANDIDATE: batcher = r5_board_matched_role_contrast_blocks
+AXES CHANGED: batcher only. objective / arch / optim / target / stream / head are the parent's,
+unchanged, so the measurement attributes any difference to batch composition.
+
+WHAT THE TWO PARENTS DO, AND WHAT I KEPT
+----------------------------------------
+Parent (r2_routed_collision_depth_batcher) replays each training sequence's commands through a
+symbolic tracker to label every read with the number of hops that routed its content there, then
+builds collision buckets keyed by (image, normalized read path, hop count), picking buckets with a
+Boltzmann tilt toward deep hop counts and members with a tilt toward sequences that have many
+routed reads. Kept verbatim in spirit: the symbolic replay, the exp(depth_beta * depth) bucket
+tilt, the size^size_pow bucket tilt, the (1 + routed-read demand) member tilt, and the annealed
+hard fraction.
+
+Crossover partner (r6_sysblock_hardneg_curriculum) anneals batch composition from uniform toward
+whole-system blocks — a small number of images per batch — to densify same-system in-batch
+negatives. Kept verbatim as a block source: with probability img_share a block is drawn by
+choosing n_block_images images size-weighted without replacement and sampling the block from their
+union, with the same annealed hard fraction. The partner's tuned values (hard_frac_max 0.75,
+n_block_images 1, ramp_frac 0.3) are carried over.
+
+WHAT IS NEW — THE MECHANISM NEITHER PARENT COMPUTES
+---------------------------------------------------
+Both parents key their buckets on quantities that are IDENTICAL in the two arms of the scored
+difference. The metric is native_hit - swap_stayed over the same board: the role-swapped arm keeps
+the board, the destinations, the depth and the read location, and exchanges only WHICH CONTENT
+plays which part in the move chain. A bucket keyed on (image, read path, hop count), as the parent
+uses, is therefore a set of sequences that agree on the swap-invariant part and are unconstrained
+— and typically homogeneous — on the part the swap actually permutes. Nothing in either parent
+separates those two halves.
+
+This impl separates them explicitly. The tracker is extended from hop COUNTING to content
+IDENTITY: each read of a path no thread occupies starts a content thread; each mv / cp / redirect
+carries the thread sitting at the source to the destination and increments its hop count; the set
+of directories a thread touches is unioned so one trajectory (which contains several independent
+groups — a cups mv chain plus several cvar accumulator groups) splits into connected windows. For
+the sequence's deepest window the tracker emits two DISJOINT keys:
+
+  BOARD = (number of threads that move, number of moves in the window, the window's maximum hop
+           count, (digit-normalized 3-component root of the read path, its component count))
+  ROLE  = (the read thread's OWN hop count, its birth rank among the moving threads, and a 0/1
+           flag for whether it is the thread that made the window's opening move)
+
+BOARD holds what a role swap leaves fixed; ROLE holds what a role swap permutes. Buckets are keyed
+by BOARD alone, and a block draws its members ROUND-ROBIN over the DISTINCT ROLE keys present in
+that bucket, tilting only inside a role by the parent's demand weight. The result is that one
+batch contains, over a fixed board geometry, sequences in which the tested content is the deep one
+and sequences in which it is the shallow one; sequences in which it was exposed first and in which
+it was exposed second; sequences in which it made the opening move of the chain and in which it
+did not.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+------------------------------------------
+The objective in this genome (r22_exact_target_equivalence_quotient) is a listwise in-batch loss:
+every step of every sequence in the batch is a row and every other row's target is a candidate.
+Under board-matched, role-differing membership, the read row of sequence A must place A's content
+nearer than the content of a board-matched sequence B whose read command has the same normalized
+path shape and whose window has the same move count, same depth and same number of movers. A model
+that answers from the read LOCATION cannot separate those rows at all. A model that answers from a
+position-in-the-chain rule — "the content that moved first", "the content exposed first", "the
+deeper content" — is contradicted inside the batch, because the block deliberately contains rows
+where that rule points at a different content. The only in-batch-separating feature left is which
+content the chain actually carried to the read location. That is exactly the quantity the paired
+difference measures: the location-keyed predictor contributes structurally zero to comp_ca, and
+the position-keyed predictor is the analytic non-tracker band the run reports beside the score.
+Training pressure that specifically penalizes both of those, while leaving content tracking as the
+only way to reduce the loss, is why I expect a step change rather than a nudge.
+
+A second, smaller change: the uniform remainder of every batch is drawn WITHOUT replacement from a
+reshuffled permutation (random reshuffling) rather than iid torch.randint. Under a fixed step
+budget this gives exact epoch coverage and lower sampling variance than with-replacement SGD;
+both parents draw iid.
+
+MEASURED HERE, AND WHAT IS NOT MEASURED
+---------------------------------------
+Checked against evolve/jail_data/train_sample.jsonl (24 real training trajectories): the tracker's
+recovered move count and window depth agree with the withheld generator metadata on every one of
+the 24 (e.g. sequence 3 -> 8 moves, depth 5, 2 movers vs. the file's R=8, depth=5, two movers;
+sequence 22 -> 8 moves, depth 4, 3 movers vs. R=8, depth=4, three movers). The batcher's contract
+(exactly bs indices, in range, deterministic given seed, seed-sensitive, no global RNG, fit never
+mutated) was exercised with a stand-in RNG at bs in {8, 64, 960, 1000}. Batch-composition
+enrichment was measured only on an artificially replicated corpus, where in-batch same-board pair
+mass roughly doubled over uniform; that number is not a claim about the real split, whose board
+diversity is much higher and where the enrichment should be larger. NOTHING about the effect on
+comp_ca has been measured — no training was run in this jail.
+
+WHERE IT IS AND IS NOT ACTIVE
+-----------------------------
+This axis runs only inside the training loop, choosing which sequence indices to train on. It puts
+nothing into the model's input: the model still sees exactly the interleaved (cmd, obs) embeddings
+baseline_interleave builds, and the resolved routing computed here never reaches a token, a target
+or a scoring path. The tracker reads a sequence's COMMAND STRINGS only — never an observation, an
+embedding, or an `ok` flag — so it is not gated on an observation being present and cannot be
+switched off at a position whose observation is withheld. It also never runs at scoring time.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+-------------------------------------------
+1. Board buckets are too sparse. If the real training split has so many distinct BOARD keys that
+   few buckets hold twelve members, blocks degrade toward single-role picks and the impl collapses
+   to something close to the parent. The board key was deliberately coarsened (movers, move count,
+   max depth, path root/arity — not the depth multiset, not the literal file name) to avoid this,
+   but I could not count real buckets from inside the jail.
+2. Board matching is not the binding constraint. If the r22 listwise loss is already saturated by
+   the ~1900 rows a batch produces, adding a few dozen genuinely confusable candidates may not
+   change the gradient enough to matter.
+3. Concentration hurts. group_size=12 with hard_frac_max=0.75 puts roughly three boards across
+   thirty-six of sixty-four sequences late in training. If the arch and the head need broad
+   trajectory diversity per step more than they need hard board-matched negatives, this trades
+   away more than it buys; the annealed ramp only protects the opening 30% of training.
+4. The role axes are the wrong ones. If the model's shortcut is neither first-mover, nor
+   exposure order, nor own-depth — some other position statistic — the round-robin does not
+   contradict it and the contrast is wasted effort.
+5. The tracker mislabels. Trajectories whose windows interleave through a shared directory would
+   be merged by the union-find into one window, inflating the move count and blurring the board.
+   On the 24 real samples the cups window and each cvar group separated cleanly, but that is 24
+   sequences from a training split I cannot see.

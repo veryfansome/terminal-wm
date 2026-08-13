@@ -1,0 +1,168 @@
+CANDIDATE: head = r5_routed_read_address_binding   (axes changed: head only)
+
+WHAT I READ IN THE DATA FIRST
+-----------------------------
+evolve/jail_data/train_sample.jsonl, row 1 (alpine:latest, 26 steps). A cups window is laid out
+as: N `cat <path_i>` exposures whose observation IS the content; then `mv <src> <dst>` steps whose
+observation is EMPTY (`output: ""`, exit 0) so that render_obs gives literally "cwd=/ exit=0\n";
+then one `cat <final_loc>` test whose observation is the content that the chain routed there. The
+cvar arm has the same shape with `cat s > out.dat` redirections instead of mv. Two facts follow
+that the whole design rests on:
+
+  (1) Every mutating step's observation embedding is the SAME vector (empty output, same cwd), so
+      mutating steps are the steps whose observation is a near-duplicate of many others. In that
+      row 8 of 26 steps are mutating (cluster size 7); every real content appears at most 3 times
+      (cluster size <= 2). A cluster-size threshold separates them with margin.
+  (2) A routed read is a step whose observation duplicates an EARLIER step's observation while its
+      COMMAND differs, with at least one mutating step in between. `cat /tmp/w/cups/g53/f149.tmp`
+      (expose) -> `mv /tmp/w/cups/g53/f149.tmp /tmp/w/cups/usr/share/misc/magic.txt.1` ->
+      `cat /tmp/w/cups/usr/share/misc/magic.txt.1` (test) is exactly that pattern, and so is
+      `cat g3/s1.dat` -> `cat g3/s1.dat > g3/out.dat` -> `cat g3/out.dat`. A same-command re-read
+      (`cat g0/s1.dat` twice) is excluded by the command-difference test, which is the point: that
+      one is solvable by name lookup and is not what is scored.
+
+Everything my aux uses is mined from the batch's own embeddings by these two tests. Nothing parses
+a command, nothing resolves a chain in Python, and nothing is added to the model's input at any
+time. The mined indices only choose WHICH training positions get a loss and what that loss's
+endpoint is.
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+------------------------------------------
+The two programs I was given share the same head impl, so the crossover has to be expressed
+between their distinctive arch-side mechanisms, lifted into one arch-independent head:
+
+  from the parent (r23_dual_address_transport_pointer): the DUAL ADDRESS - one shared nonlinear
+  layer over a command's raw 768-d embedding producing two separate unit keys, a SOURCE address
+  read from and a DESTINATION address written to, with a delta-rule content store.
+
+  from the partner (r18_pathstate_latent_transition_worldmodel): the LATENT TRANSITION - the value
+  written back is not a raw copy but a command-conditioned affine edit of the content just read,
+  s_pre * (1 + tanh(gamma(cmd)) * gscale) + beta(cmd), the same FiLM form as that arch's
+  `_transition`.
+
+In `_AddressTransportStore.run` these are one recurrence: read s_i at a_src[i], form
+edited = s_i*(1+gamma_i)+shift_i, write move_i*edited + (1-move_i)*obs_i at a_dst[i] under the
+delta rule (v - current) with a decay, inject sigmoid(read_gate)*out_proj(read) into the arch's
+command-position prediction. out_proj is zero-initialised in both weight and bias, so the wrapped
+net's forward output is bit-identical to the unwrapped net's at step 0.
+
+WHAT IS NEW - THE MECHANISM NEITHER PARENT COMPUTES
+---------------------------------------------------
+Both parents' head aux supervises CONTENT: it asks a transition operator to reconstruct a future
+observation (cosine + MSE). Nothing anywhere in either program supervises ADDRESSING. That is the
+gap I am attacking, and here is why I think it is the binding one. The command embeddings are
+frozen mean-pooled encoder vectors. emb("cat p") and emb("mv p q") are two very differently shaped
+pooled vectors, and mean pooling largely destroys the order of p and q inside "mv p q". For a
+transport memory to work at all, the network must learn a nonlinear map that pulls the FIRST path
+out of a two-path command into a key that coincides with the key it builds from the single-path
+command naming that same path, and the SECOND path into a key coinciding with the destination
+read's key. Under MSE-to-next-observation (and under a contrastive objective on content) there is
+no term that says so. The address heads exist and are never told what to mean.
+
+The new term says it, weakly supervised, endpoint-only. For each mined pair (i = the earlier step
+whose observation is the content, j = the routed read), the loss runs a soft state-tracking
+recurrence over the intervening steps IN ADDRESS SPACE:
+
+    f <- a_dst[i]                                      (where i's content was stored)
+    for t = i+1 .. j-1, over valid steps:
+        g_t = sigmoid( ( <a_src[t], f> - thr ) / gate_temp )     (does step t pick up what f holds?)
+        f   <- unit( (1 - g_t) * f + g_t * a_dst[t] )            (if so, f moves to t's destination)
+    loss_fwd = cross_entropy( <a_src[.], f> / addr_temp , target = j )
+
+and the mirror recurrence backwards from a_src[j] toward a_dst[i]. The candidate set of the
+cross-entropy is every valid step's address in the same row, so the negatives are the other
+locations that window actually touched.
+
+Three properties I want a reviewer to check in the code:
+
+ * It is depth-correct. The recurrence composes an arbitrary number of hops, so a depth-3 or
+   depth-4 chain p->q->r->s is satisfied by opening the gate at each of the three moves in turn.
+   A single-hop "which mutation moved it" formulation would be wrong here - it would drag the
+   address of an intermediate location onto the address of the final one - and I rejected that
+   version for exactly this reason. The eligible slice is reported as d3 60 / d4+ 29, so
+   single-hop supervision would have been supervising the wrong thing on almost every window.
+
+ * The degenerate solution is structurally penalised, not just discouraged. The lazy way to
+   satisfy loss_fwd is to leave the gates shut and instead make a_src[j] equal a_dst[i]. But the
+   cross-entropy's candidate set includes position i itself, and the separate agreement term
+   (self_addr_weight) pulls a_src[i] toward a_dst[i] on every contentful step, so under the lazy
+   solution the logits at i and at j are equal and the loss floors at log 2. Beating that floor
+   requires f to actually move away from a_dst[i], and the only parameterised route for f to move
+   is through g_t, which in turn requires <a_src[t], a_dst[i]> to grow for the step t that really
+   is the move. That is the gradient I want.
+
+ * Steps between i and j that are not moves are harmless. A read command has a_src == a_dst (the
+   agreement term), so if its gate opens the update f <- unit((1-g) f + g a_dst[t]) is a no-op.
+   That is why the recurrence ranges over all valid intervening steps rather than over the
+   mutation-classified ones - the classifier is used only to decide that a pair is routed at all
+   (n_mut >= 1), never to build the chain.
+
+Alongside it, on the same mined positions, a within-sequence squared-L2 InfoNCE in exactly the
+eval's geometry: logits = -||q - cand||^2 / (D * cand_temp) over the contentful observations seen
+so far in that row, positives = the duplicate set of the answer. It is applied to the arch's final
+prediction (pred_weight) and to the store's read (read_weight), with a small MSE anchor. Examples
+are weighted by the number of mutating steps between i and j, so deeper routings dominate the
+gradient. This is the second thing neither parent has: the training loss is MSE to a 768-d
+observation, in which the handful of directions that distinguish content A from content B is a
+negligible share of the variance, while the score is a top-1 discrimination among the other
+contents on the same board. The InfoNCE turns the loss at precisely the scored kind of position
+into that discrimination.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+------------------------------------------
+comp_ca is native_hit minus swap_stayed on the same board with the same destinations and the same
+depth, differing only in which source path sits in which move command. A model that answers from
+the name being read is exactly zero. A model that answers from move ORDER cancels only in
+expectation. The only thing that survives both arms is a source-path-to-content binding carried
+through the chain. Both terms above act on that binding and on nothing else: the address loss
+teaches the source/destination decomposition of a move command to agree with the addresses of the
+single-path commands naming those paths, and the contrastive loss makes the retrieved content
+discriminable from the co-resident contents. Neither term can be satisfied by reading the name at
+the query position, because the query position's own address is the same in both arms.
+
+WHERE IT IS MEASURED, AND WHY IT IS NOT SWITCHED OFF THERE
+----------------------------------------------------------
+The scored position is a command whose observation is withheld. Nothing in the forward path is
+gated on an observation being present at the position being predicted. In the store's recurrence
+the read at step i is taken BEFORE step i's write, so read_i depends only on obs_0..obs_{i-1}; the
+move/store gates and `live` consume obs_i but affect only the write at i, hence only reads at
+i+1 and later. The injected contribution at step i is sigmoid(read_gate(cmd_feat_i)) *
+out_proj(read_i) - both factors are functions of the command embedding and of strictly earlier
+observations. This is also what makes the stream's leakage probe pass: corrupting obs_3 cannot
+change the prediction at command positions 0..3. The store runs with n_cmd = (L+1)//2 and
+n_pair = L//2 and pads the observation side with zeros, so an odd-length stream ending on a
+command is handled without the last position needing an observation. The aux loss is train-time
+only; wrap registers the module on the net before the optimizer is built, holds the base net only
+through the saved bound `orig_forward` in a closure (never as a submodule, so `.to(device)` cannot
+recurse), and re-points net.forward once, guarded against double-wrapping.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+-----------------------------------------
+ 1. If a training row contains fewer than max_dup+1 = 4 mutating steps, their observation cluster
+    is too small to cross the threshold and no pair is mined in that row. The row I read has 8, but
+    I have read one row. If most rows in the composed blend carry only two or three mv steps, the
+    mined set shrinks and the aux degenerates toward zero - a silent no-op, not a corruption.
+ 2. If the frozen pooled embedding of "mv p q" genuinely carries no recoverable ordering between p
+    and q, no loss on the address heads can create it, and the address term will settle at a
+    partial optimum where a_src and a_dst of a move command both point at a mixture of the two
+    locations. The chain recurrence would then track a blurred address and the endpoint CE would
+    plateau near its lazy-solution floor.
+ 3. The InfoNCE could be satisfied by a positional shortcut - "answer with the content of the
+    slot that moved first" - which does not cancel across the two arms and would inflate the score
+    without the capability. I cannot prevent a trained model from finding it; I can only note that
+    the address term supplies a competing solution that is a strictly better fit to the mined
+    endpoints across windows with different move orders, and that the reported analytic band is
+    what this reading has to be checked against.
+ 4. Two transport stores now inject into the prediction (the arch's and the head's) with a total of
+    roughly 1.1M extra head parameters and an extra sequential recurrence per step. If the fixed
+    step budget is tight, the added optimisation load could cost more than the added signal buys.
+    I could not run anything from this jail, so this is unmeasured.
+
+INTERACTION WITH THE OPTIM I INHERITED
+--------------------------------------
+r18_spectral_capped_transition_readout routes to Muon any 2-D parameter of shape [key_d, x] with
+x not in {key_d, D} that has an identical-shape sibling. I set key_d = 64 (its default) and
+addr_hidden = 256 deliberately, so addr_src.weight and addr_dst.weight are [64, 256] siblings and
+receive the orthogonalised addressing update the optim was written for; out_proj.weight is [768,
+768] and falls under the spectral cap, which is a no-op at its zero initialisation (the power
+iteration on a zero matrix yields sigma = 0, below the cap).

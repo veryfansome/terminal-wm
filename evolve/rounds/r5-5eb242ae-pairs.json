@@ -1,0 +1,427 @@
+{
+ "round": "r5",
+ "slots_file": "evolve/rounds/r5-5eb242ae-slots.json",
+ "note": "operator forced to cross; partners sampled from the engine's weighted distribution under a global uniqueness constraint",
+ "slots": [
+  {
+   "slot": 0,
+   "axis": "arch",
+   "seed": "r5:0",
+   "operator": "cross",
+   "parent": "g0-08-exact-target-equivalence",
+   "cross_with": "r3-01-depthtilted-sysblock-curriculum",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r3-08-cuebalanced-routing-blocks",
+    "r2-08-routedepth-tilt-readcollision"
+   ]
+  },
+  {
+   "slot": 1,
+   "axis": "batcher",
+   "seed": "r5:1",
+   "operator": "cross",
+   "parent": "r4-13-zca-shrunk-target",
+   "cross_with": "r4-07-complement-address-transport",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r2-07-dual-address-transport",
+    "r2-00-pointer-transport-memory",
+    "r4-03-relocation-address-ring"
+   ]
+  },
+  {
+   "slot": 2,
+   "axis": "head",
+   "seed": "r5:2",
+   "operator": "cross",
+   "parent": "r4-17-trajectory-transport-contrast",
+   "cross_with": "g0-08-exact-target-equivalence",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r4-18-twotimescale-router-polyak",
+    "r2-08-routedepth-tilt-readcollision"
+   ]
+  },
+  {
+   "slot": 3,
+   "axis": "objective",
+   "seed": "r5:3",
+   "operator": "cross",
+   "parent": "r4-08-hopdepth-scaffold-stratified",
+   "cross_with": "r4-09-chainlink-route-transport",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "g0-14-pathstate-rssm",
+    "r4-07-complement-address-transport"
+   ]
+  },
+  {
+   "slot": 4,
+   "axis": "optim",
+   "seed": "r5:4",
+   "operator": "cross",
+   "parent": "r4-00-backward-multihop-pointer",
+   "cross_with": "r3-02-occupancy-routed-copy",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r4-01-routing-depth-systematic",
+    "r4-09-chainlink-route-transport"
+   ]
+  },
+  {
+   "slot": 5,
+   "axis": "stream",
+   "seed": "r5:5",
+   "operator": "cross",
+   "parent": "r4-06-ridge-zca-whitened",
+   "cross_with": "g0-13-obspresent-imagination",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r4-09-chainlink-route-transport",
+    "r2-08-routedepth-tilt-readcollision"
+   ]
+  },
+  {
+   "slot": 6,
+   "axis": "target",
+   "seed": "r5:6",
+   "operator": "cross",
+   "parent": "r3-03-fwl-orthogonalized-ring",
+   "cross_with": "r4-06-ridge-zca-whitened",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r2-03-routed-recall-namedecoy",
+    "r4-00-backward-multihop-pointer"
+   ]
+  },
+  {
+   "slot": 7,
+   "axis": "arch",
+   "seed": "r5:7",
+   "operator": "cross",
+   "parent": "r4-09-chainlink-route-transport",
+   "cross_with": "g0-14-pathstate-rssm",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "g0-08-exact-target-equivalence",
+    "r4-04-tailcycle-snapshot-average"
+   ]
+  },
+  {
+   "slot": 8,
+   "axis": "batcher",
+   "seed": "r5:8",
+   "operator": "cross",
+   "parent": "r4-07-complement-address-transport",
+   "cross_with": "r2-08-routedepth-tilt-readcollision",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r3-06-within-sequence-contrast",
+    "r3-05-srcdst-hashslot-coding"
+   ]
+  },
+  {
+   "slot": 9,
+   "axis": "head",
+   "seed": "r5:9",
+   "operator": "cross",
+   "parent": "r3-03-fwl-orthogonalized-ring",
+   "cross_with": "r2-02-dualaddress-move-transport",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "g0-13-obspresent-imagination",
+    "r2-01-routed-collision-depth"
+   ]
+  },
+  {
+   "slot": 10,
+   "axis": "objective",
+   "seed": "r5:10",
+   "operator": "cross",
+   "parent": "r3-09-rename-registry-occupancy",
+   "cross_with": "r2-07-dual-address-transport",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r4-06-ridge-zca-whitened",
+    "r4-01-routing-depth-systematic"
+   ]
+  },
+  {
+   "slot": 11,
+   "axis": "optim",
+   "seed": "r5:11",
+   "operator": "cross",
+   "parent": "r4-17-trajectory-transport-contrast",
+   "cross_with": "r4-07-complement-address-transport",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r4-15-distinct-blocked-transport",
+    "r4-12-pathslot-dualaddress-code"
+   ]
+  },
+  {
+   "slot": 12,
+   "axis": "stream",
+   "seed": "r5:12",
+   "operator": "cross",
+   "parent": "r2-02-dualaddress-move-transport",
+   "cross_with": "r4-10-boardpair-swap-difference",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r4-09-chainlink-route-transport",
+    "r4-16-erasing-dualaddress-transport"
+   ]
+  },
+  {
+   "slot": 13,
+   "axis": "target",
+   "seed": "r5:13",
+   "operator": "cross",
+   "parent": "r4-13-zca-shrunk-target",
+   "cross_with": "r4-16-erasing-dualaddress-transport",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r2-07-dual-address-transport",
+    "r4-10-boardpair-swap-difference",
+    "r2-00-pointer-transport-memory"
+   ]
+  },
+  {
+   "slot": 14,
+   "axis": "arch",
+   "seed": "r5:14",
+   "operator": "cross",
+   "parent": "r2-08-routedepth-tilt-readcollision",
+   "cross_with": "g0-05-dualpre-transition",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r2-03-routed-recall-namedecoy",
+    "r3-03-fwl-orthogonalized-ring"
+   ]
+  },
+  {
+   "slot": 15,
+   "axis": "batcher",
+   "seed": "r5:15",
+   "operator": "cross",
+   "parent": "r4-07-complement-address-transport",
+   "cross_with": "g0-15-prefix-content-xattention",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r3-02-occupancy-routed-copy",
+    "r2-06-shrunk-zca-content"
+   ]
+  },
+  {
+   "slot": 16,
+   "axis": "head",
+   "seed": "r5:16",
+   "operator": "cross",
+   "parent": "r4-15-distinct-blocked-transport",
+   "cross_with": "r3-06-within-sequence-contrast",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "g0-12-obs-occlusion-denoising",
+    "r4-19-rolesplit-srcdst-channel"
+   ]
+  },
+  {
+   "slot": 17,
+   "axis": "objective",
+   "seed": "r5:17",
+   "operator": "cross",
+   "parent": "r2-02-dualaddress-move-transport",
+   "cross_with": "r4-05-role-bound-path",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "g0-02-causal-variance-film",
+    "r4-12-pathslot-dualaddress-code"
+   ]
+  },
+  {
+   "slot": 18,
+   "axis": "optim",
+   "seed": "r5:18",
+   "operator": "cross",
+   "parent": "r4-02-slotdisplacement-transport-roles",
+   "cross_with": "r2-02-dualaddress-move-transport",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r3-03-fwl-orthogonalized-ring",
+    "r4-07-complement-address-transport"
+   ]
+  },
+  {
+   "slot": 19,
+   "axis": "stream",
+   "seed": "r5:19",
+   "operator": "cross",
+   "parent": "g0-14-pathstate-rssm",
+   "cross_with": "r4-18-twotimescale-router-polyak",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r2-03-routed-recall-namedecoy",
+    "r4-12-pathslot-dualaddress-code"
+   ]
+  },
+  {
+   "slot": 20,
+   "axis": "target",
+   "seed": "r5:20",
+   "operator": "cross",
+   "parent": "r4-14-backchain-pointer-resolution",
+   "cross_with": "r4-03-relocation-address-ring",
+   "inspirations": [
+    "r4-13-zca-shrunk-target",
+    "r2-07-dual-address-transport",
+    "r2-08-routedepth-tilt-readcollision",
+    "g0-12-obs-occlusion-denoising"
+   ]
+  },
+  {
+   "slot": 21,
+   "axis": "arch",
+   "seed": "r5:21",
+   "operator": "cross",
+   "parent": "r4-13-zca-shrunk-target",
+   "cross_with": "r4-11-flatbasin-lsam-tailavg",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r2-07-dual-address-transport",
+    "r4-05-role-bound-path",
+    "r3-09-rename-registry-occupancy"
+   ]
+  },
+  {
+   "slot": 22,
+   "axis": "batcher",
+   "seed": "r5:22",
+   "operator": "cross",
+   "parent": "r4-01-routing-depth-systematic",
+   "cross_with": "r2-02-dualaddress-move-transport",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r2-07-dual-address-transport",
+    "g0-15-prefix-content-xattention"
+   ]
+  },
+  {
+   "slot": 23,
+   "axis": "head",
+   "seed": "r5:23",
+   "operator": "cross",
+   "parent": "r4-14-backchain-pointer-resolution",
+   "cross_with": "g0-12-obs-occlusion-denoising",
+   "inspirations": [
+    "r4-13-zca-shrunk-target",
+    "r2-07-dual-address-transport",
+    "g0-16-retrieval-composition",
+    "r3-03-fwl-orthogonalized-ring"
+   ]
+  },
+  {
+   "slot": 24,
+   "axis": "objective",
+   "seed": "r5:24",
+   "operator": "cross",
+   "parent": "r4-12-pathslot-dualaddress-code",
+   "cross_with": "r3-05-srcdst-hashslot-coding",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r2-06-shrunk-zca-content",
+    "r4-06-ridge-zca-whitened"
+   ]
+  },
+  {
+   "slot": 25,
+   "axis": "optim",
+   "seed": "r5:25",
+   "operator": "cross",
+   "parent": "r4-12-pathslot-dualaddress-code",
+   "cross_with": "r4-14-backchain-pointer-resolution",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "g0-15-prefix-content-xattention",
+    "g0-14-pathstate-rssm"
+   ]
+  },
+  {
+   "slot": 26,
+   "axis": "stream",
+   "seed": "r5:26",
+   "operator": "cross",
+   "parent": "r3-06-within-sequence-contrast",
+   "cross_with": "g0-05-dualpre-transition",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r2-01-routed-collision-depth",
+    "g0-15-prefix-content-xattention"
+   ]
+  },
+  {
+   "slot": 27,
+   "axis": "target",
+   "seed": "r5:27",
+   "operator": "cross",
+   "parent": "r3-02-occupancy-routed-copy",
+   "cross_with": "g0-08-exact-target-equivalence",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r4-18-twotimescale-router-polyak",
+    "g0-02-causal-variance-film"
+   ]
+  },
+  {
+   "slot": 28,
+   "axis": "arch",
+   "seed": "r5:28",
+   "operator": "cross",
+   "parent": "r3-06-within-sequence-contrast",
+   "cross_with": "r2-09-routed-content-alignment",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "r4-00-backward-multihop-pointer",
+    "r2-08-routedepth-tilt-readcollision"
+   ]
+  },
+  {
+   "slot": 29,
+   "axis": "batcher",
+   "seed": "r5:29",
+   "operator": "cross",
+   "parent": "r4-12-pathslot-dualaddress-code",
+   "cross_with": "r4-13-zca-shrunk-target",
+   "inspirations": [
+    "r4-14-backchain-pointer-resolution",
+    "r4-13-zca-shrunk-target",
+    "g0-08-exact-target-equivalence",
+    "g0-16-retrieval-composition"
+   ]
+  }
+ ]
+}

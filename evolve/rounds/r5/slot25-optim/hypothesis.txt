@@ -1,0 +1,131 @@
+CANDIDATE: optim = r5_roletied_address_polyak_readout
+Genome otherwise = the parent's (r3 objective / r23 dual-address transport-pointer arch / identity
+target / r2 routedepth batcher / r4 pathslot dual-address code stream / r18 transition-consistency
+head). Only the optim axis changes.
+
+WHAT THE CROSSOVER IS
+
+The two programs I was given already share this axis: both run
+r18_spectral_capped_transition_readout. So the mechanism to combine is not on the optim axis of
+either genome -- it is in the two archs, and the honest crossover is to install the partner's
+ADDRESSING PARAMETERISATION into the parent's arch from the optimizer, without touching the arch.
+
+Parent's arch (r23): two INDEPENDENT address heads, addr_src.weight and addr_dst.weight, both
+Linear(addr_hidden=256 -> key_d=64, bias=False), applied to the same shared feature vector
+a_h = GELU(addr_in(LayerNorm(cmd_raw))). Call them W_a, W_b in R^{64x256}.
+
+Partner's arch (r24): ONE shared address projection addr_proj, used twice through two learned
+diagonal role gates:
+    addr_first = addr_proj(a * sigmoid(role_src)),  addr_second = addr_proj(a * sigmoid(role_dst)).
+Written as matrices that is exactly
+    W_a = P diag(s),   W_b = P diag(t),   P in R^{64x256}, s,t in R^{256}.
+Equivalently: for every hidden feature j, column j of W_a and column j of W_b are COLLINEAR.
+
+That is the partner's best idea, and it is a strictly structural statement about a pair of weight
+matrices -- so an optimizer can impose it on the parent's untied pair as a post-step projection.
+
+MECHANISM 1 -- ROLE TIE (new; neither parent computes it)
+
+After every optimizer step, for each shape group among the addressing candidates that has EXACTLY
+two members (in this genome that is the [64,256] group = addr_src.weight, addr_dst.weight; the
+[64,192] group inherited from the r18 trunk has six members and is left alone), the impl computes,
+column by column, the best column-wise rank-one factorisation of the pair:
+
+    for column j:  M_j = [u_j , v_j] in R^{64x2}
+    A = u.u , C = v.v , B = u.v ;  h = (A-C)/2 ;  disc = sqrt(h^2 + B^2)
+    top eigenvector of the 2x2 Gram is (h+disc, B)  (fallback (0,1) when both are ~0)
+    p_j = normalize( (h+disc) u_j + B v_j )
+    u_j* = (p_j.u_j) p_j ,   v_j* = (p_j.v_j) p_j
+
+p_j is the top left singular vector of M_j and (u_j*, v_j*) is the exact best rank-one
+approximation of M_j in Frobenius norm -- I checked the closed form against a brute-force search
+over directions in span(u,v); it matches to 1e-6. The pair is then moved a fraction lam toward
+(u*,v*): W <- (1-lam) W + lam W*, with lam ramped from 0 to 0.15 over the first 5% of steps.
+Because the pull is applied every step, the pair sits essentially on the manifold
+{W_a = P diag(s), W_b = P diag(t)} within a few tens of steps and stays there: this is projected
+gradient descent onto a nonconvex set with a closed-form projector (POCS with an exact projection,
+the same device as hard-thresholding / rank-projected training outside this domain), not a penalty.
+
+WHAT IT COMPUTES THAT NEITHER PARENT COMPUTES: the parent's optimizer never couples the two
+address heads at all (Muon orthogonalises each one's update independently); the partner's arch has
+the coupling but is a different arch, without r23's delta-rule transport store, its erase term, or
+r4's lexical path code in the command embedding. This candidate is the first thing in either
+lineage that runs r23's transport memory with a SHARED address column space.
+
+WHY THAT SHOULD MOVE THE MEASURED QUANTITY: the scored quantity is whether a read at a location
+returns the content the move chain actually routed there. In r23 that requires, mechanically, that
+the address the model WRITES to when it executes `mv X Y` equals the address it READS from when a
+later command mentions Y as its source. Those two addresses are produced by two different matrices
+(W_b then W_a) from the same feature vector, so with untied heads the model must discover a
+64x256-dimensional agreement between two free matrices from a gradient that only reaches them
+through a zero-initialised (D,D) readout behind a sigmoid gate. With the tie, W_a and W_b differ
+only by 256 per-feature scalars over one shared projection P, so agreement between the two address
+spaces is 256 degrees of freedom instead of 16384, and any progress P makes on separating distinct
+paths is shared by both roles instead of having to be learned twice. r4's stream makes this
+learnable at all -- it writes a 96-bit Rademacher hash of the source path and of the destination
+path into two fixed disjoint coordinate blocks of every command embedding, so "same path" is a
+linearly available fact -- and the tie is what lets one projection serve both blocks.
+
+MECHANISM 2 -- TAIL AVERAGE OF THE RETURNED WEIGHTS (new)
+
+From 45% of the step budget onward the impl accumulates a bias-corrected exponential moving average
+of EVERY parameter with horizon 12% of the budget, and at the final optimizer step writes the
+average back into the live parameters (then re-applies the role tie and the spectral cap, so the
+returned weights sit on the same constraints the trajectory did). This is Polyak-Ruppert tail
+averaging / SWA. It is legitimate here because the harness trains for a fixed known step count and
+returns the very net the optimizer holds, and because the model has no BatchNorm -- only LayerNorm,
+whose statistics are computed per forward pass -- so the averaged weights need no recalibration.
+
+Coupled to it, the LR floor is raised from the parent's 0.05 to 0.20 of base (same warmup 0.04,
+same hold 0.30, same cosine shape). The classical result is that a decayed final iterate and an
+averaged high-LR iterate reach comparable noise, but the averaged one keeps exploring at a higher
+step size for longer. The address heads are the slowest thing in this genome to learn (their
+gradient is gated by a zero-init readout early on), so buying them a larger late-training step size
+at no variance cost is the point of the pairing.
+
+WHY THAT SHOULD MOVE THE MEASURED QUANTITY: comp_ca is a mean over ~89 windows of a difference of
+two argmin picks. A pick flips or does not; the estimator has no smoothing of its own, so the
+iterate-to-iterate jitter of the final weights lands directly on the score and is a large part of
+the run-to-run variation the brief warns about. Averaging the tail removes that jitter from the
+returned model. This mechanism buys reliability of the measured number, not a new capability -- the
+capability claim is Mechanism 1.
+
+NOTHING IS GATED ON AN OBSERVATION BEING PRESENT. Both mechanisms act on weights between optimizer
+steps. They are identical at the scored position, where the read command's own observation is
+withheld, and at every training position. Nothing about the move chain is resolved in my code and
+nothing is added to the model's input: the impl parses no commands, sees no batch, and never
+touches tok/tgt.
+
+HOW TO FALSIFY IT AGAINST MY CODE
+- The tie fires only on a shape group of exactly two among {p.ndim==2, p.shape[0]==key_d,
+  p.shape[1] not in (key_d, D)}. If r23's addr_hidden or key_d is not the default, or if the
+  unshown r22 base contributes a third [64,256] matrix, the group is not size 2 and the tie is
+  inert -- the candidate then degenerates to the parent plus tail averaging plus the higher floor.
+  This is a real failure mode, not a hypothetical.
+- The tie is symmetric in the pair, so it does not matter which of the two matrices is src and
+  which is dst, and it does not require the impl to know their names (it cannot: make() receives
+  bare tensors).
+- The average is committed exactly when the impl has seen `steps` calls to step(); if the harness
+  aborts early on a non-finite loss, commit never runs and the returned net is the last iterate.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+1. If r23's two address heads already agree well enough without the tie, collinearity only removes
+   capacity and the score drops. The tie is a hard constraint at lam=0.15 applied every step, so
+   there is no soft escape from it.
+2. If the useful configuration of the two heads is genuinely NOT of the form P diag(s), P diag(t) --
+   for example if addr_in's hidden features that carry the source-path hash and those that carry
+   the destination-path hash need DIFFERENT column directions in address space to name the same
+   path -- then the tie forbids the solution the parent would otherwise have found. The tie makes
+   a shared address space easy to express; it does not make it correct.
+3. If the late-training iterate is still far from a basin at 45%-100% of the budget, the tail
+   average is biased rather than variance-reducing, and raising the floor to 0.20 will have made
+   that worse rather than better. The two halves of Mechanism 2 stand or fall together.
+4. If the r18 head's forward-model aux keeps the trunk moving fast right to the end of training,
+   the averaging window is not stationary and the same bias applies.
+
+UNMEASURED. I could not run anything: there is no torch in this jail. The closed-form 2x2
+projection was verified numerically in pure Python against brute force; everything else is argued
+from the code, not from a run. Cost is negligible either way -- the tie is a handful of column
+reductions on a 64x256 matrix per step, and the average is one fused multiply-add per parameter
+tensor over the last 55% of steps, against an arch that already runs a python-level recurrence over
+~32 steps per batch.

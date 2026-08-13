@@ -1,0 +1,24 @@
+{
+  "chunks": {
+    "objective": {"impl": "r4_trajectory_transport_contrast"},
+    "arch": {"impl": "r23_dual_address_transport_pointer", "params": {}},
+    "optim": {
+      "impl": "r5_lagged_adaptive_sharpness_muon_cap",
+      "params": {},
+      "bs": 64
+    },
+    "target": {"impl": "identity"},
+    "batcher": {
+      "impl": "r2_routed_collision_depth_batcher",
+      "params": {
+        "depth_beta": 0.8,
+        "group_size": 4,
+        "hard_frac_max": 0.5,
+        "ramp_frac": 0.3,
+        "size_pow": 0.5
+      }
+    },
+    "stream": {"impl": "baseline_interleave"},
+    "head": {"impl": "r3_occupancy_routed_copy_transport", "params": {}}
+  }
+}

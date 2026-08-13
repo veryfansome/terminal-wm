@@ -1,0 +1,113 @@
+WHAT I OBSERVED IN THE DATA, WHICH THE DESIGN IS BUILT ON
+
+In evolve/jail_data/train_sample.jsonl a cups window is: several `cat <path>` expose steps whose
+observation IS the content, then one or more `mv <src> <dst>` steps, then a `cat <path>` read whose
+observation is the content that was routed there. The move steps have output "" and exit 0, so
+render_obs makes their observation the string "cwd=/ exit=0\n" — the same text for every move in
+every window. The OBSERVATION token of a move therefore carries no information about the move at
+all. Everything about where content went lives in the move's COMMAND string, and the only way a
+model can answer the read is to bind the read path to the destination of a move, that move's source
+to an earlier mention of the same path, and so on down the chain, terminating at an expose whose
+observation held the content. The `cat A > B` / `cat A >> B` steps in the cvar arm are the same
+structure with the destination written by redirection.
+
+The command tokens are frozen mean-pooled sentence embeddings. In this data almost every command is
+`cat /tmp/w/...`; the strings differ only in a few path segments, so the pooled embeddings of two
+different cups files are nearly parallel, and the exact-string equality that the binding needs is
+not linearly available anywhere in the token stream.
+
+WHAT THE MECHANISM IS
+
+The stream impl adds to each COMMAND token a deterministic symbol code computed from that command's
+own string alone. Each path the command mentions contributes two parts:
+
+  1. a role-AGNOSTIC identity atom, a 48-sparse balanced +/- pattern (gain 4.5) drawn by SHAKE-256
+     from the whole normalized path string, written into the shared block dims [0,512) at the SAME
+     coordinates with the SAME signs whether the path is a source, a destination, a redirect target
+     or the argument of a read;
+  2. a role-SIGNED atom, a 32-sparse balanced pattern (gain 1.5) from a separate digest of the same
+     path, written into the disjoint block dims [512,704) with sign +1 for a source / plain argument
+     and sign -1 for a destination / redirect target.
+
+Dims [704,752) carry a sparse verb code and dims [752,764) twelve form flags (source present,
+explicit destination, mv, cat, ls, cp, cd, head, ">", ">>", mutating, source==destination).
+Observation tokens, the interleave layout, the targets and the candidate bank are untouched.
+
+WHAT THIS COMPUTES THAT NEITHER PARENT COMPUTES
+
+Both programs I was given use the default stream, so neither makes path identity linearly readable
+anywhere. Measured on the actual command strings from the sample (scratch check, exact arithmetic on
+the code alone, no model involved):
+
+  <code(cat P), code(mv P Q)>            = 1087      (id agrees, role agrees: P is source in both)
+  <code(cat Q), code(mv P Q)>            =  948      (id agrees, role opposes: Q is read, Q is dest)
+  <code(cat P), code(cat R)>             =    4      (different paths)
+  <code(cat .../magic.txt.1), code(cat .../magic.txt)> = 40   (suffix variants stay separate)
+  <code(cat P), code(cat P)>             = 1064
+
+Two consequences follow arithmetically.
+
+(a) LINEAR ADDRESSABILITY. A query can select "the command that moved something INTO the location I
+am reading" with one linear functional: read the identity block with weight a>0 and the role block
+with weight b<0, and the move whose DESTINATION is my path scores highest, while the move whose
+SOURCE is my path scores lower and unrelated commands score ~0. The reverse sign selects source
+mentions. The signed role block is exactly self-inverse under addition: I verified that the role
+component of code(cat Q) plus the role component of code(mv P Q) equals the role component of
+code(cat P) with residual error 0.0. So a residual stream that has attended from the read to the
+matching move is left holding the SOURCE path's pattern and nothing else, and querying again peels
+one more hop. Chains of depth 3-4 are resolved by iterating attention, one hop per layer.
+
+(b) THE TWO OTHER GENOME AXES START WORKING ON PATHS INSTEAD OF ON EMBEDDING ACCIDENTS. The
+r19 arch addresses a delta-rule associative memory with `path_read`/`path_write`/`file_read`/
+`file_write`, each a linear map from the command hidden state to a key. For a write under `mv P Q`
+to be retrievable by a later `cat Q`, those two keys must coincide; with pooled embeddings there is
+nothing to make them coincide, with this coding there is, and the arch's separate read and write
+projections line up exactly with the +/- role split. The r3 head mines a BRIDGE — a command strongly
+similar to one earlier and one later command that are themselves dissimilar — and trains the
+registry read at the later end toward its true observation. Under this coding the move IS that
+bridge, structurally: simulating cosine with a plausible base-embedding term (raw cos 0.80 between
+two cat commands, 0.60 between a cat and an mv) gives similarity 0.67 for source<->move, 0.61 for
+destination<->move, 0.34 for two unrelated cats and 0.36 for the two ends of a chain; at raw cos 0.95
+the numbers are 0.70 / 0.64 / 0.40 / 0.42. Both bridge legs clear mean+1sd and both chain ends fall
+below mean+0.25sd, which is precisely the r3 mining predicate, so the head's supervision lands on the
+read position of a real move chain rather than wherever the frozen embeddings happen to be similar.
+
+The crossover: from the parent I keep the whitened metric objective with its ZCA-whitened target and
+the rename-registry head; from the second program I take the r19 obs-present imagination arch. That
+arch is what the parent's optim was co-designed for — r18_spectral_capped_transition_readout routes
+Muon onto (key_d x d) delta-rule addressing projections and caps a (D,D) transition readout, neither
+of which exists on the parent's occlusion-denoising arch, so on the parent the optim's whole
+addressing branch is inert. The stream supplies the path identity, the arch supplies the addressable
+per-path memory, the optim conditions its addressing projections, and the head supervises the read.
+
+WHY THIS IS NOT COMPUTING THE ANSWER FOR THE MODEL
+
+code_cmds is a pure function of one command string at a time: position i's code depends only on
+cmds[i]. It is therefore prefix-causal, and the token at the READ position is byte-identical under
+the native chain and under a chain in which two contents exchange their moves, because the read
+command string is identical in both arms. No move is resolved anywhere in this file: the code says
+"this string appears here, in this role" and nothing about what ended up where. Composing the moves
+is left entirely to the trained network. The role sign is a property of the command's own syntax
+(argument position / redirect), not of the board.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- If the frozen pooled embeddings already separate cups paths well, the coding adds little and the
+  gain is inside the noise. The scratch numbers above bound what the code adds; they do not bound
+  what was already there, which I could not measure from this jail.
+- The identity atoms carry code norm^2 ~1064 against a standardized embedding norm^2 of ~768, so in
+  the 48-96 coordinates a command touches, the frozen semantic content is buried. That is roughly a
+  6-12% input ablation per command. If general next-observation prediction degrades more than the
+  binding gains, native_hit falls and comp_ca with it. Lowering ID_GAIN is the dial, but the
+  simulation above shows that at gain 2.0 the bridge similarities collapse into the background and
+  the head's mining stops discriminating, so a weak code is not a safe middle.
+- If four layers cannot iterate enough hops, only the depth-3 windows improve and the depth-4+ third
+  of the slice does not move.
+- The failure mode to watch in the report is the swapped arm. This mechanism should raise native_hit
+  while leaving the swapped arm's "held" rate where it was; if instead the swapped "follows" rate
+  moves together with native_hit, the model has learned to key on position in the move order rather
+  than on content identity, and the gain is the non-tracker band rather than tracking.
+- Untested claim, stated as untested: I could not run torch, numpy or the harness in this jail. The
+  parsing, the inner products, the suffix-variant separation and the exact role cancellation above
+  were computed with a standalone pure-python reimplementation of the same arithmetic; the module
+  itself is only compile-checked.

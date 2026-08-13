@@ -1,0 +1,130 @@
+CANDIDATE: r5_depth_stratified_epoch_reshuffle_blocks (axis: batcher; no other axis changed)
+
+WHAT THE TWO PROGRAMS I WAS GIVEN DO, AND WHAT I KEPT FROM EACH
+
+Parent (r2_routed_collision_depth_batcher) replays every training sequence's command list
+through a symbolic content tracker that understands mv, cp, `cat A > B` and `cat A >> B`, so it
+recovers a hop count for every read whose content was routed there. It groups sequences into
+collision buckets keyed by (image, digit-normalized read path, hop count) and draws distinct
+members from one bucket. Its selection pressure toward depth is a soft multinomial tilt:
+bucket weight = len(members)**0.5 * exp(0.8 * depth), and only up to 50% of a batch is drawn
+that way at all.
+
+The crossover partner (r2_routedepth_tilt_readcollision_blocks) walks the mv edges backwards
+from each `cat P` to get the exact hop count of the DEEPEST routed read in a sequence, and then
+uses the embeddings themselves: under a fixed Johnson-Lindenstrauss projection it forms
+neighbourhoods of sequences whose read-command embeddings are near-duplicates while their
+read-ANSWER embeddings are not, and applies an annealed Boltzmann tilt exp(alpha*z) on the
+z-scored depth.
+
+I kept from the parent: the symbolic tracker, which is strictly richer than the partner's
+mv-only 3-token walk (it also follows the cvar-style `cat s0.dat > out.dat` and
+`cat s0.dat >> acc.dat` chains that make up a large share of this data), and the
+(image, normalized path shape, hop count) collision key.
+I kept from the partner: the "same query, different answer" test in embedding space, and the
+easy-to-hard annealing of the depth pressure. The embedding test is now applied INSIDE each
+symbolic bucket rather than as a global k-NN, so a block is a set of sequences that the
+symbolic key says share a read shape AND the projection says agree on the read command while
+disagreeing on the read answer.
+
+WHAT THIS CANDIDATE COMPUTES THAT NEITHER PARENT COMPUTES
+
+Both parents express their preference for deep chains as a WEIGHT in a with-replacement draw.
+Neither of them controls the realized composition of a batch by depth, and in both of them the
+depth preference is fought by a size term: in the parent, bucket weight carries len**0.5, so a
+200-member depth-1 bucket (weight 14.1*e^0.8 = 31.4) still outweighs a 3-member depth-3 bucket
+(weight 1.73*e^2.4 = 19.1); in the partner the tilt is on a z-score that is re-centred by the
+whole population, so a rare tail is pulled back toward the mean. On top of that both leave
+25%-50% of every batch as plain uniform draws.
+
+This candidate replaces the tilt with an EXACT INTEGER QUOTA per hop-count stratum, and
+replaces with-replacement drawing with random reshuffling inside each stratum.
+
+  1. Every sequence gets one label: d = min(hop count of its deepest routed read, 4). This
+     partitions the training set into disjoint strata S_0..S_4 (not overlapping buckets).
+  2. A batch is n_base = round(0.25*bs) uniform slots plus n_str = bs - n_base stratified slots.
+     The stratified slots are allocated by largest-remainder rounding of
+        p_d proportional to |S_d| * exp(depth_beta * d * r),   r = min(1, step/(ramp_frac*T))
+     so the allocation is EXACTLY the empirical stratum distribution at step 1 and reaches the
+     tilted distribution after the ramp. Largest-remainder rounding means the realized count per
+     stratum in each batch is the target count, not a Binomial around it.
+  3. Each stratum quota is clamped by caps[d] = min(|S_d|, bs, max_repeat*bs*|S_d|/n), which
+     bounds how many times a sequence in that stratum is visited relative to the rate uniform
+     sampling would give it, and strata with fewer than min_stratum=16 members are excluded from
+     the quota entirely (they remain reachable through the uniform base). Surplus from a clamped
+     stratum is redistributed to the next deepest stratum with headroom, and any residue falls
+     through to the uniform fill.
+  4. Stratum slots are filled from a per-stratum shuffled epoch cursor (torch.randperm, refilled
+     on exhaustion). Inside a stratum the draw is therefore WITHOUT replacement until the whole
+     stratum has been seen. Both parents draw with replacement everywhere (torch.randint,
+     torch.multinomial(replacement=True)), which under a fixed step budget both wastes slots on
+     repeats and leaves a long tail of rare deep sequences unvisited for stretches. Random
+     reshuffling is the standard variance-reduced alternative to i.i.d. SGD sampling.
+  5. With probability block_frac_max*r a run of a stratum's slots is filled from a collision
+     block of that same stratum instead of from the cursor, giving the in-batch hard-negative
+     geometry both parents were after; block members are picked without replacement, tilted by
+     1 + (number of routed reads in that sequence).
+
+Concretely, on a plausible shape of the training set (n = 6000, |S_0..S_4| =
+1800/2400/1200/480/120, bs = 64), this candidate allocates the 48 stratified slots as roughly
+2/7/12/15/12, so 42% of every batch after the ramp carries a depth-3-or-deeper chain and the
+depth-4 sequences are visited about 9x more often per sequence than uniform sampling would
+visit them; the caps hold that below the 20x ceiling. Neither parent produces anything close to
+that reallocation, because in both of them the size term and the uniform remainder cap the
+achievable emphasis.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+
+comp_ca is measured only on windows of depth 3 and depth 4+ (n=89, d3 60, d4+ 29), on images
+the model never trained on. The skill being measured — carrying a content's identity across a
+chain of moves — is a function of chain length, and a model trained mostly on 0- and 1-hop
+material has almost no gradient signal for composing 3 and 4 hops. If deep chains are a small
+minority of the training split (which the depth structure of this data suggests: the cups
+windows in the sample are depth 1), then the single largest thing a batcher can do is buy the
+deep stratum an order of magnitude more gradient steps without letting a handful of sequences be
+memorized. That is exactly what the quota + cap + reshuffle does, and it is a change in kind
+rather than degree relative to a multinomial tilt fighting a size term.
+
+The second effect is on the negative pool. Because a whole sequence's steps all enter the
+batch, a stratified batch after the ramp puts many depth-3/4 routed reads in the same step; the
+collision blocks additionally guarantee that several of them share a normalized read path while
+their answers are verified distinct in projection. A predictor that answers by path name or by
+lexical command match cannot separate those, so whatever contrastive or equivalence pressure the
+objective applies is applied where it discriminates content rather than location.
+
+WHY THIS IS NOT LEAKAGE
+
+Everything this module computes is computed once at setup, from the train split's command
+strings and the train split's own frozen embeddings, and its only output is a list of integer
+INDICES. Nothing resolved by the tracker is ever written into a model input, a target, or a
+scoring-time tensor; the model still has to learn routing from tokens. The batcher is not called
+at scoring time at all, so the withheld observation at the scored position cannot switch any
+part of this mechanism off: the depth labels, the strata and the blocks come only from training
+sequences, where every observation is present. In particular nothing here is gated on an
+observation existing at the position being judged.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- If the training split has essentially no depth-3+ sequences, the min_stratum=16 floor zeroes
+  those quotas and the mechanism degrades to a mild tilt over depth 1-2, which is close to the
+  parent. Result: no gain, no loss.
+- If the training split is already depth-rich, the reallocation is small and the whole thing is
+  within noise of the parent.
+- If over-exposing the deep stratum costs enough general next-observation fitting that the
+  native arm drops as much as the swapped arm, the paired difference does not move. The
+  base_frac=0.25 uniform reserve and the max_repeat=20 cap are the two knobs that bound this,
+  and they are the first things to relax or tighten on a re-run.
+- If the objective r22_exact_target_equivalence_quotient makes no use of in-batch negatives, the
+  collision-block half of the design is inert; the stratification half is objective-agnostic and
+  still applies. I did not adopt the partner's objective/arch/head, because I cannot read their
+  source from this jail and swapping them blind would confound the batcher measurement rather
+  than combine mechanisms; the crossover is done where I can see both programs, on my own axis.
+- The symbolic tracker inherits the parent's approximations: it ignores pipes and multi-command
+  lines, treats `mv` as removing the source's content, and caps depth at 4. A systematically
+  wrong depth label would stratify on the wrong variable and the quota would amplify the error
+  instead of the signal.
+
+UNMEASURED. I could not run the harness from this jail, so no number here is measured. The setup
+cost is one pass of command parsing over the train split (the same cost the parent already pays)
+plus at most max_filter_buckets=1200 small projections of at most bucket_cap=32 rows each; the
+per-step cost is a handful of small multinomial/randperm calls, comparable to the parent's.

@@ -1,0 +1,12 @@
+{
+  "chunks": {
+    "objective": {"impl": "r4_trajectory_transport_contrast"},
+    "arch": {"impl": "r23_dual_address_transport_pointer", "params": {}},
+    "optim": {"impl": "r18_spectral_capped_transition_readout", "params": {}, "bs": 64},
+    "target": {"impl": "identity"},
+    "batcher": {"impl": "r6_sysblock_hardneg_curriculum",
+                "params": {"hard_frac_max": 0.75, "n_block_images": 1, "ramp_frac": 0.3}},
+    "stream": {"impl": "baseline_interleave"},
+    "head": {"impl": "r5_routed_read_address_binding", "params": {}}
+  }
+}

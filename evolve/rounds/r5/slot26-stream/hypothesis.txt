@@ -1,0 +1,121 @@
+WHAT I CHANGED
+  stream -> r5_dual_role_path_code_stream   (new)
+  arch   -> r5_dual_key_transport_memory    (new; subclass of the parent's r22 arch)
+  head   -> r20_dualpre_transition_consistency with path_thresh 0.32  (from the partner)
+  objective / optim / target / batcher: unchanged from the parent.
+
+THE OBSERVATION I DESIGNED AGAINST
+I read evolve/jail_data/train_sample.jsonl. In a cups window the board is set up by `cat <path>`
+steps whose observation IS the content, then the content is moved by a chain of
+`mv <src> <dst>` steps, then one `cat <path>` reads a location. Every mv step's own observation
+renders to "cwd=<cwd> exit=0\n" with an empty output -- it is byte-identical across every mv in
+the split. So the observation stream carries ZERO information about where anything went, and the
+mv observation tokens are exact duplicates of one another. The entire routing signal lives in the
+mv COMMAND string, and nowhere else. That fact drives both files.
+
+MECHANISM 1 (stream): source and destination become two SEPARATE linear coordinates.
+The command token is currently the frozen mean-pooled sentence embedding of the whole command
+line. Mean pooling over "mv /tmp/w/cups/etc/cron.d/backup.job.5 /tmp/w/cups/etc/cron.d/backup.job.6"
+mixes the two operands into one bag: there is no linear functional of that vector that returns
+"the source" and a second one that returns "the destination", and the two operands in these
+chains differ only by a trailing suffix, so they are also nearly parallel. My stream parses each
+command by itself into (verb, source, destination, redirection form) and writes a dense Rademacher
+identity code of the source into coordinates [0,160) and of the destination into the disjoint
+block [160,320). Because the blocks are disjoint and fixed, two different linear maps applied to
+the same token recover a source key and a destination key. Because the codes are hashes of the
+full normalized path string, two paths differing in one character are near-orthogonal (measured on
+the real strings from the sample: the codes of backup.job.5 and backup.job.6 have inner product
+-0.14 in units of the block width; the same string reproduces inner product 1.0). A command with
+no explicit destination (cat /p, ls /d) takes its source as its destination, so a plain read is a
+read-and-write-back at one address. Three auxiliary blocks carry the role-symmetric sum of the two
+path codes, the two directory codes, and the verb code, plus eight form flags. The remaining 256
+coordinates are a frozen count-sketch (feature hashing, Weinberger et al. 2009: a fixed partition
+of the 768 input coordinates into 256 buckets of three, summed with frozen signs, rescaled to unit
+variance) of the standardized command embedding, so lexical generalization to command forms and
+system paths never seen in training is retained. I measured the sketch's distortion in isolation
+on Gaussian inputs: mean absolute cosine error 0.030, max 0.074 over 30 correlated pairs.
+Everything in a command token is a function of that command's own string and its own embedding.
+Nothing else -- no observation, no other step -- enters it, so the coding is position-wise, hence
+prefix-causal, and the token at a read position is bit-identical under the native chain and under
+a role-swapped chain (the read command string is the same in both and nothing outside it is
+consulted). collate calls code_cmds, so the two cannot diverge.
+
+MECHANISM 2 (arch): one memory operation per move, instead of one network layer per move.
+Both programs I was given carry the r18 latent-transition memory. In both, the per-path address is
+a SINGLE projection: p = unit(tr_path(x_cmd)), used as the read address AND as the write address
+of the delta rule. Under that rule an mv reads slot p and writes slot p, so content can never
+leave the slot it was exposed in -- the memory is structurally incapable of transporting content
+across a move, no matter how well it is trained. My arch splits it: it reads at
+unit(tr_path(x_cmd)) and writes at unit(tr_path_dst(x_cmd)), correcting against the content
+currently at the write address. Written out, a step now computes
+    s_pre  = read(mem, a_read(cmd))
+    v      = (1-g(cmd)) * obs_t  +  g(cmd) * transition(s_pre, cmd)
+    mem   <- decay*mem + a_write(cmd) (x) (v - read(mem, a_write(cmd)))
+With the coding of mechanism 1 available, a_read can be learned as a function of the source block
+and a_write of the destination block; the existing mutation gate g can be learned from the verb
+code (~1 on mv, whose observation is empty; ~0 on cat, whose observation is the content). Then a
+whole mv chain resolves in one memory write per link, and the read step's returned pre-write
+content at the read address IS the content that the chain routed to the location being read. This
+is the point: depth stops costing network layers, so depth-4-and-deeper windows become reachable
+by the same machinery that handles depth-3. tr_path_dst is initialized as a copy of tr_path, so
+the module computes exactly the r22 function at initialization and the split is a learned
+departure. The per-step returned read is taken BEFORE that step's write, so a step's prediction
+never depends on its own observation -- the leakage probe is answered at every position, including
+the scored one, where the observation is withheld.
+
+WHAT IT COMPUTES THAT NEITHER PROGRAM COMPUTES
+Neither parent can represent "the content that was at A is now at B". The parent's stream cannot
+expose A and B as separable operands, and both parents' memory can only read and write the same
+slot. The pair does: a single learned key-value store whose read address and write address are
+different functionals of one command token. My code does NOT resolve the chain -- it never links
+one command to another, never tracks state across steps, and never writes anything derived from
+another step into a token. It hands the model two operands and a memory that can move a value
+between two addresses; composing them across a chain is left entirely to learned parameters
+(a_read, a_write, the mutation gate, the transition operator, the zero-initialized readout).
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN THE NON-TRACKER BAND
+comp_ca is native_hit minus swap_stayed on the same board. A predictor keyed on the read location
+alone predicts identically in both arms and scores a structural zero -- which is exactly the
+parent's +0.0000. The transport memory above is keyed on the CONTENT that the move commands
+routed: under the role-swapped chain the same read address holds the partner's content, so the
+read returns a different vector and swap_stayed falls while native_hit does not. A predictor keyed
+on position-in-the-move-order would also move the number, but nothing in this design references
+move order: the addresses are functions of path strings only, and the memory has no positional
+term beyond the shared decay.
+
+CROSSOVER ACCOUNTING
+From the parent: the r22 objective (its exact-target equivalence quotient is the one that matters
+here -- every mv observation in the split is an exact duplicate of every other, and the partner's
+r12 objective would push those identical targets apart as in-batch negatives), the
+within-sequence-contrast target, and the r22 prefix-content cross-attention, which my arch
+inherits verbatim. From the partner: the r20 dual-pre head, which supervises the shared transition
+operator on the memory's own reads -- with the split addresses, reads[k] is now the pre-state of
+the thing being moved, which is the correct supervision target for a transport operator.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+1. The 176-dim trunk bottleneck. cmd_proj is one linear map 768 -> d=176 shared by every block. If
+   gradient descent cannot allocate that bottleneck so that the source block and the destination
+   block survive into separable key_d=64 subspaces, a_read and a_write collapse to the same
+   address and the arch falls back to the parent's behavior (which is where it starts). This is
+   the single largest risk and it is a learnability risk, not a correctness one.
+2. Discarding the raw command embedding. The token keeps only a 3-to-1 sketch of it. If the
+   sketch distortion costs more on the ordinary ls/cat steps that dominate the training loss than
+   the coding buys on the cups windows, overall prediction degrades and comp_ca can go DOWN, not
+   just fail to go up. The 0.03 mean cosine error I measured is on Gaussian vectors; real
+   embeddings are correlated and the true distortion could be worse.
+3. The head's triple mining. r18/r20 decide "same path" by cosine between COMMAND TOKENS with a
+   threshold of 0.60 tuned for raw embeddings. My coding changes that geometry: from the block
+   energies (identity 160+160, path-set ~58, directories ~14 each, verb ~12, flags 8, sketch 256)
+   a pair sharing one path in one role retains roughly 0.4-0.55 cosine and an unrelated pair in a
+   shared directory roughly 0.2, so I set path_thresh to 0.32. That number is an estimate, not a
+   measurement -- I could not run the harness. If it is too high the aux silently returns 0.0 and
+   I lose the partner's contribution; if too low it mines false triples with small weight.
+4. Erasure. A move does not clear the source slot; the decay is the only forgetting. If a window
+   reuses an earlier source path as a later destination, a stale copy can survive and be read.
+   The scored read is at the chain's final destination, which the delta rule overwrites correctly,
+   so I judged an explicit erase term not worth the extra gate -- but a window that reads a
+   location whose content has since moved away would be answered with the stale content.
+5. Speed. The transition memory is already a python loop over steps; I added one bmm and one
+   projection per step to it. Cost is a small constant factor on a loop the parent already pays,
+   and the stream coding is a cached table lookup plus a gather -- but I could not profile either,
+   so this is unmeasured.

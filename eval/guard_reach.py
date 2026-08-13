@@ -236,10 +236,40 @@ def analyze(genome_path):
     (scored * u).sum().backward()
     inert = set(_zero_grad_names(net))
 
+    # A head that contributes on an EVEN layout but not on the odd SCORED one is switched off
+    # exactly where it is judged. Three proposals have been lost to this: the scored window is
+    # [cmd, obs, ..., cmd] of length 2r+1, and a head that indexes by pair, or guards on
+    # 2*(L//2) == L, silently returns the bare trunk there. Neither parameter rule can see it --
+    # head parameters are allowed to be inert (an aux-only head is) and they do get gradient from
+    # the aux on even training layouts. An aux-only head contributes on NEITHER layout and is not
+    # flagged; only the asymmetry is.
+    head_asymmetry = None
+    if head is not None:
+        torch.manual_seed(SEED)
+        bare_build, bare_p = G.load_arch(gen_cfg)
+        bare = bare_build(**bare_p)
+        if getattr(target_mod, "LEARNED", False):
+            bare.target_module = target_mod.make(D)
+        bare = bare.to(device)
+        bare.load_state_dict({k: v for k, v in net.state_dict().items()
+                              if k in bare.state_dict()}, strict=False)
+        bare.eval()
+        ar = torch.arange(tok.shape[0], device=device)
+        with torch.no_grad():
+            odd_d = (net(tok, types, key_pad)[0][ar, rpos]
+                     - bare(tok, types, key_pad)[0][ar, rpos]).abs().max()
+            et, ey, ek = tok[:, :-1], types[:, :-1], key_pad[:, :-1]
+            ep = (rpos - 2).clamp(min=0)
+            even_d = (net(et, ey, ek)[0][ar, ep] - bare(et, ey, ek)[0][ar, ep]).abs().max()
+        if float(even_d) > 1e-6 and float(odd_d) <= 1e-6:
+            head_asymmetry = (float(even_d), float(odd_d))
+
     total = sum(1 for _, p in net.named_parameters() if p.requires_grad)
     dead = sorted(untrained & inert)
     arch_inert = sorted(arch_owned & inert)
-    return {"ok": not dead and not arch_inert and aux_ran is True and len(inert) < total,
+    return {"ok": (not dead and not arch_inert and aux_ran is True and len(inert) < total
+                   and head_asymmetry is None),
+            "head_off_at_scored_position": head_asymmetry,
             "n_params": total, "n_untrained": len(untrained), "n_inert": len(inert),
             "n_dead": len(dead), "dead": dead[:20],
             "n_arch_inert": len(arch_inert), "arch_inert": arch_inert[:20],
@@ -263,6 +293,11 @@ def reachable(genome_path):
     if r["arch_inert"]:
         return False, (f"{r['n_arch_inert']} ARCHITECTURE parameters cannot affect the prediction "
                        f"at the scored read position: {r['arch_inert'][:8]}")
+    if r.get("head_off_at_scored_position"):
+        de, do = r["head_off_at_scored_position"]
+        return False, (f"the head changes the prediction on an even-length layout (max abs "
+                       f"{de:.4g}) but not at the scored read of the odd scored layout "
+                       f"({do:.4g}) — it is switched off exactly where it is measured")
     return True, ""
 
 
@@ -283,6 +318,14 @@ def main(genome_path):
               f"gradient from the training loss AND no gradient from the prediction at the scored "
               f"read position. They cannot influence the score and cannot learn to. "
               f"First: {r['dead'][:8]}", file=sys.stderr)
+        return 1
+    if r.get("head_off_at_scored_position"):
+        de, do = r["head_off_at_scored_position"]
+        print(f"reachability gate FAILED: the head changes the prediction on an even-length layout "
+              f"(max abs {de:.4g}) but NOT at the scored read of the odd scored layout ({do:.4g}). "
+              f"The scored window is [cmd, obs, ..., cmd] of length 2r+1, so a head that indexes "
+              f"by pair, or guards on an even length, returns the bare trunk exactly where it is "
+              f"measured.", file=sys.stderr)
         return 1
     if r["arch_inert"]:
         print(f"reachability gate FAILED: {r['n_arch_inert']} ARCHITECTURE parameters cannot "

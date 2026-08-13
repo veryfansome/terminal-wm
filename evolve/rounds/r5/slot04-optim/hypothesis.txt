@@ -1,0 +1,205 @@
+CANDIDATE: optim = r5_persistent_gradient_mixture_channel_opener
+AXES CHANGED: optim (new impl), head, target, batcher (selection only, no new code)
+INHERITED: objective r22_exact_target_equivalence_quotient, arch r24_backward_multihop_pointer_chase
+           (parent's params), stream baseline_interleave, bs 64.
+
+
+WHAT I READ IN THE DATA FIRST, BECAUSE THE DESIGN RESTS ON IT
+-------------------------------------------------------------
+evolve/jail_data/train_sample.jsonl, 24 sequences, 724 steps, 262 of them (36%) with an empty
+output. A move step looks like
+
+  {"cmd": "mv /tmp/w/cups/g53/f149.tmp /tmp/w/cups/usr/share/misc/magic.txt.1",
+   "output": "", "exit": 0, "cwd": "/"}
+
+so realenv.seq_worldmodel.render_obs renders it as the four-character string "cwd=/ exit=0\n".
+Every move step in every window therefore has an essentially IDENTICAL frozen observation
+embedding. Two consequences drive everything below.
+
+(1) The identity of what moved is present only in the COMMAND token of the move. Any mechanism
+    that has to see an observation to know a move happened is reading a constant. Both mechanisms
+    I keep read routing out of command embeddings alone, which is also why they still function at
+    the scored position, whose own observation is withheld.
+
+(2) The main next-observation loss is dominated by a component that is large, common to a third of
+    all steps, and fits in a few hundred steps: predict the constant "cwd=/ exit=0" vector at
+    mutating steps, and predict the generic shape (cwd line, exit code, formatting) elsewhere. The
+    part of the target that says WHICH content came back at a read step is a small subspace of the
+    768-d embedding — the difference between "cv-6e330e2ed64c19c4" and "cv-d55da5631a1ac194". That
+    component of the gradient is small in magnitude at every single step but it points the same way
+    for thousands of steps, because it is the same structural fact being learned.
+
+
+THE MECHANISM I ADDED (optim axis) AND WHAT IT COMPUTES THAT NEITHER PARENT COMPUTES
+------------------------------------------------------------------------------------
+Both programs I was given carry the SAME optim impl, r18_spectral_capped_transition_readout:
+AdamW(0.9, 0.95) with a warmup-hold-cosine-floor schedule, Muon (Newton-Schulz orthogonalized
+updates) on identical-shape (key_d x d) addressing projection pairs, and a post-step
+power-iteration spectral-norm cap on (D,D) matrices. I keep all three of those and add two things.
+
+A. TWO-TIMESCALE MOMENTUM (AdEMAMix; Pagliardini, Ablin, Grangier 2024, translated literally).
+   Each parameter now carries a second EMA of the gradient on a much longer horizon:
+
+       m_fast <- b1*m_fast + (1-b1)*g                       b1 = 0.9      (horizon ~10 steps)
+       m_slow <- b3(t)*m_slow + (1-b3(t))*g                 b3 -> 0.999   (horizon ~1000 steps)
+       v      <- b2*v + (1-b2)*g*g                          b2 = 0.95
+       p      <- p - lr * ( m_fast/(1-b1^k) + alpha(t)*m_slow ) / (sqrt(v/(1-b2^k)) + eps)
+
+   with alpha(t) ramped linearly 0 -> 4 over the first 40% of the run and b3(t) scheduled from b1
+   to the end value by the paper's f(t) = exp( ln(b1)ln(b3e) / ((1-t/T)ln(b3e) + (t/T)ln(b1)) ),
+   which is exactly b1 at t=0 and exactly b3e at t=T. b3e is additionally capped at
+   1 - 1/(0.25*steps) so the slow horizon can never exceed a quarter of the actual step budget.
+
+   The arithmetic consequence is the point. For a gradient component that is PERSISTENT (same sign
+   and rough magnitude over hundreds of steps), m_fast/(1-b1^k) -> g and m_slow -> g, so the
+   numerator -> (1+alpha)g while sqrt(v) -> |g|: the step is (1+alpha) = 5x the Adam step. For a
+   component that is TRANSIENT (sign flips on the ~10-step scale of m_fast), m_slow averages to
+   near zero, so the step is unchanged at 1x. Neither parent computes m_slow; Adam with b1 = 0.9
+   has a ~10-step memory and therefore weights a weak-but-persistent direction only in proportion
+   to its instantaneous size. Base lr is set to 3e-4 (parent: 5e-4) so the reallocation is roughly
+   budget-neutral in total motion: the fast-fitting bulk gets 0.6x the parent's step and the
+   persistent structure gets 3x.
+
+   The same fast/slow mixture is formed BEFORE Newton-Schulz orthogonalization in the Muon branch
+   that drives the addressing projections:
+       u = (g + mu*buf)*(1-mu) + alpha(t)*slow,  then p <- p - lr*rms*sqrt(max(shape))*orth(u)
+   Because orth() normalizes, alpha here does not change the step SIZE at all, only which
+   direction the orthogonalized step points — it rotates the update toward the persistent
+   component. The (1-mu) factor is there to put the un-normalized Nesterov buffer and the
+   normalized slow EMA on the same scale so alpha means the same thing in both branches; it is
+   exactly cancelled by the Frobenius normalization inside _ns_orth, so with alpha=0 this branch
+   is numerically identical to the parent's Muon.
+
+B. COLD-CHANNEL OPENER. Every content-routing mechanism in this genome is injected into the
+   prediction through a deliberately DEAD channel: r24's chase_out is nn.Linear(D,D) with
+   zeros_ on weight and bias, and r3's copy-transport contribution is multiplied by
+   out_scale = nn.Parameter(torch.zeros(D)). A zero output projection is not itself stuck — its
+   own gradient is nonzero — but everything UPSTREAM of it is: d(loss)/d(addressing params)
+   contains chase_out.weight as a factor, so it is exactly zero at step 0 and stays small in
+   proportion to how far that matrix has left zero. The routing trunk (address MLP, n_addr source
+   and destination heads, halting logits, the copy-transport addr/gates) is the slow-converging
+   part, and under a flat learning rate it does not begin receiving usable gradient until the
+   injection matrix has grown, which costs a large fraction of a FIXED step budget.
+
+   So at make() time I detect the parameters that are EXACTLY zero (torch.count_nonzero == 0, a
+   one-off check, no per-step cost) and give them their own groups: weight decay off, and a
+   learning-rate multiplier that decays cosine from open_mult to 1 over the first open_frac of the
+   run (open_mult = 6 for 2-D matrices, sqrt(6) ~ 2.45 for 1-D vectors), on top of the inherited
+   warmup-hold-cosine-floor schedule. With the defaults the multiplier peaks at ~5.2x right as
+   warmup ends (step ~160 of 4000) and is back to 1.0 by step 600. A zero-init 2-D matrix is
+   unambiguous — no standard initializer produces one — so the 2-D group is exactly the injection
+   projections. The 1-D group is deliberately given the weaker multiplier because it is NOT
+   unambiguous: it catches r3's out_scale and r24's chase_out.bias, which is what I want, but it
+   also catches LayerNorm biases, which are zero-initialized too. That is a known and accepted
+   side effect: LayerNorm biases running at ~2.4x lr for the first 15% of the run and with weight
+   decay off (which is standard practice for norm parameters anyway). I did not measure its
+   size; I claim only that it is a small perturbation compared with opening the injection channels.
+
+   The spectral cap still applies to chase_out (it is (D,D)), so the opener cannot let it run away.
+
+
+THE CROSSOVER (why these other three axes moved)
+-------------------------------------------------
+The two programs share their optim impl exactly, so the crossover had to be resolved on the axes
+where they actually differ. They differ in how content gets routed:
+
+  parent : arch r24_backward_multihop_pointer_chase — SEPARATE source and destination addresses
+           per command (n_addr channels each, from one shared trunk over the raw command
+           embedding), 6 hops of backward pointer chasing with a learned follow-gate and a softmax
+           over halting logits. Its head, r18_transition_forwardmodel_consistency, is guarded by
+           `callable(getattr(net, "transition_from_emb", None))` and returns 0.0 otherwise; r24
+           descends from r22_prefix_content_xattention, not from the r18 latent-transition line,
+           so the parent's routing machinery is trained by the diluted main loss alone.
+
+  partner: head r3_occupancy_routed_copy_transport — a live forward-time slot memory whose value
+           recursion (a write slot's value is a convex blend of its own observation and what its
+           command retrieved from earlier slots) is solved EXACTLY as one unit-lower-triangular
+           system, so a retrieved value can be a retrieval of a retrieval to unbounded depth in a
+           single pass; plus a train-time NCE aux that mines duplicated-content steps from the
+           batch and ranks the retrieved content against the contentful observations seen so far
+           UNDER THE EVAL'S OWN SQUARED-L2 DECISION VARIABLE.
+
+These are complementary rather than redundant, and each fixes the other's weak point. r3's key and
+query for a step both come from the same p = unit(addr(cmd_feat(c))), differing only by the
+centering subtraction — so for `mv A B` the one address has to look like B (to be found by a later
+`cat B`) and like A (to find the slot `cat A` wrote) at the same time. r24 is exactly the mechanism
+that separates those two roles and chases them for several hops. Conversely r24 has no supervision
+aimed at the eval's decision variable; r3's aux supplies it. I therefore take the parent's arch and
+the partner's head.
+
+target: identity (partner's), not the parent's within_sequence_contrast_equalizer. Both injection
+paths in this genome add RAW observation vectors into the prediction — r24 adds chase_out(mixed)
+where mixed is a convex combination of raw tok_emb observation rows, and r3 adds gate*reads*
+out_scale where reads is a convex combination of raw observations. Under identity targets those
+channels can converge to a straight copy of the retrieved content. Under the equalizer the
+prediction lives in a rank-32-reweighted space whose gains are still being estimated for the first
+~1000 updates, so both channels would additionally have to learn a moving change of basis. r3's
+pred_weight NCE term also ranks pred_cmd against raw observations, which is only coherent when
+pred is in observation space. This is the one place the crossover picks rather than merges, and it
+picks on a space-consistency argument, not on preference.
+
+batcher: r2_routed_collision_depth_batcher (partner's). It replays each sequence's command list
+through a symbolic content tracker (mv / cp / redirect move content, a bare read returns whatever
+now sits at the path), labels every read with its hop count, and tilts bucket choice toward deeper
+hop counts. The scored quantity is compositional DEPTH and the eligible slice is 60 windows at
+depth 3 and 29 at depth 4+; a sampler that over-represents deep routed reads is the most directly
+aligned sampling policy available. Note this is sample SELECTION only — the tracker's output never
+enters the model's input, which is the line the brief draws.
+
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+-------------------------------------------
+comp_ca = mean over 89 windows of (native_hit - swap_stayed). The parent scored -0.0112, i.e. a
+net of about one window out of 89 in the wrong direction; the baseline scores -0.0075. Both are
+indistinguishable from a model that carries no content identity at all: nearly every window
+contributes exactly 0 because the model either hits under both arms or misses under both. To move
+the number substantially the routing apparatus has to actually work, not merely exist in the
+graph. This candidate attacks the three ways it can fail to work inside a fixed step budget:
+
+  - it has no gradient path early (fixed by the cold-channel opener),
+  - the gradient it does get is a small persistent component drowned by a large transient one
+    (fixed by the two-timescale momentum, which multiplies persistent components by up to 5x
+    relative to transient ones at matched total step size),
+  - it has no supervision that targets the eval's own decision variable, and the batches under-
+    represent the deep chains (fixed by taking the partner's head and batcher).
+
+None of these adds anything to the model's INPUT. The opener changes learning rates, the momentum
+mixture changes the update direction, the batcher changes which sequences are sampled, and the
+head adds a train-time loss plus a learned memory whose reads are computed by the model from
+command embeddings it already sees. Nothing resolves a move chain in my code and hands the answer
+to the model.
+
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+--------------------------------------------
+1. If the content-identity gradient is not merely small but genuinely INCONSISTENT in direction —
+   e.g. because the frozen encoder's embedding of "cv-6e330e2ed64c19c4" versus
+   "cv-d55da5631a1ac194" is close to noise and the discriminating subspace differs per system —
+   then m_slow averages it to zero as well and alpha buys nothing, while the reduced base lr (3e-4
+   vs 5e-4) makes the bulk fit slower. Net effect would then be slightly NEGATIVE. This is the
+   single largest risk and it is the assumption the whole optim mechanism rests on.
+2. If alpha = 4 over-amplifies a persistent-but-wrong direction (for instance the shortcut of
+   always answering with the most recently exposed content, which is also persistent), the model
+   could get MORE confidently non-tracking. That would show as native_hit and swap_stayed rising
+   together with comp_ca staying near zero, or as a first-mover-style positive that the analytic
+   non-tracker band also reaches — which is why the band is reported beside the score.
+3. If the injection channels were never the bottleneck — if chase_out and out_scale leave zero
+   fast enough under plain AdamW that the routing trunk already has 90% of the budget — the
+   opener is a no-op at best and a 5x transient on LayerNorm biases at worst.
+4. r3's wrap replaces net.forward with a closure and registers net.copy_transport BEFORE
+   net.to(device) and before make(net.parameters(), steps) in evolve/harness.py, so the
+   copy-transport parameters are in the optimizer and out_scale lands in the 1-D cold group. If a
+   future harness reordered those two lines the opener would silently not see them.
+5. Muon routing is unchanged from the parent and still relies on the sibling rule (identical-shape
+   (key_d, d) pairs, count >= 2). r3 adds copy_transport.addr with shape (64, 128) as a LONE
+   tensor, which the sibling rule correctly excludes, so it stays on the AdEMAMix side. If some
+   future arch produced a second (64, 128) matrix, addr would start being orthogonalized.
+6. Speed: the AdEMAMix step is a per-parameter Python loop rather than a foreach/fused AdamW, and
+   carries one extra buffer and two extra elementwise ops per parameter per step. I have no torch
+   in this jail and did not time it; I expect it to be small next to the forward/backward of a
+   64 x ~30-step transformer, but if the step budget is wall-clock-bound this is where it would
+   show. The Muon branch and the spectral cap cost the same as the parent's.
+7. I could not read evolve/chunks/arch/r22_prefix_content_xattention.py (not granted in this
+   jail), so I did not modify the arch and I did not verify whether the parent's base exposes
+   transition_from_emb. My claim that the parent's head is inert on r24 is an inference from the
+   head's own guard and from r24's import line, not something I ran.

@@ -1,0 +1,134 @@
+WHAT THE DATA FORCES
+
+Read the training sample and the shape of a scored window is unambiguous. A window exposes N contents with
+`cat <path_i>` steps whose observation IS the content. It then moves some of them with `mv <src> <dst>` steps
+whose observation is `cwd=/ exit=0` and an EMPTY output — i.e. a mutation step's observation carries no
+information about what moved or where. The scored step is a later `cat <path>` whose observation is withheld.
+So every fact needed to answer lives in the COMMAND tokens of the mv steps, and the only way to answer is to
+carry the content that arrived at that path along the chain of moves.
+
+Both programs I was given implement that carry the same way: a delta-rule associative memory over the command
+sequence. At step i they read a slot addressed by p_r(cmd_i), form a value (the observation when the
+observation carries content, otherwise the retrieved slot content, optionally passed through the shared
+latent-transition operator f(s,cmd) = s*(1+gamma(cmd)) + beta(cmd)), and write it back. The partner writes to
+the SAME address it read (single-slot read-modify-write). The parent adds a second, independent linear map
+p_w for the write address, and a learned observation-presence gate that decides how much of the observation
+enters the write value — which is exactly what separates a content-bearing `cat` from a content-free `mv`.
+
+WHAT I KEEP FROM EACH
+
+From the parent: the split read/write addressing (transport, not just refresh) and the content-presence gate.
+From the partner: the shared latent-transition operator and its `transition_from_emb` entry point, kept
+verbatim so a head that supervises the operator as a forward model still reaches it.
+
+THE GAP I AM ATTACKING, AND WHY IT IS A REAL ONE
+
+In both programs the read address and the write address are LINEAR, bias-free maps of one command feature:
+p_r = A x_cmd, p_w = B x_cmd. Make the requirement explicit. For the transport chain to work at all, the
+addresses have to satisfy four cross-consistency conditions simultaneously:
+
+    p_w(cat A)   == p_r(mv A B)     the exposed content must be writable where the move will read it
+    p_w(mv A B)  == p_r(cat B)      the moved content must land where the later read will look
+    p_w(mv A B)  == p_r(mv B C)     and a second hop must find it there
+
+Read off what p_r and p_w must each compute. p_r must extract the FIRST path argument of both `cat X` and
+`mv X Y`. p_w must extract the FIRST path argument of `cat X` but the SECOND path argument of `mv X Y`. That
+is a verb-conditional role assignment: "if the verb is a mutation, take argument 2, else take argument 1". A
+single linear map of the command feature cannot express a conditional; it can only output one fixed linear
+combination of whatever the pooled command embedding superposes. The parent's escape hatch is to let B drift
+away from A, but B is still linear, so whatever B does to `mv` it also does to `cat`, and the two demands on
+B are in direct conflict. I claim this is why depth costs so much: every hop of the chain needs precisely
+this role switch, and the error compounds multiplicatively across hops.
+
+WHAT I ADDED (three mechanisms, all inside the transport memory, nothing else touched)
+
+1. ROLE ROUTER OVER A SHARED EXTRACTOR BANK. Four extractors emit unit-norm addresses in one common key
+   space: slot 0 and slot 1 are the parent's two linear maps of the trunk command feature (slot 1 initialised
+   as a copy of slot 0, as in the parent); slots 2 and 3 are linear maps of u = GELU(W LayerNorm(cmd_raw)), a
+   nonlinear feature of the raw 768-d frozen command embedding. A softmax router emits two mixture
+   distributions over the bank, one for the read role and one for the write role, and each address is the
+   corresponding convex mixture. The router's input is u ONLY — the raw command embedding of that step. It
+   sees no observation and no positional encoding, so it cannot key on where in the sequence a step sits and
+   cannot be switched off when an observation is withheld.
+
+   This is what neither program computes: the choice of WHICH extractor supplies an address is a
+   multiplicative (gated) function of the command, so "for a mutation verb the write role selects the
+   second-argument extractor, for a read verb it selects the first-argument extractor" is directly
+   representable, with the SAME extractor reachable from both roles so the addresses of the same path
+   computed from two different commands are literally the same function of the same argument. The router bias
+   is initialised so read role -> slot 0 and write role -> slot 1; since those two extractors are identical
+   copies at init, p_r == p_w exactly at initialisation, which is the partner's single-slot read-modify-write
+   as the starting point.
+
+2. CLEANUP MEMORY ON THE ADDRESSES (Plate's holographic-reduced-representation clean-up, and the standard
+   attractor step in VQ/slot models). Each mixed address is softmax-projected onto a learned codebook of
+   address directions and blended toward that projection by a learned scalar gate: p = unit((1-g) a + g
+   unit(softmax(a C^T / tau) C)). Both roles use the SAME codebook and the SAME gate. The point is chain
+   fidelity: the retrieval quality after k hops is a product of k address agreements, so two addresses that
+   are merely close (0.9 cosine) lose most of the content by depth 4. Snapping both onto the same codebook
+   direction turns "close" into "identical" and makes the loss per hop flat instead of geometric. g is
+   initialised low so the untrained codebook perturbs the addresses only mildly.
+
+3. DESTRUCTIVE READ (the erase half of an NTM erase-add write head, Graves et al. 2014). At each step, after
+   reading s_pre from the read slot and before writing, the memory subtracts e * p_r (x) s_pre — the rank-one
+   removal of exactly the content that was just read from exactly the slot it was read from — with e a
+   sigmoid gate computed from u, i.e. from the command alone. Neither program erases: after `mv A B` both
+   programs leave the content still sitting at address A as well as at B. That is not what `mv` does, and it
+   is exactly the state that corrupts a chain when a location is reused or a second content is later routed
+   through the same address. The erase happens strictly after this step's read, so it cannot affect this
+   step's own output.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY RATHER THAN THE SHORTCUTS
+
+The measurement is a paired difference between a native chain and a role-swapped chain over the same board,
+same board positions, same destinations, same depth — only the mv command text differs. Everything I added is
+a function of the mv COMMAND embeddings and of the content that the memory routed, so it responds to the
+swap; nothing I added is a function of the position index or of the identity of the read location, which are
+identical in both arms and contribute exactly zero. In particular the router deliberately sees u, which is
+built from the raw command embedding with no positional term, so the new machinery cannot express "the
+content of whichever step moved first" — the analytic non-tracker whose per-window contribution does not
+cancel structurally.
+
+Nothing resolves a move chain outside the model. No command is parsed, no path is compared, no routing table
+is built in Python. The addresses are learned projections of frozen embeddings and the routing is a learned
+softmax; what content ends up at what address is decided entirely by trained weights operating on the same
+token stream the baseline sees.
+
+BEHAVIOUR AT THE SCORED POSITION
+
+The scored command's observation is absent, so the token stream has an odd length and the last command has no
+paired observation. The address computation, the router, the codebook cleanup and the erase gate all read
+only the command token, so they are fully active at that position. The presence gate and the write value are
+the only observation-dependent parts, and they only shape WRITES, which the scored read consumes from earlier
+steps. The transport read at the last position is taken from the memory state before that position's own
+write, exactly as in both parents.
+
+CAUSALITY
+
+Per step: read, then erase, then write. A step's read sees only writes from strictly earlier steps, so no
+command prediction depends on its own or a later observation. The file/path delta-rule memories keep the
+parent's strictly-lower-triangular masks. The transformer keeps the causal mask.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- If the pooled frozen embedding of `mv S P` does not linearly separate the first path argument from the
+  second at all — if mean pooling has genuinely destroyed argument order — then no router helps, because
+  there is no second-argument extractor to route to. The routing only removes the conditional-selection
+  bottleneck; it cannot create information the encoder discarded. This is the single biggest risk and I
+  cannot test it from inside the jail.
+- If the codebook collapses (all addresses snapping to one or two codes) the memory degenerates into a small
+  number of slots and contents overwrite each other. The gate g can retreat to 0 to undo this, but only if
+  the gradient finds that direction; a collapsed codebook with a high gate would be worse than the parent.
+- If the erase gate learns to fire on read verbs it will destroy exposed content before the test read. The
+  gate is initialised low (sigmoid(-2)) and is command-conditioned, so it has the information needed to stay
+  off for reads, but nothing forces it to.
+- If the router saturates at its initialisation (read -> slot 0, write -> slot 1) it reduces to the parent's
+  two independent linear maps through a shared nonlinear feature and the candidate buys nothing but extra
+  parameters.
+
+UNMEASURED
+
+I could not run the harness from this jail and there is no torch here. Everything above is an argument about
+what the code computes, not a measurement. The extra cost is one additional batched outer product per command
+step in the transport loop (about 50% more work in that loop, which is a small part of the forward) plus a
+few small projections; I have not profiled it.

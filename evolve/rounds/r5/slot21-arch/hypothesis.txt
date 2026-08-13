@@ -1,0 +1,136 @@
+CANDIDATE: arch = r25_simplex_pointer_routing_denoised (only the arch axis changes; objective,
+optim, target, batcher, stream and head are the parent's, unchanged, including head param
+pred_weight = 0.0).
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+The class inherits R22PrefixContentXAttention, so the parent's whole mechanism survives untouched:
+the r18 path-state trunk, its delta-rule file/path memories, the latent-transition readout, the
+sysfilm styling and the prefix-observation cross-attention. From the second program it keeps the
+one thing that program adds to the same trunk: ramped stochastic observation occlusion during
+training (`_occlude`), same shape as that program's — independent per observation token, zeroed and
+key-padded, probability smoothstep-ramped from occ_ramp_start to occ_ramp_end up to occ_p, applied
+only when self.training, so the eval-mode forward has none of it. Occlusion is applied at the top of
+forward and the occluded tensors are what both super().forward and the new routing see, so trunk and
+routing never disagree about which observations exist.
+
+WHAT IS NEW, MECHANICALLY
+A pointer-simplex routing store that neither program has. Both programs, and every archived variant
+of them I was shown, route CONTENT: a [key_d, 768] store into which a 768-d observation (or a
+transition of one) is written and later read, so a chain of moves is a chain of soft reads and
+writes of dense content vectors. This store instead routes an INDEX. Its state is
+mem [B, key_d, n_steps]; the value at an address is a vector over step indices of this window, read
+back as a distribution over "which earlier step's observation is the thing sitting here".
+
+Per command i, in `_pointer_route`:
+  p_i    = a_src[i]^T mem                      (read the distribution at the source address)
+  q_i    = simplex(p_i)                        (rectify; power-sharpen with a learned exponent
+                                                clamped to [1,4]; sum-normalise; multiply by a
+                                                linear mass ramp min(mass/tau,1) so an empty read
+                                                writes nothing instead of writing uniform)
+  v_i    = g_move*q_i + (1-g_move)*onehot(i)*live_i
+  mem   <- decay*mem + a_dst[i] (g_write*cmd_valid*(v_i - a_dst[i]^T mem))^T
+                     + a_src[i] (-g_erase*g_move*cmd_valid*p_i)^T
+The read happens strictly before the write, so p_i can only carry indices < i.
+
+The prediction channel: the stacked reads are rectified, sharpened, masked to strictly earlier LIVE
+steps (`allowed = (j < i) & obs_live[j]`), renormalised to a distribution p_norm, and used to mix the
+raw observation embeddings: copy = p_norm @ obs_pad. That mixture goes into the command-position
+prediction through a (D,D) readout initialised to 0.05*I under a sigmoid gate (bias -2) fed h_cmd,
+the pointer mass, the pointer peak and the mixture RMS.
+
+WHAT THAT COMPUTES THAT NEITHER PARENT COMPUTES
+1. Depth-invariant composition. Because the transported value is renormalised back onto the simplex
+   at every hop, a depth-4 chain is a product of four near-stochastic updates and the surviving
+   pointer is as sharp as after one hop. In a content-routed store the transported object is a 768-d
+   vector that is attenuated and cross-talked at each read/write; its magnitude and its distance to
+   the true content degrade monotonically with depth, which is exactly the regime the objective's
+   eligible windows (d3 and d4+) live in. The learned power sharpening can additionally re-concentrate
+   mass after each hop; nothing in a content store can do that.
+2. Verbatim retrieval. The predicted content is always a convex combination of observation embeddings
+   that actually occurred in this window, never a linear functional of a decayed store, so if the
+   routing is right the prediction lands on the real content vector rather than near it. The metric is
+   a forced-choice pick among content candidates, so landing exactly on one candidate is worth more
+   than being closer to it on average.
+3. Role-symmetric addressing at initialisation. `_role_addresses` soft-thresholds the command token
+   coordinate-wise (sign(x)*relu(|x|-theta), theta learned, init 1.25) and pushes two disjoint
+   coordinate blocks - [0,352) and [352,704) - through ONE shared projection with a per-role additive
+   bias initialised to zero. Under the genome's stream (r3_srcdst_hashslot_coding) a path's k-sparse
+   +-2 signed code is written at the SAME relative offsets inside whichever of the two equally wide
+   blocks carries it, and the standardized command embedding it is added to is roughly unit-variance
+   per coordinate, so thresholding at 1.25 suppresses most of the dense per-command background while
+   keeping the sparse high-amplitude code. A shared random projection of the surviving code then maps
+   one path to nearly the same ptr_key_d-dimensional address (default 128, deliberately wider than
+   the trunk's key_d so the store holds more mutually near-orthogonal addresses than the trunk's own
+   memories do) whether it appears as a source or as a destination - which
+   means "the destination of the earlier mv" and "the source of the later cat" already match at step
+   zero of training, and gradient only has to sharpen it. Both parents learn source and destination
+   through SEPARATE projections and must discover that symmetry from data. This is a projection of
+   input coordinates, not a parse: no path string, no move, no chain is resolved anywhere in this
+   file; which content sits where is computed only by the model's own read/write/erase recurrence.
+4. It survives the scored position. Every gate (move/write/erase, and the injection gate) is a
+   function of the command token and the causal hidden state ONLY - no observation value enters any
+   gate. `live_i` (an occlusion/padding flag, not a value) gates only the exposure branch of the
+   WRITE at step i, and the write at step i happens after the read at step i. So at the scored
+   command, whose own observation is withheld, the retrieval path is bit-for-bit the same computation
+   as at any training step; nothing is switched off there. The transport branch is not gated on
+   liveness either, so an occluded (or empty) observation in the middle of a move chain does not break
+   the chain - it only removes that step from the origin pool.
+
+WHY THE TWO HALVES NEED EACH OTHER
+Occlusion is a regulariser with no new parameters: it removes the "the answer looks like the recent
+content I can see" crutch. Alone, it can only push the model toward whatever routing machinery the
+trunk already has. The pointer store is the machinery that occlusion pushes toward, and it is built to
+be robust to exactly the perturbation occlusion applies: a dropped observation removes an ORIGIN
+(obs_live is false, that index is never written and is masked out of the mixture) while leaving the
+address chain intact. Conversely the pointer store, on its own, would be free to keep leaning on the
+recent-content shortcut; occlusion makes that shortcut unreliable during training.
+
+CAUSALITY / GUARD
+p_i reads memory written only by steps < i; the mixture is additionally masked with (j < i). Padded
+command positions contribute nothing (cmd_valid multiplies both write and erase, and the contribution
+is masked by valid_cmd). Occlusion is training-only and the guard runs in eval mode. Perturbing a
+later observation therefore cannot move an earlier command's prediction.
+
+OFFLINE ARITHMETIC CHECKS (pure-python re-implementations of two formulas in this file; NOT the
+harness, no training, no torch, and no claim about the objective)
+- The recurrence in `_pointer_route` was re-implemented literally and run on a synthetic board of 8
+  random unit addresses over 12 steps with ideal gates (g_move=1 on moves, 0 on exposures), chain
+  cat P0 / cat P1 / mv P0->P2 / noise / mv P2->P3 / mv P1->P4 / mv P3->P5 / cat P5. The pointer read
+  at the final cat put 0.973 of its normalised mass on step 0 - the step that exposed the content -
+  after a depth-3 move chain, with total mass 0.911 (i.e. essentially no attenuation with depth).
+  Every read row was confirmed to carry mass only on indices strictly below its own, up to the
+  1e-6 numerical floor, which the explicit (j < i) mask in forward then removes exactly.
+- The addressing in `_role_addresses` was re-implemented with the stream's own SHAKE-256 sparse code
+  (24 signed +-2 entries in a 352-wide block) on top of an N(0,1) per-command background, with a
+  random projection. Cosine between the same path's source-role and destination-role addresses vs a
+  different path's, at initialisation: theta=0 gives 0.208 +- 0.090 vs 0.007 +- 0.096; theta=1.25
+  gives 0.273 +- 0.108 vs -0.008 +- 0.103. The soft threshold buys about a 40% larger separation
+  margin before any training, and the margin/spread ratio improves further at ptr_key_d=128 than at
+  64. This says the addressing starts usable, not that the candidate scores well.
+
+COST
+The recurrence is n_steps iterations over a [B, 64, n_steps] state (n_steps <= ~32 here), i.e. a
+value dimension of ~32 instead of 768; it is cheaper than the content-transport recurrences already
+inside the inherited trunk. I could not run the real harness from this jail, so this is a structural
+statement about the shapes, not a measured timing.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+- If the addresses do not separate: 128-dimensional addresses holding ~10-20 paths per window carry
+  a cross-talk cosine of order 0.1; if the delta rule plus rectification cannot clean that up, the
+  read distribution stays diffuse, the mixture collapses toward the mean of earlier observations, and
+  the injection gate learns to shut (the mechanism then costs a few parameters and nothing else, and
+  the candidate scores like its parent minus the occlusion effect).
+- If the soft threshold is wrong for the actual coordinate scale of the standardized embeddings (if
+  the background is much larger than unit variance, theta=1.25 keeps the background; if the code is
+  drowned, thresholding removes the signal too). theta is learned, so this costs training time rather
+  than the mechanism, but a badly scaled start can waste the budget.
+- If the readout initialised at 0.05*I injects a mixture living in raw standardized observation space
+  while the loss lives in the ZCA-whitened target space, the early contribution is a mis-rotated
+  perturbation; the (D,D) map has to rotate it. If that early perturbation is large enough to disturb
+  the inherited trunk before the map is learned, the candidate can end up below its parent.
+- If g_move never separates mv from cat, every step writes its own one-hot and the store degenerates
+  into "the last exposure at this address", which tracks depth-1 only and would show as a native hit
+  rate that does not improve with chain depth.
+- If occlusion at occ_p=0.12 removes the true origin often enough to inject label noise faster than
+  it removes the shortcut, the denoising half is a net negative and the arch would be better with
+  occ_p=0.

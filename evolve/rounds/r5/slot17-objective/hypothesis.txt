@@ -1,0 +1,129 @@
+CANDIDATE: objective r5_decision_direction_metric_quotient
+(+ stream r4_role_bound_path_atom_codes taken from the crossover partner; parent's arch / optim /
+target / batcher / head r2_dualaddress_move_transport kept)
+
+WHAT THE CROSSOVER KEEPS FROM EACH SIDE
+
+From the partner's objective (r22): the exact-target-equivalence quotient. Numerically equal target
+rows are one multi-positive class, and every occurrence mass (anchor, candidate, pair, focal) is
+divided by class size. This matters mechanically for this data: every `mv` step's observation
+renders to the single string "cwd=/ exit=0\n", so a batch contains a large block of bit-identical
+targets. Without the quotient that block is both a false-negative source and a mass distortion in
+every batch statistic. Verified against evolve/jail_data/train_sample.jsonl: mutating commands
+(`mv`, `cat a > b`, `cat a >> b`) carry exit 0 and an empty `output`, so their rendered observation
+is identical across the whole split.
+
+From the parent's objective (r12): the band-pass confusability ring over close-but-distinct targets
+as the source of importance-weighted negatives, and a repulsion hinge expressed in the eval's own
+squared-L2 decision variable rather than in a cosine or an inner-product surrogate.
+
+From the parent's head: the dual-address delta-rule transport memory (r2). From the partner's
+stream: the role-bound path-atom codes (r4). Those two are chosen together on purpose. The r2 head
+has to derive a source key and a destination key from a single command embedding through two
+extractors and one shared path-to-key encoder; the r4 stream writes, into the last 128 coordinates
+of that same command token, a role-bound sign code that is literally (role_src * hash(src_path) +
+hash(src_path)) + (role_dst * hash(dst_path) + hash(dst_path)). The head's src/dst extractors then
+have a linearly separable handle on exactly the two quantities they exist to recover, instead of
+having to disentangle two paths out of a mean-pooled sentence embedding. The codes are computed
+per command string in isolation, so they stay prefix-causal and identical across the native and the
+role-swapped arm for every command that is not one of the swapped moves.
+
+THE NEW MECHANISM (what neither parent computes)
+
+Both parents shape their contrastive geometry from PREDICTION ERROR: a per-dimension precision
+weight w_d = (1/(mse_d + eps))^0.5, clamped to [0.25, 4] and mean-normalised, is applied to pred and
+to every candidate target before distances are formed. In the standardized latent space a dimension
+the model cannot yet predict has mse_d near 1 and a dimension it has already learned has mse_d near
+0.05, so that weight hands up to 4x to already-learned coordinates and relatively suppresses the
+high-error coordinates. The coordinates that carry which canary content is in a file are exactly
+the high-error ones. The parents therefore de-emphasise, inside the contrastive term, the
+coordinates the measurement is decided on.
+
+What the measurement is decided on is an identity, not a guess. For a prediction p, a true target
+t_i and a foil t_j,
+
+    ||p - t_j||^2 - ||p - t_i||^2  =  ||t_i - t_j||^2 + 2 * e_i . (t_i - t_j),   e_i = p - t_i
+
+(verified symbolically and numerically). The rank decision therefore depends on the error ONLY
+through its projection on the candidate-difference direction (t_i - t_j), and on nothing else. Two
+things follow, and this candidate implements both.
+
+(1) DECISION-DIRECTION METRIC. Replace the inverse-error precision weight with the ring-weighted
+second moment of the unit candidate-difference directions:
+
+    v_d  =  sum_{i,j} r_ij * (t_id - t_jd)^2 / ||t_i - t_j||^2 ,    w_d ∝ (v_d / mean_d v_d)^0.75
+
+with r_ij the (class-measured) confusability ring, clamped to [0.4, 3.0] and renormalised to mean 1.
+Because sum_d (t_id - t_jd)^2 / ||t_i - t_j||^2 = 1 exactly, v is a probability-like distribution of
+the decision directions over coordinates: w_d asks "how much of the geometry that separates
+confusable observations lives in coordinate d". The identity above says the loss should spend its
+gradient there. This is computed with two matmuls of the size the parents already pay for; the
+algebraic form (2 * [sum_i rowsum_i t_id^2 - sum_ij r_ij t_id t_jd]) was checked numerically against
+the direct double sum.
+
+(2) SCALE-FREE PAIRWISE DECISION HINGE. The parents' repulsion compares the true distance to a
+ring-mean distance with a fixed absolute margin, in the precision-weighted metric. This candidate
+forms, per confusable pair and in the RAW unweighted metric the eval ranks in, the normalised
+decision quantity
+
+    slack_ij = (||p_i - t_j||^2 - ||p_i - t_i||^2) / ||t_i - t_j||^2 = 1 + 2 * e_i.(t_i - t_j) / g_ij
+
+built algebraically from e_i . t_i and e_i . t_j (no extra distance matrix), and penalises
+softplus((0.5 - slack_ij)/0.2), aggregated across a row's ring by a temperature-0.5 weighted
+log-sum-exp so the HARDEST confusable partner dominates instead of the ring average. Normalising by
+the pair's own gap is the point: with an absolute margin, far pairs are satisfied for free and near
+pairs are unreachable, so the term stops discriminating exactly where discrimination is decided.
+The soft maximum is the standard smooth surrogate for the worst-case constraint, and the penalty is
+bounded below by 0 because the aggregation weights sum to one and softplus is non-negative.
+
+Consequently every scale in the loss (equivalence threshold, ring width, duplicate suppression,
+softmax temperature, gap floor) is now a fraction of the class-measured mean off-diagonal target
+distance rather than an absolute constant — required, because changing the coordinate metric changes
+the absolute scale of every distance in the batch and the parents' fixed _TEMP = 0.25 / _MARGIN =
+0.5 would no longer mean what they meant.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca is native_hit minus swap_stayed on the same board, and a window is won only when the
+prediction at the withheld read lands nearer to the content the chain actually routed there than to
+the other contents on that board. Those competitors are same-format files differing in a canary
+hash: their targets are close in the encoder's geometry, and the coordinates that separate them are
+a minority of the 768 that the model predicts worst. A loss whose contrastive metric is driven by
+prediction error puts its contrastive gradient on the majority of coordinates that all board
+candidates agree on, where by the identity above the gradient cannot change any decision. Both
+mechanisms here move gradient onto the coordinates and the pairs where the decision is actually
+made, without altering what is fed to the model. A model that improves this way must improve
+native_hit; it cannot inflate swap_stayed, because nothing in the loss references the move order,
+the read location, or any resolved routing — the loss sees only pred, tgt and the batch's own target
+geometry.
+
+Nothing here is computed at scoring time. The commands are never parsed, no move chain is resolved
+anywhere in my code, and no resolved routing is placed in the model's input; the whole mechanism is
+a reweighting of a training loss over (pred, tgt) and disappears after training. That also settles
+the withheld-observation hazard: this objective is not called at the scored position at all, and it
+has no branch that consults whether an observation is present, so there is nothing here that can
+switch itself off exactly where the candidate is judged. WANTS_CTX is deliberately not set — no part
+of the mechanism needs the command embedding or the previous observation.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- If the coordinates with high ring-direction second moment are encoder NOISE coordinates (dimensions
+  where the frozen encoder is unstable across near-identical texts) rather than content coordinates,
+  then w_d aims the gradient at noise and both the absolute fit and comp_ca get worse. The [0.4, 3.0]
+  clamp and the retained raw squared-error anchor bound how far this can go, but do not remove it.
+- If the decision directions are close to isotropic over the 768 coordinates, v_d is flat, w_d is
+  ~1, and mechanism (1) is a no-op; the candidate then rests on the hinge alone and probably lands
+  within noise of the parent. That is the benign failure and it is detectable: the loss reduces to
+  the quotient contrastive with a different repulsion.
+- The gap-normalised hinge gives near pairs a gradient proportional to 1/g_ij. If the duplicate
+  band-pass and the gap floor (10% of the mean gap) do not clip the smallest gaps hard enough,
+  a few pairs could dominate the gradient and destabilise training; the harness's grad-norm clip at
+  1.0 is the last line, and instability would show as a degraded health reading, not as a silent win.
+- The r4 stream is a real added risk on top of the objective: if the delta-rule head's advantage
+  came from something the hashed path codes disturb (they overwrite the last 128 of 768 embedding
+  coordinates of every command token), the head could get worse even though the objective is better,
+  and the two effects are not separable from this one candidate's score alone.
+- Cost: the loss adds two n-by-n-by-D matmuls and roughly five extra n-by-n float32 buffers over the
+  parent at n ≈ batch_size * steps_per_sequence. This is the same order the parent already pays and
+  is expected to be a small fraction of a training step, but I could not run it here — no torch in
+  the jail — so treat that as unmeasured rather than as a profiled figure.
