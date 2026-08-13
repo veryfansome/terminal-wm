@@ -6,6 +6,9 @@
 #   STAGE=<name> cloud/lane.sh run ...     run a single stage against the recorded pod
 #   POD=<id>     cloud/lane.sh run ...     attach to a pod instead of provisioning one
 #   FORCE=1      cloud/lane.sh run ...     re-measure genomes that already have a local record
+#   LANE_STATE=<path>                      where this lane records its pod id. Give two
+#                                          concurrent lanes DIFFERENT paths and DISJOINT
+#                                          genome sets to halve wall-clock on two 1x boxes.
 #
 # Two failures on this lane cost real money, and neither is one a person reliably avoids by
 # intending to. A campaign finished and nothing noticed, so a box billed for hours doing nothing.
@@ -27,7 +30,9 @@ set -Eeuo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 RP="bash cloud/runpod.sh"
-STATE="cloud/.lane-pod"
+# Per-lane, so two lanes can run side by side on disjoint genome sets without each
+# overwriting the other's pod id — which would leave one box billing with nobody holding it.
+STATE="${LANE_STATE:-cloud/.lane-pod}"
 POD_REPO="~/terminal-wm"
 TMUX_SESSION="twm-campaign"
 POLL_MAX_MIN="${POLL_MAX_MIN:-360}"
@@ -144,7 +149,24 @@ stage_poll() {
     done
 }
 
-stage_download() { log "download"; $RP pull "$(_pod)"; }
+stage_download() {
+    # Every pod writes cloud/podresults/campaign.log, and pull rsyncs into one local directory,
+    # so a second lane's pull would silently replace the first lane's log. The per-genome records
+    # have distinct names and do not collide; only the log does. Keep both.
+    local id; id="$(_pod)"
+    if [ -f cloud/podresults/campaign.log ]; then
+        mkdir -p cloud/podresults-archive
+        cp cloud/podresults/campaign.log \
+           "cloud/podresults-archive/campaign-$(date -u +%Y%m%dT%H%M%SZ)-$id.log"
+    fi
+    log "download"
+    $RP pull "$id"
+    if [ -f cloud/podresults/campaign.log ]; then
+        mkdir -p cloud/podresults-archive
+        cp cloud/podresults/campaign.log \
+           "cloud/podresults-archive/campaign-$(date -u +%Y%m%dT%H%M%SZ)-$id.log"
+    fi
+}
 
 stage_verify() {
     local missing=0 failed=0 total=0 g f st
