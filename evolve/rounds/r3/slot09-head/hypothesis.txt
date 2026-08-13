@@ -1,0 +1,142 @@
+MECHANISM: a rename-addressed slot registry with occupancy-decided source/destination roles.
+
+WHAT THE DATA FORCES (checked against evolve/jail_data/train_sample.jsonl, 24 real training
+trajectories, 172 mv steps). Every single mv step in the sample has output == "" — its rendered
+observation is "cwd=/ exit=0\n" with no content in it at all. So the observation token of a move
+carries zero information about what moved or where it went; ALL of the routing information sits in
+the one mean-pooled command embedding of "mv SRC DST". The sample also contains genuine multi-hop
+chains, e.g. in sequence 1: root.msg -> root.msg.1 -> sshd_config.cfg.2 -> sshd_config.cfg.4,
+interleaved with g72/f654.dat -> root.msg.3 -> root.msg.5 -> sshd_config.cfg.6 -> .7 -> .8. The two
+chains deliberately reuse the same name families, so lexically adjacent paths (root.msg.1 vs
+root.msg.3) hold different contents. Two consequences drive the design: (1) a mechanism must read a
+memory at one address and write at a different address within a single step, using only the command
+embedding; (2) address decoding must resolve near-identical path strings, and content must survive
+several hops without blurring.
+
+WHAT THE MODULE COMPUTES. The head registers a module that runs over the frozen interleaved
+embeddings (never over trunk hidden state) and maintains S slots, each a triple (address key a_s in
+R^K unit-norm, content vector c_s in R^768, fill scalar f_s in [0,1]). At command position i it maps
+the command embedding through one encoder and TWO address readouts to unit keys ka, kb, forms the
+address attentions Aa = softmax(<a, ka>/tau), Ab = softmax(<a, kb>/tau), and the occupancies
+occ_a = sum_s Aa_s f_s, occ_b likewise. The role split is then p = sigmoid((occ_a - occ_b)/route_tau)
+and
+
+    w_src = p*Aa + (1-p)*Ab          k_src = unit(p*ka + (1-p)*kb)
+                                     k_dst = unit((1-p)*ka + p*kb)
+
+i.e. the candidate address that currently HAS something is the source and the one that is empty is
+the destination. The read handed to the prediction is r_i = sum_s w_src_s c_s, taken BEFORE any
+step-i write. Then two updates, gated by m_i (move) and u_i = write*(1-m_i) computed from the
+command features, the observation features and occ_src:
+
+    a_s <- unit( a_s + m_i*w_src_s*(k_dst - a_s) + u_i*w_alloc_s*(k_src - a_s) )
+    c_s <- c_s + u_i*w_alloc_s*(o_i - c_s)
+    f_s <- f_s + u_i*w_alloc_s*(1 - f_s)
+    w_alloc = softmax( <a, k_src>/tau + free_w*(1 - f) )
+
+The move branch touches ONLY the address: the slot keeps its content vector bit-for-bit and acquires
+the destination name. That is the point of the design — a move is a rename, not a copy.
+
+WHAT NEITHER PROGRAM I WAS GIVEN COMPUTES.
+- The crossover partner (all-baseline) computes nothing here: its head is a no-op passthrough.
+- My parent's head (r18_transition_forwardmodel_consistency) adds no eval-time state at all. It only
+  supervises the arch's shared operator f(obs_pre, cmd) on mined triples. The arch it supervises
+  (r22 over r18) has a path memory whose read key and write key at a step are BOTH derived from the
+  same command (tr_path(x_cmd), and file_read/file_write/path_read/path_write likewise read and write
+  at the step's own address). It therefore cannot, in one step, read at one path and write at another
+  — it has no representation of "the content that was at A is now called B". Nothing in the parent
+  stack transports content across addresses.
+- Two things here are new relative to any mechanism I was shown. First, transport by RE-ADDRESSING
+  rather than by copying a value into a second memory location: content is written into a slot once,
+  when it is observed, and every subsequent hop only rotates that slot's address. A copy-based
+  transport re-reads a soft, attention-blurred value at every hop and re-writes it, so error
+  compounds multiplicatively with depth; a rename keeps the content vector exact for arbitrarily deep
+  chains, and depth-3/depth-4+ windows are exactly where the scored slice lives. Second, the
+  source/destination assignment is made at run time from memory occupancy instead of being tied to
+  which of two projections produced the key. Fixed-role extractors have to break a discrete symmetry
+  by gradient descent (which projection means "source"?); occupancy routing removes that symmetry
+  from the optimisation entirely and makes one rule serve both step types — on a "cat P" both
+  candidates land on the same filled slot, p is uninformative, w_src is that slot, and the read is
+  correct; on "mv A B" the filled candidate is A and the empty one is B.
+
+WHY IT SHOULD MOVE comp_ca SPECIFICALLY. comp_ca = native_hit - swap_stayed over the same board, and
+the role-swap arm changes only the move commands. A predictor that keys on the location being read
+sees an identical read token in both arms and cancels to exactly zero. This module cannot behave that
+way: what it returns at the read is the content of whichever slot currently carries that address, and
+which slot that is was determined by the mv commands. Swap the mv commands and a different slot has
+been renamed to the read path, so the swapped arm returns the partner's content — native_hit up and
+swap_stayed down at the same time, which is the only thing the differential rewards.
+
+THREE TRAIN-TIME TERMS (none of them runs at eval).
+1. Read bootstrap with bridge mining. With the injection scale zero-initialised, the gradient reaching
+   the module's internals through the prediction is ~0 at step 0, so the module needs its own signal.
+   The aux trains r_j toward the TRUE next observation o_j at position j, with a squared-L2 InfoNCE
+   over the other observations of the same sequence (near-duplicates of o_j removed from the negative
+   set) plus an MSE anchor. Which positions get weight is decided from COMMAND geometry only: a
+   "bridge" at k is a command whose best earlier partner i and best later partner j are each strongly
+   similar to it (>= row mean + hi_z*row std of the row's pairwise command cosines) while being
+   dissimilar to each other (<= row mean + lo_z*std), plus a floor on how much the observation at i
+   differs from the observation at k. A command mentioning two different paths is the only command
+   that can sit between two mutually unrelated commands like that, so this pattern selects moves and
+   redirects without any text, any path parsing, or any check that the transport succeeded. Positions
+   marked as the later end of a bridge get bonus_w; every other valid position gets base_w; bridge
+   commands themselves get zero, since their true observation is empty and training the memory to
+   emit it would fight the transport. Note the target is always the ground-truth next observation the
+   main objective already uses; the mining only re-weights positions.
+2. Address discriminability, borrowed from sparse mixture-of-experts load balancing (the Shazeer /
+   Switch-Transformer auxiliary): mean per-step entropy of the address attention is penalised (be
+   confident about which slot you mean) and the KL of the batch-average slot usage against uniform is
+   penalised (do not collapse every path onto one slot). Together these push the learned projection
+   into a discriminative hash, which is what "root.msg.1 vs root.msg.3" requires; the address softmax
+   temperature is itself a learned scalar so the sharpening can be found rather than guessed.
+3. The inherited parent term. The parent head supervised the arch's shared latent-transition operator
+   to CHANGE content. I keep the same seam (net.transition_from_emb, skipped when the arch has no such
+   operator) and supervise the complementary invariance the measurement actually needs: at mined
+   bridge commands, f(content_at_source, mv_command) must PRESERVE the content (cosine + MSE against
+   the source observation itself). Small weight (0.05).
+
+WHAT IS KEPT FROM THE BASELINE PARTNER. The prediction path is still the arch's own readout: the
+module contributes a residual at command positions only, through a per-dimension scale initialised to
+zeros behind a sigmoid read gate, so at initialisation `add` is exactly 0 and the wrapped forward
+returns the unwrapped arch's tensor unchanged. Nothing recomputes the prediction from the trunk hidden
+state, so architectures whose prediction is not a per-position function of h are not bypassed. The
+main objective and target space are untouched.
+
+EXACT GRADIENT PATHS (so the claim above is checkable rather than a slogan). The module reads
+batch["tok"] and key_pad only — never h, never the trunk. Terms 1 and 2 therefore backprop only into
+head-owned parameters. Term 3 is the one exception and it is deliberate: through
+transition_from_emb it reaches the arch's cmd_proj, type_emb, in_norm, tr_in and tr_out, exactly as
+the parent head's aux did. Everything is ramped by a smoothstep over ramp_steps=300 and every branch
+is guarded with nan_to_num and a final isfinite check that falls back to 0.0.
+
+HOW IT COULD FAIL.
+- Address decoding is the whole bet. The keys are linear readouts of a frozen mean-pooled sentence
+  embedding of the full command line. If the pooled embedding of "mv A B" simply does not contain a
+  linearly separable A-component and B-component — if pooling has mixed the two paths into something
+  from which no linear map can recover either address distinctly — then ka and kb converge to the same
+  key, occupancy routing degenerates (p -> 0.5, k_src == k_dst), the rename becomes a no-op, the module
+  reduces to "content most recently written at this address", and the injection gate is driven to
+  zero. In that case the candidate is the parent with wasted compute, not worse than it.
+- Collision failure: root.msg.1 and root.msg.3 differ by one character, so their pooled embeddings are
+  very close. If the learned projection plus the learned temperature cannot pull them apart, the read
+  returns a blend of two contents and the InfoNCE cannot rank the right one. The MoE-style regulariser
+  is aimed exactly at this and is the part most likely to be too weak.
+- Mining precision: the bridge test is a heuristic over frozen-embedding cosines, so some selected
+  positions are not transport destinations. The loss there is still the true next observation, so bad
+  selections cost focus, not correctness.
+- Train/eval asymmetry from the r22 arch: occlusion happens inside the arch's forward, so the trunk
+  sees occluded observation tokens during training while the registry sees clean ones. If the
+  optimiser over-weights the clean registry path during training, the mix at eval (where both are
+  clean) is miscalibrated.
+- Cost, stated as unmeasured: the registry adds a python loop of n (up to 32) steps with roughly a
+  dozen small kernels each, and keeps an [B, 16, 768] content tensor per step for backward — on the
+  order of a few hundred MB of extra activation at bs=64, comparable to what the r18 arch's own
+  per-step loop already holds. I could not run this: no torch is installed in the jail, so speed and
+  memory are reasoned from shapes, not measured, and a lane with a small GPU is a real OOM risk.
+- Slot capacity: 16 slots against training sequences that touch more than 16 distinct paths means
+  older content is overwritten by the freeness-biased allocator. The scored windows expose few
+  contents, so this should bite training more than measurement, but it is an assumption.
+
+WHAT WOULD FALSIFY THE STORY EVEN IF THE NUMBER GOES UP. If comp_ca rises while the trained
+out_scale stays near zero, the registry did nothing and the gain came from the aux terms perturbing
+the arch's transition operator — a different mechanism than the one claimed here.

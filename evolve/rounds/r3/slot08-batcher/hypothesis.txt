@@ -1,0 +1,145 @@
+WHAT I CHANGED
+
+One axis: batcher. r2_routedepth_tilt_readcollision_blocks -> r3_cuebalanced_routing_blocks.
+Everything else in the genome is inherited from the parent unchanged.
+
+The crossover keeps both parents' block machinery and adds a third mechanism that neither has.
+
+Kept from the parent (r2_routedepth_tilt_readcollision_blocks):
+  - the mv-edge backward walk that gives each sequence its deepest routed read and the exact hop
+    count from the read location back to the file the content started in;
+  - the read-collision neighbourhood block: sequences whose deepest routed read has a
+    near-duplicate command embedding under a fixed JL projection while their read answers are
+    NOT near-duplicates;
+  - the annealed Boltzmann tilt exp(alpha*z) on the hop-count score and the annealed hard
+    fraction.
+Kept from the crossover partner (r6_sysblock_hardneg_curriculum):
+  - the image block is now the POOLED UNION of n_block_images distinct systems drawn without
+    replacement, the partner's shape, rather than the parent's single-image block. A batch's
+    same-system negatives therefore come from a few systems at once instead of one.
+
+THE NEW MECHANISM: ORDER-CUE DECORRELATION BY RAKING
+
+For each training sequence I now also extract, from the command strings alone, two ORDER RANKS
+of the content that the deepest routed read actually returns:
+
+  cue_a = fm_rank. Take the board: every mv in the trajectory, before the read, whose source or
+    destination shares the routed content's leading 3-component path prefix (e.g. /tmp/w/cups).
+    Sort those moves in time order. fm_rank is the index, in that list, of the EARLIEST move that
+    belongs to the walked chain. fm_rank == 0 means the tested content is the one that moved
+    first on its board.
+  cue_b = orank. Take the distinct files read (2-token cat/head/tail) on that same path-prefix
+    board before the first board move — these are the window's exposures. orank is the position
+    of the walked chain's origin file in that list. orank == 0 means the tested content is the
+    one exposed first.
+
+Measured on the 24 real training trajectories in evolve/jail_data/train_sample.jsonl, these two
+ranks are strongly non-uniform: fm_rank is 0 in 13 of 24, 1 in 7, >=2 in 4; orank is 0 in 9, 1 in
+10, >=2 in 5. So "answer = the content whose origin moved first on this board" is right about 54%
+of the time while the number of contenders on a board is 2..5 (chance roughly 30%), and "answer =
+one of the first two exposed" is right about 79% of the time.
+
+The batcher reweights the sequence distribution to destroy exactly those two correlations.
+Sequences are stratified by hop count (1-2 / 3-4 / 5+ / no routed read). Inside each stratum I run
+iterative proportional fitting (raking, the survey-statistics estimator: alternately rescale the
+weight mass of each fm_rank class and each orank class to the stratum mean, 4 sweeps) to obtain
+per-sequence weights that drive BOTH rank marginals toward uniform while every stratum keeps its
+original total share, so the hop-count marginal is untouched. Weights are raised to cue_gamma,
+clipped to a bounded ratio (cue_cap) so effective sample size stays bounded, and renormalized.
+
+Two places consume that weight:
+  1. The "uniform" part of every batch is replaced by an inverse-CDF draw from it. This is ON FROM
+     STEP 1 and is NEVER annealed — unlike the hardness curriculum, which still ramps.
+  2. Inside every block, the pool weight is the raking weight times the annealed hop-count tilt,
+     AND the block's slots are dealt round-robin across the three fm_rank classes (rotating with
+     the step index) so each individual batch, not merely the long-run average, carries the three
+     classes in near-equal number. Per-batch balance matters here because the objective's loss is
+     an in-batch listwise softmax: examples in one batch are coupled, so a cue that is balanced
+     only in expectation is still exploitable within each step.
+
+WHAT THIS COMPUTES THAT NEITHER PARENT COMPUTES
+
+Both parents compute, at most, hop depth. Neither computes where in the board's move order or
+the board's exposure order the answered content sits, and neither does anything to the
+distribution of those quantities. The parent's tilt makes deep chains more frequent; it leaves
+the first-mover correlation exactly as the data generator produced it. Simulated on a fit built
+from the 24 real trajectories (replicated, embeddings randomized, bs=64, 4000-step schedule),
+the fm_rank share of drawn sequences is 0.534 / 0.293 / 0.173 for the parent and 0.540 / 0.295 /
+0.164 for the partner, versus 0.375 / 0.362 / 0.263 for this impl, and 0.394 / 0.350 / 0.256 in
+the late, fully-blocked phase where the depth tilt is at full strength. That is the intended
+signature: the deep-chain preference is preserved (late-phase depth>=4 share rises from 0.33 to
+0.50) while the first-mover cue is driven to near chance.
+
+WHY THAT SHOULD MOVE comp_ca
+
+comp_ca is native_hit minus swap_stayed, and the swap exchanges the move-position sets of the
+routed content and a partner over the same board. A model that answers "the content that moved
+first" is right natively whenever fm_rank == 0 and, after the swap, follows the swap to the
+partner — so it scores +1 on those windows and -1 on the mirror-image windows where the partner
+was the first mover. It cancels only in expectation, over a frozen slice of n=89. It buys nothing
+real, and the brief already flags it as a band the score must be read against.
+
+The cost of leaving that cue in the diet is not the band, though: it is that the cue is by far the
+cheapest descent direction available early. Detecting "which mv command comes first" needs only
+the position embedding and one command token. Detecting "which mv chain terminates at the path I
+am being asked to read" needs the model to match the second path string of one mv command against
+the first path string of another, repeatedly, through a 768-d frozen mean-pooled sentence
+embedding projected to width 192 — the composition the r22 path-state arch's delta-rule file and
+path memories exist to perform. When a cue that is 54%-accurate is available for almost no
+parameters, gradient descent takes it first and the expensive circuit never has to form; this is
+ordinary shortcut learning, and the standard fix is to remove the shortcut's predictive value from
+the training distribution rather than to penalize it in the loss (LfF / bias-conflicting
+upweighting; group-balanced resampling; raking). Flattening fm_rank to ~1/3 inside each depth
+stratum makes the first-mover rule worth about what guessing is worth, on a board with 2-5
+contenders. The only remaining way to reduce the listwise loss on a routed read is to route.
+
+That is why I expect a change larger than measurement noise rather than a nudge: the mechanism
+does not add a small preference on top of the parent's diet, it removes the alternative solution
+the model can currently settle into. If the parent's positive score is partly the frozen slice's
+realization of that cue, this candidate should trade that component for a component that survives
+both arms; if the parent has already learned some real routing, this should raise the share of
+capacity spent on it.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+  - The order cues are already near-uniform on the full training split. I measured them on 24 real
+    trajectories only; if the generator's distribution over larger samples is flatter than that,
+    the raking weights collapse toward 1 and this becomes the parent with pooled image blocks.
+    Falsifiable directly: print the fm_rank/orank histograms over the full fit.
+  - The model was never taking the shortcut. Then removing it costs the small ESS the weight
+    clipping implies and gains nothing; expect a wash or a slight loss.
+  - My board reconstruction is wrong on the real distribution. fm_rank depends on grouping moves
+    by a 3-component path prefix. If the eval-relevant boards are not separated by that prefix
+    (or several boards share one), fm_rank is computed against the wrong move list and the
+    weights flatten a quantity that is not the cue. Checked against the sample: the prefix rule
+    reproduces a hand-computed board-level fm_rank on all 24 trajectories, and separates the
+    /tmp/w/cups boards from the /tmp/w/cvar ones; it does merge the several cvar groups, whose
+    chains are shallow and rarely the deepest read.
+  - Balancing fm_rank also destroys something the model legitimately needs. The chain's first move
+    is genuinely informative about depth; I mitigate this by raking INSIDE hop-count strata, so
+    the depth marginal is preserved exactly and only the within-depth order correlation is
+    removed. If the two cannot be separated, native_hit drops without swap_stayed dropping.
+  - Effective sample size loss. cue_cap=4.0 bounds the weight ratio; on the sample the realized
+    range was [0.24, 3.03] with mean 1. If the real split produces heavier tails inside a stratum
+    the clip binds and the flattening is partial, weakening but not inverting the mechanism.
+
+NO ANSWER IS COMPUTED FOR THE MODEL
+
+The batcher returns a list of sequence indices and nothing else. It never edits a sequence, never
+writes a field, never touches z_obs or z_cmd, and never tells the training loop which content is
+the right one. Resolving the mv chain in this module is used only to choose WHICH real
+trajectories train together — the same use the parent already makes of it for hop depth. The model
+sees the identical, unmodified trajectories and must still solve the read from the tokens.
+
+MECHANICAL CHECKS PERFORMED (no real harness available here)
+
+Contract: returns exactly bs Python ints in [0, len(fit)) at steps 1, 10, 500, 4000; bit-identical
+across two make_batcher calls with the same seed; different across seeds; the global torch RNG
+stream is unchanged after 20 batches; `fit` is unmutated (images and cmds compared before/after).
+Degradations exercised: 1 and 2 sequences, bs=1, a single image, sequences with no mv, sequences
+with no `cmds` key, a mixed fit of routed and unrouted sequences, hard_frac_max=0, cue_gamma=0.
+Speed, on this laptop and therefore not a claim about the scoring box: setup 0.02 s at n=600 and
+0.54 s at n=30000 (the O(m^2) collision scan is capped by max_centers=8000, as in the parent);
+per-step cost ~0.1 ms, unchanged from the parent's order of magnitude and negligible beside a
+training step. No claim about the score itself is measured; all numbers above are distributional
+properties of the sampler, not fitness.

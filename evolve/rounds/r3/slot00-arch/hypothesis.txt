@@ -1,0 +1,131 @@
+CANDIDATE: arch = r24_reference_closure_transport (single axis changed; every other axis
+inherited unchanged from the parent genome).
+
+WHAT THE DATA FORCED THIS DESIGN
+In evolve/jail_data/train_sample.jsonl a cups window is a chain of renames over a small board.
+The exposes are `cat <path_i>`, each returning a content blob; the moves are `mv <src> <dst>`
+where dst is a *fresh* name built from some slot's base name plus a numeric suffix that counts
+the move index within the window (mv_0 -> ".1", mv_1 -> ".2", ...); the read is `cat <path>` on
+one of those names. Two facts about that layout drive the mechanism:
+
+  (a) The destination string of one move is, verbatim, the source string of the next move in
+      that content's chain, and the read's path is verbatim the destination of the last move in
+      the chain. Following a chain is therefore a sequence of exact string coincidences between
+      one command and one strictly earlier command.
+  (b) The observation the read must predict ("cwd=... exit=0\n<content>") is essentially the
+      same string as the observation of the expose that first showed that content, so the
+      correct prediction is a near-verbatim COPY of one earlier observation token. Which one is
+      the entire question; producing it once identified is easy.
+
+WHAT NEITHER PARENT COMPUTES
+The parent arch (r18_pathstate_latent_transition_worldmodel) has two delta-rule memories and a
+per-path latent-transition memory. In all three, the slot a command reads is the slot that same
+command writes: `pi = unit(tr_path(x_cmd_i))` is used for both `s_pre` and the rank-1 update, and
+the file/path memories use q/k derived from the same step's features. There is no operation
+anywhere in it that takes the value held under one address and deposits it under a DIFFERENT
+address. It can therefore edit content in place, but it cannot transport content, so a read can
+only be answered by a ONE-HOP content-addressed lookup of the query command against earlier
+commands. On this data that one hop is actively baited: the read path `.../sshd_config.cfg.7`
+is lexically closest to the expose `cat .../sshd_config.cfg`, which holds a DIFFERENT content
+(that is what the pack's name_idx is for). The crossover partner arch
+(r19_obspresent_imagination_worldmodel) adds an obs-absent composition path keyed on token
+type 2; the stream axis in both genomes is baseline_interleave, whose collate emits only types
+{0,1}, so that path never fires on this data and r19 is bit-identical to r18 here. Neither
+program transports content between locations, and neither resolves more than one hop.
+
+THE MECHANISM I ADDED
+A reference-closure transport branch, `_reference_closure` in the impl. Each command position i
+gets a content register C_i, defined by
+
+    C_i = own_i * obs_i  +  (1 - own_i) * sum_{j<i} A_ij C_j
+    pulled_i            =  sum_{j<i} A_ij C_j
+
+with A strictly lower triangular. A_ij is a softmax over strictly earlier command positions of
+
+    <ref_q(u_i), ref_k(u_j)>/sqrt(ref_d)      (bilinear shared-token coincidence)
+  + ref_diff(|ref_p(u_i) - ref_p(u_j)|)       (a NON-bilinear per-coordinate mismatch penalty)
+  + ref_keybias(u_j)                          (how quotable an earlier command is)
+  - softplus(ref_recency) * (i - j)           (learned exponential preference for the most
+                                               recent command that mentions the same name)
+
+against a learned null logit ref_null(u_i), so a row may keep less than unit mass and a command
+that references nothing pulls nothing. u = ref_ln(raw command embedding): the affinity is
+computed on the FROZEN command embeddings, not on trunk features, because the quantity it has to
+detect is purely lexical (does this command mention the same path string as that one).
+own_i = sigmoid(ref_own([u_i, h_cmd0_i])) is "does this step's own observation define the content
+at the location it references" — near 1 for `cat`, near 0 for `mv`, whose observation is empty.
+
+The recursion is LINEAR in C, so the transitive closure is not iterated: the impl assembles
+(I - diag(1-own) A) and solves it against diag(own) OBS with one batched unit-lower-triangular
+solve (`self._solve_lower`, with the same MPS forward-substitution fallback the parent already
+carries). (I - M)^{-1} = I + M + M^2 + ... sums over reference paths of EVERY length, so a
+depth-8 chain costs exactly what a depth-1 chain costs and no attention depth is consumed per
+hop. Row sums of M are (1-own_i) * (mass_i) <= 1 and M is nilpotent, so the solve is
+well-conditioned; I verified numerically that the batched solve reproduces the sequential
+recursion exactly and that a hand-built depth-4 pointer chain resolves to the exposed
+observation.
+
+`pulled_i` is then rendered through the arch's SHARED latent-transition operator,
+`self._transition(pulled, x_cmd)` — the same f(s,cmd) = s*(1+gamma(cmd)) + beta(cmd) that the
+parent's `_transition_reads` uses and that the inherited head (r20_dualpre_transition_consistency,
+which contains the partner's r18 head verbatim at weight 1.0) supervises. That is the crossover:
+the closure decides WHICH content is at the read location, the parent's learned operator renders
+that content as THIS command's observation. The result enters the prediction through
+`ref_read`, a zero-initialised (D,D) readout gated by sigmoid(ref_gate([h_cmd0, rms(pulled),
+max_j A_ij, sum_j A_ij])), so at initialisation the forward is the parent's function and the
+gate can switch the branch off wherever no reference was found.
+
+I also made the partner's obs-absent composition live on data that has no type-2 token: in
+`_transition_reads` the write base is `info_i * obs_i + (1 - info_i) * s_pre` with
+info_i = sigmoid(obs_info(x_cmd_i)) (bias +4.0, i.e. approximately the parent at init). r19's
+claim is that a step whose observation carries no content should compose the operator on the
+retrieved state instead of overwriting the slot with the observation; on this data that step is
+`mv`, identified by its command, not by a token type. The signature of `_transition_reads`
+is left at exactly six positional arguments so the inherited r20 head's memory arm still runs
+(r19's seven-argument version would have raised a TypeError there).
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN A NUISANCE QUANTITY
+comp_ca is native_hit minus swap_stayed on the same board. A predictor that keys on the read
+location alone is identical in both arms and contributes zero; my branch is not that, because
+`pulled` at the read position is obtained by chasing the reference graph built from the MOVE
+commands, and the role-swapped arm re-encodes exactly those commands, so the graph, the chain
+and hence the pulled register all change. A predictor that keys on move-order position is not
+what this computes either: nothing in `_reference_closure` reads the step index except the
+recency term, which is a single shared scalar penalty on (i - j) and cannot express "the content
+that moved first". The branch's output is a copy of a specific earlier observation selected by
+learned lexical coincidence, which is the identity-carrying quantity the metric is asking for.
+Nothing in the code parses a path, splits a command, or reads a step's meta: the reference graph
+is entirely a learned function of frozen embeddings, so the routing is something the model
+learns, not something the code hands it.
+
+Why it could be a large move rather than a small one: per (b) above, the correct answer already
+exists verbatim as an earlier obs token, so the ceiling for a mechanism that identifies the right
+one is high, and the parent's structure caps it at one hop with an adversarially chosen
+distractor at hop one. Going from "one hop, baited" to "all hops, in one solve" is a change of
+kind on the d3 and d4+ windows that make up the eligible slice.
+
+CAUSALITY
+pred at command i depends on C_j only for j < i, and C_j depends on obs_j; obs_{i-1} sits at
+token 2i-1, strictly before cmd_i at 2i. I ran the stream's own leakage probe (corrupt obs_3 at
+token 7, require cmd preds 0..3 unchanged): the change is exactly 0.0 at positions 0..3.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+1. The discriminating part of a path is the numeric suffix, one token out of roughly thirty in a
+   mean-pooled 768-d command embedding. If ref_q/ref_k/ref_p cannot amplify that direction
+   enough, A_ij will put its mass on the base-name match (the wrong content) and the branch will
+   be a confident wrong copy — worse than the parent, not merely neutral. The null logit and the
+   confidence gate are the escape hatches, but they only help if the model learns that it is
+   wrong.
+2. The recency term is a single scalar. If the right answer is not usually the most recent
+   command mentioning the name, that prior misleads instead of disambiguating.
+3. `ref_read` is a second (D,D) matrix and the inherited optim spectral-caps every (D,D)
+   parameter at 4.0. If the branch needs a near-identity copy at a larger gain than the cap
+   allows, the contribution is throttled.
+4. Reusing `_transition` for the chain readout couples this branch's gradients to the parent's
+   transition memory and to the head aux. If that coupling degrades the operator the parent
+   depends on, the base model gets worse even if the chain works.
+5. Everything here is unmeasured. I could not run the real harness from the jail; the only things
+   I verified are shape/finiteness/causality, exactness of the closure solve against the
+   sequential recursion, and cost (3.9M params vs the parent's 3.1M, and 0.639 s vs 0.620 s per
+   forward+backward at B=64, n=32 on CPU — about 3% slower, so the fixed step budget is not at
+   risk). No claim about the score is measured.

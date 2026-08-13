@@ -1,0 +1,109 @@
+CANDIDATE: r3_srcdst_hashslot_coding (stream) + r22_prefix_content_xattention (arch, from the
+parent) + r2_dualaddress_move_transport (head, from the crossover partner).
+
+WHAT I ADDED
+
+A new stream impl. The token layout is untouched (CUPS_LAYOUT stays "interleave2", one command
+token and one observation token per step, observation tokens are the raw standardized z_obs).
+The only change is that a COMMAND token is no longer the frozen sentence embedding alone. It is
+
+    tok_cmd[i] = z_cmd[i] + code(cmds[i])
+
+where code() is a deterministic sparse symbol code built from that one command string:
+
+  dims   0..351  SRC block  - the command's source path
+  dims 352..703  DST block  - the command's destination path
+  dims 704..751  VERB block - the command's verb
+  dims 752..758  seven form flags: source present, destination explicit, verb==mv, verb==cat,
+                 verb==ls, redirect '>', redirect '>>'  (+1.0 when on, -1.0 when off)
+
+A path's entries are 24 signed values at 24 coordinates, both the coordinates (mod 352) and the
+signs read off a SHAKE-256 digest of the path string, magnitude 2.0. The digest is taken over the
+path ALONE, so the SAME path produces the SAME relative pattern whichever of the two equally-wide
+path blocks it lands in: the pattern a path leaves in the DST block at offset 352 is a rigid
+translate of the pattern the same path leaves in the SRC block at offset 0. Verified: for
+"mv A B" and "cat B", cos(DST block of the mv, SRC block of the cat) == 1.0 exactly, and 0.0 for
+"cat B'" where B' differs from B by one trailing character.
+
+Parsing: split on whitespace, drop flags, take '>' / '>>' targets as the destination, take
+positional[-1] as the destination for mv/cp/ln, otherwise set the destination equal to the source
+(so a plain read "cat X" addresses X in both roles). All 724 commands in the jail sample parse
+under these rules: only cat, ls and mv appear, every argument is an absolute path, there are no
+pipes, quotes or globs.
+
+WHAT IT COMPUTES THAT NEITHER PARENT COMPUTES
+
+Both programs address content through delta-rule memories whose keys are learned LINEAR maps of
+the command token: the arch's file_read/file_write and path_read/path_write, and the head's
+src_ext/dst_ext feeding one SHARED path_key. Those maps see a mean-pooled sentence embedding of
+the whole command. Two things follow from the real data that neither program can fix downstream:
+
+1. The move chains rename by appending a counter. In the sample, one window walks
+   root.msg -> root.msg.1 -> sshd_config.cfg.2 -> sshd_config.cfg.4 -> root.msg.5 ->
+   sshd_config.cfg.6 -> .7 -> .8. Distinct memory SLOTS therefore differ by one trailing
+   character, and their frozen embeddings are nearly parallel. A key that is a linear function of
+   such an embedding cannot separate the slots, so writes and reads at ".7" and ".8" collide. My
+   coding gives them near-orthogonal 24-sparse patterns, so the slots are separable by a linear
+   key at high SNR (24 coordinates of amplitude 2 against unit-variance background).
+
+2. "mv A B" is mean-pooled into ONE vector in which A and B are superposed. src_ext and dst_ext
+   receive the identical vector and must emit different keys from it, and path_key must then map
+   the destination side of step k and the source side of step k+1 onto the SAME key when they name
+   the same file. That equality is not linearly available today. Under my coding it is available
+   by coordinate selection alone, and generically - src_ext restricted to dims 0..351 and dst_ext
+   restricted to dims 352..703 see byte-identical vectors for a given path, so the shared path_key
+   composes correctly for paths never seen in training. That is what makes it transfer to a
+   held-out image rather than memorise the training filesystem.
+
+WHY THAT SHOULD MOVE THE SCORED QUANTITY
+
+comp_ca is native_hit minus swap_stayed. A model can only differ between the two arms by
+integrating the move commands, because the read command token is byte-identical in both. The
+transport head implements exactly the needed recurrence - write at the destination key the value
+currently read at the source key, gated - and the arch supplies the deep prefix memory and the
+content cross-attention that turns a retrieved slot value into a next-observation prediction. My
+claim is that the binding step those mechanisms need is currently unavailable in their INPUT, not
+missing from their structure, and that supplying it is worth more than another structural module.
+If it works, native_hit rises on d3/d4+ windows while swap_stayed stays where it is, because a
+role-swapped chain routes a different content to the read path and the memory read changes with
+it.
+
+WHY IT IS NOT HANDING THE MODEL THE ANSWER
+
+code_cmds is position-wise: the value at position i is a function of cmds[i] and z_cmd[i] and of
+nothing else - not of earlier commands, not of any observation, not of any cross-step matching. So
+it is trivially prefix-causal, and the read position's token is identical under the native chain
+and under a chain in which two contents exchange their moves (checked directly: build both chains,
+the coded read token compares equal, the coded move tokens differ). The coding names locations; it
+does not resolve where any content ended up. Resolving the chain still requires the model to
+propagate values across the moves through its own memory. collate calls code_cmds itself, so what
+training sees and what the instrument reproduces are the same tensor bitwise (checked).
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- If the binding is not the bottleneck - if the parents already separate the slots well enough and
+  the deficit is capacity, optimisation or the step budget - the coding buys nothing and the
+  candidate lands near its parent.
+- If the added code (about 63 non-zero coordinates of amplitude 1-2 on a unit-variance 768-d
+  vector) disturbs the semantic command signal enough to degrade the contrastive objective on the
+  ordinary read steps, the shared trunk could get worse overall and drag the cups windows with it.
+  The perturbation is roughly a 17% energy increase, which I expect to be tolerable, but this is
+  unmeasured.
+- If dropping the parent's head (r18 forward-model consistency, which supervised the arch's
+  transition operator) costs more than the transport head gains, the crossover loses on the head
+  axis even if the stream wins. The arch's transition operator still trains through the main loss;
+  it is just no longer separately supervised.
+- If the r2 head's label-free mining does not fire on this data the head contributes only its
+  zero-initialised read injection. It should fire: the mv steps all produce the identical empty
+  observation "cwd=/ exit=0\n" so they cluster as mutations, and a cups_test cat reproduces its
+  cups_expose observation verbatim under a different command, which is exactly the mined pattern.
+
+VERIFIED HERE (CPU, random embeddings, jail sample commands)
+
+collate/code_cmds bitwise agreement; observation tokens and tgt untouched; types/key_pad/cmd_mask
+layout matches the baseline; position-wise purity; read-token equality under role swap with move
+tokens differing; identical cross-block pattern for one path and orthogonality across paths;
+determinism after clearing the cache (SHAKE-256, never Python hash()); leakage_ok True on a
+trained net; 12 training steps of the full genome finite and non-NaN; flatten_predictions shapes.
+collate is about 5x faster per call than the baseline collate because it assigns whole strided
+slices instead of looping per step, so the coding costs no wall clock.

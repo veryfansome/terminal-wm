@@ -1,0 +1,145 @@
+CANDIDATE: r20 dual-key content-gated transition world model + depth-tilted system-block batcher
+AXES CHANGED: arch, batcher. Everything else inherited unchanged from both programs.
+
+WHY THE CROSSOVER IS AT THE ARCH, NOT THE BATCHER
+
+The two programs I was handed are identical on six of seven axes, including my own (both run
+r6_sysblock_hardneg_curriculum with the same params). They differ only in arch: one is
+r19_obspresent_imagination_worldmodel, the other r18_pathstate_latent_transition_worldmodel. I
+diffed those two files. r19 is r18 plus a "type 2 = imagined command, no observation" slot, plus
+Embedding(3) instead of Embedding(2) for the type embedding. The only stream in the registry
+(baseline_interleave) emits types in {0,1} and nothing else, and the head both programs carry
+(r18_transition_forwardmodel_consistency) refuses to run at all unless every even-position type
+is 0 and every odd-position type is 1. So under this genome r19's imagination branch is
+unreachable: r19 and r18 compute the same function, and differ only in how many rows the type
+embedding table draws from the RNG at init. A crossover that picks one of the two archs is
+therefore a no-op dressed as a decision. The only non-vacuous crossover is to take the mechanism
+r19 DESCRIBES -- update a memory slot by composing the transition operator when the observation
+carries no content -- and make it reachable in the stack that actually runs. That is what the
+arch here does, and it does it as something the model learns rather than something a stream is
+told, so the head's aux stays live and no eval-path contract moves.
+
+WHAT THE DATA SAYS (measured on evolve/jail_data/train_sample.jsonl, 24 sequences)
+
+- Verbs present: cat 446, mv 172, ls 106. Every `mv` is exactly three tokens, `mv SRC DST`.
+- Every `mv` step's observation is empty output with exit 0, i.e. the rendered observation is
+  `cwd=/ exit=0\n` -- a near-constant string carrying nothing about what moved.
+- Exactly one cups_test read per sequence (24 tests in 24 sequences, ~30 steps each).
+- Parsing `mv src dst` as a forwarding graph (dst inherits src's hop count, src cleared) and
+  taking the longest hop count reproduces the tested window's meta depth in 21 of 24 sequences.
+  The per-sequence distribution of that quantity is 1:3, 2:8, 3:4, 4:5, 5:2, 6:2 -- 46 percent of
+  training sequences are depth <= 2, while the scored slice is entirely depth >= 3 (60 at d3, 29
+  at d4+).
+- Same-image sequence pairs share no more read paths than cross-image pairs in this sample (mean
+  4.08 vs 4.09 over all reads; 0.58 vs 0.43 restricted to /tmp/w/cups paths). The parent's
+  blocking key buys same-system negatives; it does not buy same-path/different-content negatives.
+
+MECHANISM 1 -- SPLIT READ AND WRITE ADDRESSES IN THE TRANSITION MEMORY (arch)
+
+Both parents' transition memory uses ONE key per command: p = unit(tr_path(x_cmd)) is used to
+read s_pre out of `mem` and to write the updated value back. A single address that is both source
+and destination cannot express a move. Content written at the address of file A can never end up
+at the address of file B, at any depth, for any setting of the weights -- the recurrence is a
+read-modify-write in place.
+
+This candidate keeps the same delta-rule recurrence but gives it two addresses derived from the
+same command feature: p_r = unit(tr_path(x_cmd)) for the read and p_w = unit(tr_path_w(x_cmd))
+for the write, with the delta-rule error now measured against the content currently at the WRITE
+slot (s_dst = p_w . mem) instead of at the read slot. tr_path_w.weight is initialised as an exact
+copy of tr_path.weight, so at step 0 p_r == p_w, s_dst == s_pre, and the recurrence is bit-for-bit
+the single-slot version both parents run; the two projections only separate where gradient descent
+pays for separating them. For `cat P` the useful solution keeps them coincident (store the
+observation at P's address). For `mv SRC DST` the useful solution pulls them apart: read at SRC's
+address, write at DST's address. Chained moves then compose by construction, because the write
+address of hop k is the read address of hop k+1 -- which is exactly the operation the scored
+quantity asks the model to perform, and the operation neither parent can represent.
+
+MECHANISM 2 -- A LEARNED CONTENT-PRESENCE GATE (arch)
+
+In both parents, the value written at every step is v = (1-w)*obs + w*f(s_pre, cmd), with w the
+sigmoid of a bias initialised to -1, i.e. about 0.27. At an `mv` step obs is the contentless empty
+observation, so roughly three quarters of the write is "nothing", and the slot is dragged toward
+the empty-observation vector precisely at the steps where content is supposed to survive. That
+is the destructive interaction r19's imagination branch was written to avoid and never gets to.
+
+This candidate computes, per observation token, a presence scalar
+
+    a = sigmoid( pres_scale * ( ||obs - pres_proto||^2 / D - pres_margin )
+                 + pres_out(tanh(pres_in([obs_x, h_obs]))) )
+
+with pres_proto a learned D-vector prototype, pres_scale / pres_margin learned scalars, pres_out
+zero-initialised with bias +2.0 so a is about 0.88 everywhere at init (near the parents' constant
+1.0). a then replaces every place the parents used a hard "this observation exists" boolean:
+
+    write value      base = a*obs + (1-a)*s_pre          (a=0 gives r19's imagination composition)
+    delta-rule beta  beta = write_amount * a
+    forgetting       lam  = 1 - (1 - decay) * a
+    system summary   sal *= a
+    previous-obs mix prev_obs *= a
+
+Nothing tells the model which observations are contentless. It has to discover that the empty
+`cwd=... exit=0` observation sits near a single point in embedding space, which is what the
+prototype-distance term is parameterised to express. The gate only scales WRITES; reads at step i
+are taken before the write at step i and the delta-rule mask is strictly lower-triangular, so a_i
+cannot influence any prediction at position <= i. The stream-level causality probe (corrupt obs_3,
+require cmd 0..3 predictions unchanged) is therefore still satisfied for the same reason it is in
+the parents, where the write amount already depends on h_obs.
+
+MECHANISM 3 -- DEPTH-TILTED SYSTEM BLOCKS (batcher, my assigned axis)
+
+I keep the parent batcher's skeleton -- a ramp that anneals the batch from uniform to blocked, a
+size-weighted choice of a few images per batch, a uniform remainder for coverage, one private
+generator -- and change what the blocked part is selected FOR. The parent picks uniformly inside
+the chosen image. This impl weights sequences inside the chosen image by (1 + chain_length)^(pow *
+ramp), where chain_length is the longest `mv` forwarding chain read off the command strings. The
+same ramp drives both the blocked fraction and the exponent, so training opens on the unmodified
+distribution and closes concentrated on the long-chain tail. On the sample's depth histogram this
+moves the share of depth >= 3 sequences from 0.54 toward roughly 0.8 in the blocked part; the
+scored slice is 1.0. I dropped nothing from the parent's mechanism and added no second block type.
+
+Note explicitly: the chain length is used ONLY as a sampling weight. No quantity derived from
+parsing `mv` reaches the model -- not as a token, not as a feature, not as a target. The model's
+input for a chosen sequence is byte-identical to what it would be under uniform sampling.
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN THE ABSOLUTE PICK RATE
+
+comp_ca is native_hit minus swap_stayed on the same board. A model that answers from the read
+location alone gives the same answer in both arms and scores exactly zero. The parent scores
+-0.0037 and the baseline -0.0075: both arms are essentially uninformed, and negative means the
+swapped chain holds the answer slightly more often than the native chain delivers it. To get a
+positive difference the model needs a representation in which the identity of a content ends up
+addressed by the location the chain routed it to. Mechanism 1 is the first time that
+representation exists at all in this lineage; mechanism 2 stops the silent move step from
+overwriting it with the empty observation; mechanism 3 spends more of the fixed step budget on
+the depth regime the score is measured in. None of the three can be exploited by a location-keyed
+or an order-keyed predictor: the addresses are learned projections of frozen command embeddings,
+and the batcher only changes which real sequences are drawn.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- The mean-pooled sentence embedding of `mv SRC DST` may not separate SRC from DST linearly. p_r
+  and p_w are both linear maps of the same command feature, so if the frozen encoder blends the
+  two path strings into a representation where no linear functional recovers "the second path",
+  the two addresses cannot pull apart and mechanism 1 degenerates back to the parents' behaviour
+  (with a small extra parameter cost and slightly slower optimisation). This is the single largest
+  risk and I cannot test it from the jail.
+- The presence gate is supervised only indirectly, through downstream prediction error. If the
+  gradient signal from ~1 compositional read per ~30 steps is too weak, a may stay near its init
+  of 0.88 everywhere and mechanism 2 contributes nothing.
+- Splitting the addresses removes an inductive bias that was helping: with p_r == p_w the memory
+  is a clean associative store, and letting them drift could degrade ordinary `cat P` recall
+  enough to cost more than the routing gains. The copy-at-init makes the degenerate solution
+  reachable but does not make it stable.
+- The move-chain parse assumes `mv src dst` with exactly three whitespace tokens. That holds for
+  all 172 mv steps in the jail sample; if the wider train split contains flags or quoted paths,
+  those sequences simply score chain_length 0 and the batcher tilts away from them, which would
+  be the wrong direction.
+- Depth tilting reduces the effective number of distinct sequences seen late in training. If the
+  scored slice's difficulty is limited by system diversity rather than by chain depth, the tilt
+  trades away the wrong thing.
+
+PERFORMANCE: unmeasured. By inspection the added work is one extra key projection and one extra
+[B,1,key_d]x[B,key_d,D] bmm per recurrence step, plus one small MLP over the observation
+positions; the batcher's parse is a single pass over the command strings at construction and a
+couple of multinomials per step. I expect the step budget to be unaffected within a few percent,
+but I could not run torch in the jail to confirm it.
