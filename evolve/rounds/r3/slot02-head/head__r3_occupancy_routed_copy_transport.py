@@ -6,17 +6,21 @@ import torch.nn.functional as F
 
 NAME = "r3_occupancy_routed_copy_transport"
 DESCRIPTION = (
-    "A causal slot memory over command positions that moves observation content by COPY. Every "
-    "command position opens one slot whose key is a unit path signature read off that command's "
-    "embedding and whose value is a convex blend, set by a learned mutation gate over the "
-    "(command, observation) pair, of the step's own observation and the content retrieved from "
-    "earlier slots by that same signature; the resulting value recursion is solved exactly as one "
-    "unit-lower-triangular system, so a retrieved value can itself be a retrieval of a retrieval "
-    "to unbounded depth in a single pass. Retrieval scores a query against slot keys after "
-    "subtracting the causal running mean of the signatures seen so far in the sequence, adds each "
+    "A causal slot memory over command positions that moves observation content by COPY, split "
+    "across two axes so it also acts at a command whose observation has not happened yet: there "
+    "are (L+1)//2 READ positions, one per command, and L//2 WRITE slots, one per completed "
+    "command/observation pair. A write slot's key is a unit path signature read off its command "
+    "embedding and its value is a convex blend, set by a learned mutation gate over the "
+    "(command, observation) pair, of the step's own observation and the content that command "
+    "retrieved from earlier slots; that value recursion is solved exactly as one unit-lower-"
+    "triangular system over the write slots, so a retrieved value can itself be a retrieval of a "
+    "retrieval to unbounded depth in a single pass. A read is built from the command embedding "
+    "ALONE — never from an observation — so every command position, including a final command "
+    "with no observation after it, issues its own query; the query subtracts the causal running "
+    "mean of the command signatures seen so far, scores against the write-slot keys, adds each "
     "slot's log write-occupancy so only written slots can answer, and carries a null column so an "
     "unmatched query retrieves nothing. The retrieved content is added to the arch's own "
-    "prediction at command positions through a zero-initialised per-dimension scale, so the "
+    "prediction at every command position through a zero-initialised per-dimension scale, so the "
     "wrapped net is the unwrapped net at initialisation. Train-time aux mines, from the batch "
     "alone, steps whose observation duplicates an earlier step's observation with at least one "
     "contentless step in between, ranks the retrieved content against the contentful observations "
@@ -120,49 +124,57 @@ class _CopyTransportMemory(nn.Module):
         if tok.dim() != 3 or tok.size(-1) != self.d_model:
             return None
         B, L, _ = tok.shape
-        n = L // 2
-        if n < 1:
+        n_read = (L + 1) // 2
+        n_write = L // 2
+        if n_write < 1 or n_read < 1:
             return None
         dev = tok.device
         dt = tok.dtype
 
-        c = _clean(tok[:, 0::2, :][:, :n, :])
-        o = _clean(tok[:, 1::2, :][:, :n, :])
+        c = _clean(tok[:, 0::2, :])
+        o = _clean(tok[:, 1::2, :])
         if key_pad is None:
-            active = torch.ones(B, n, dtype=torch.bool, device=dev)
+            read_ok = torch.ones(B, n_read, dtype=torch.bool, device=dev)
+            write_ok = torch.ones(B, n_write, dtype=torch.bool, device=dev)
         else:
             live = ~key_pad.bool()
-            active = live[:, 0::2][:, :n] & live[:, 1::2][:, :n]
-        af = active.to(dt)
+            read_ok = live[:, 0::2]
+            write_ok = read_ok[:, :n_write] & live[:, 1::2]
+        rf = read_ok.to(dt)
+        wf = write_ok.to(dt)
 
         cf = F.gelu(self.cmd_feat(c))
         of = F.gelu(self.obs_feat(o))
-        pair = torch.cat([cf, of], dim=-1)
+        pair = torch.cat([cf[:, :n_write, :], of], dim=-1)
 
-        p = _unit(self.addr(cf)) * af.unsqueeze(-1)
+        p = _unit(self.addr(cf)) * rf.unsqueeze(-1)
         run_sum = torch.cumsum(p, dim=1)
-        run_cnt = torch.cumsum(af, dim=1).clamp_min(1.0).unsqueeze(-1)
+        run_cnt = torch.cumsum(rf, dim=1).clamp_min(1.0).unsqueeze(-1)
         u = _unit(p - torch.sigmoid(self.center_logit) * (run_sum / run_cnt))
 
+        keys = p[:, :n_write, :] * wf.unsqueeze(-1)
         temp = self.log_temp.exp().clamp(0.02, 2.0)
-        scores = torch.bmm(u, p.transpose(1, 2)) / temp
+        scores = torch.bmm(u, keys.transpose(1, 2)) / temp
 
-        occ = torch.sigmoid(self.occ_gate(pair)).squeeze(-1) * af
-        idx = torch.arange(n, device=dev)
-        reachable = (idx.view(n, 1) > idx.view(1, n)).unsqueeze(0) & active.unsqueeze(1)
+        occ = torch.sigmoid(self.occ_gate(pair)).squeeze(-1) * wf
+        i_idx = torch.arange(n_read, device=dev).view(n_read, 1)
+        j_idx = torch.arange(n_write, device=dev).view(1, n_write)
+        reachable = (i_idx > j_idx).unsqueeze(0) & write_ok.unsqueeze(1)
         logits = (scores + torch.log(occ.clamp_min(1e-6)).unsqueeze(1)).masked_fill(~reachable, _NEG)
-        nullcol = self.null_logit.clamp(-30.0, 30.0).view(1, 1, 1).expand(B, n, 1).to(logits.dtype)
-        att = torch.softmax(torch.cat([logits, nullcol], dim=-1), dim=-1)[..., :n]
+        nullcol = self.null_logit.clamp(-30.0, 30.0).view(1, 1, 1).expand(B, n_read, 1).to(logits.dtype)
+        att = torch.softmax(torch.cat([logits, nullcol], dim=-1), dim=-1)[..., :n_write]
 
         m = torch.sigmoid(self.mut_gate(pair))
-        system = torch.eye(n, device=dev, dtype=dt).unsqueeze(0).expand(B, n, n) - m * att
-        rhs = (1.0 - m) * o * af.unsqueeze(-1)
+        eye = torch.eye(n_write, device=dev, dtype=dt).unsqueeze(0).expand(B, n_write, n_write)
+        system = eye - m * att[:, :n_write, :]
+        rhs = (1.0 - m) * o * wf.unsqueeze(-1)
         values = _clean(self._solve_unit_lower(system, rhs)).clamp(-1e4, 1e4)
-        reads = _clean(torch.bmm(att, values))
+        reads = _clean(torch.bmm(att, values)) * rf.unsqueeze(-1)
 
         gate = torch.sigmoid(self.read_gate(cf))
         contrib = _clean(gate * reads * self.out_scale.view(1, 1, -1))
-        return {"reads": reads, "contrib": contrib, "active": active, "cmd": c, "obs": o}
+        return {"reads": reads, "contrib": contrib, "read_ok": read_ok, "write_ok": write_ok,
+                "cmd": c, "obs": o}
 
 
 def wrap(net, D, **params):
@@ -230,13 +242,13 @@ def aux_loss(head_state, batch, net, device):
     if run is None:
         return 0.0
 
-    reads = run["reads"].float()
     obs = run["obs"].float()
-    cmd = run["cmd"].float()
-    active = run["active"]
     B, n, Dm = obs.shape
     if n < 3:
         return 0.0
+    reads = run["reads"][:, :n, :].float()
+    cmd = run["cmd"][:, :n, :].float()
+    active = run["write_ok"][:, :n]
     dev = obs.device
     dim = float(Dm)
 

@@ -153,7 +153,7 @@ class WithinSequenceContrastEqualizer(nn.Module):
         if bool(torch.isfinite(new_gain).all()):
             self.gain.copy_(new_gain)
 
-    def _rescale(self, x, gain):
+    def _apply(self, x, gain):
         shape = x.shape
         z = x.reshape(-1, self.d)
         basis = self.basis.to(device=z.device, dtype=z.dtype)
@@ -165,10 +165,10 @@ class WithinSequenceContrastEqualizer(nn.Module):
     def make_target(self, z_obs, z_prev):
         if self.training and int(self.n_updates) < self.warmup_updates:
             self._accumulate(z_obs, z_prev)
-        return self._rescale(z_obs, self.gain)
+        return self._apply(z_obs, self.gain)
 
     def to_obs(self, pred, z_prev):
-        return self._rescale(pred, self.gain.reciprocal())
+        return self._apply(pred, self.gain.reciprocal())
 
     def reg(self):
         return 0.0
