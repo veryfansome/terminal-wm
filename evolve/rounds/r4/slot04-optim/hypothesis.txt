@@ -1,0 +1,154 @@
+CANDIDATE: tail-cycle snapshot averaging (optim) on a dual-key content-gated world model trained
+under observation occlusion (arch).
+
+AXES CHANGED: optim (new impl), arch (new impl). objective / target / batcher / stream / head are
+the parent's, unchanged.
+
+----------------------------------------------------------------------------------------------
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+
+The parent and the second program already share objective, target, stream and optim. They differ
+on arch, batcher and head.
+
+  - batcher: the parent's r20_depthtilted_sysblock_curriculum with n_block_images=1,
+    hard_frac_max=0.75, ramp_frac=0.3 is the second program's r6_sysblock_hardneg_curriculum plus a
+    per-sequence tilt toward long mv chains. The parent's setting is a strict superset of the
+    partner's mechanism, so keeping it keeps both.
+  - arch: this is the real disjunction. The parent's arch is the dual-key content-gated latent-
+    transition memory (split read address p_r and write address p_w, learned presence gate a,
+    delta-rule path memory). The second program's arch is the r18 path-state model plus RAMPED
+    STOCHASTIC OBSERVATION OCCLUSION. Those are a representation mechanism and a training-regime
+    mechanism; they are not alternatives. arch__dualkey_contentgated_occlusion_denoising.py keeps
+    both: it subclasses the parent's R20DualKeyContentGatedWorldModel and applies the partner's
+    occlusion in forward before delegating to it.
+  - head: only one head can be selected. The parent's r18_transition_forwardmodel_consistency is
+    co-designed with the shared transition operator f(s,cmd) that the dual-key arch owns and that
+    the partner's registry head only optionally touches, so the parent's head is kept.
+
+----------------------------------------------------------------------------------------------
+WHY OCCLUSION IS COHERENT ON THIS HOST, MECHANICALLY
+
+Traced against the parent arch's forward, an occluded observation is zeroed AND key-padded, so
+valid_obs is False at that pair. Then live_pair = 0, so pres_pair = 0, so: beta = 0 (no delta-rule
+write at that step), lam = 1 (no decay charged), the system-summary saliency mass is 0, and
+obs_for_prev is 0. The step therefore becomes exactly "a command whose result was never seen",
+which is the same shape as the position the instrument scores. It is not an inconsistent state.
+
+Occlusion touches only tok_emb, an INPUT. The training target comes from b["tgt"], which collate
+builds from z_obs independently; the harness never re-reads tok for targets. So occlusion removes
+input history and never removes or alters a label.
+
+----------------------------------------------------------------------------------------------
+THE NEW MECHANISM ON MY AXIS, AND WHAT IT COMPUTES THAT NEITHER PARENT COMPUTES
+
+Both programs run the same optimiser: AdamW with a warmup-hold-cosine-to-floor schedule, Muon on
+the (key_d x d) addressing projections, a soft spectral cap on the (D,D) transition readout. The
+network they hand to the instrument is THE FINAL ITERATE.
+
+optim__tailcycle_snapshot_average_spectral_muon.py keeps all three of those components and adds
+one that neither has: the network handed to the instrument is a WEIGHT-SPACE AVERAGE OF SEVERAL
+ITERATES taken at different points of the last third of training.
+
+Concretely, with S = steps, warm = max(20, 0.04 S), decay_start = warm + 0.30 S, floor f = 0.05:
+
+  envelope(t) = (t+1)/warm                                        t < warm
+              = 1                                                 warm <= t < decay_start
+              = f + (1-f) * 0.5 (1 + cos(pi * p)),
+                p = (t - decay_start)/(S - decay_start)           otherwise
+
+  avg_start = max(decay_start + 1, S - floor(avg_frac * S))       avg_frac = 0.35
+  hi        = envelope(avg_start)
+  cyc_len   = ceil((S - avg_start) / avg_cycles)                  avg_cycles = 4
+
+  lr_lambda(t) = envelope(t)                                      t < avg_start
+               = f + (hi - f) * 0.5 (1 + cos(pi * u)),
+                 u = ((t - avg_start) mod cyc_len)/cyc_len        t >= avg_start
+
+So the last 35% of the budget is four cosine restarts from hi (~0.57 of peak with these fractions)
+down to f, instead of one monotone decay. The optimiser counts its own step() calls; at
+t = avg_start + c*cyc_len for c = 1..avg_cycles, and at t = S, it adds the current value of every
+parameter into a float32 accumulator. At t = S it divides by the number of snapshots and writes
+that mean back into the live parameters, then re-runs the spectral-cap projection so the averaged
+weights still satisfy the cap. If fewer than two finite snapshots were collected, nothing is
+written and the final iterate is kept.
+
+This is Polyak-Ruppert tail averaging in the cyclical-learning-rate form (Izmailov et al., SWA,
+2018; Huang et al., Snapshot Ensembles, 2017), translated from image classification. There is no
+batch-norm anywhere in this stack — only LayerNorm — so the usual SWA caveat about recomputing
+normalisation statistics does not apply, and the average can be used directly.
+
+----------------------------------------------------------------------------------------------
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY, SPECIFICALLY
+
+The measurement is a paired difference, on windows from IMAGES NEVER TRAINED ON, between the pick
+under the native move chain and the pick under a role-swapped chain. Anything a model learns that
+is specific to a particular image's file names, directory layout or output formatting cannot
+contribute to that difference on a held-out image; it can only add variance.
+
+Look at what the batcher does to the training distribution. hard_frac_max=0.75 with ramp_frac=0.3
+and n_block_images=1 means that from 30% of the budget onward, three quarters of every batch is
+drawn from ONE image, resampled each step. The iterate is therefore being pulled around by a
+rapidly changing, high-variance, image-identity-shaped nuisance direction for the entire second
+half of training. The parameter vector at step S is not "the solution"; it is the solution plus a
+large displacement in whichever direction the last handful of image blocks pushed it. A single
+final iterate commits to that displacement.
+
+Averaging iterates sampled across many block draws cancels the component that is uncorrelated
+across draws (the image-specific displacement) at rate ~1/sqrt(number of snapshots), while leaving
+the component that is common to all draws (the routing circuitry that binds a content to an
+address and rewrites the address on a mv) untouched. That common component is exactly what the
+role-swap difference measures, because it is the only thing that transfers to an unseen image.
+
+The restarts are what make the snapshots worth averaging. Under a monotone decay to a floor the
+last few thousand steps sit in one small neighbourhood and their average is nearly the final
+iterate, so averaging would buy almost nothing. Holding the tail LR at hi and cycling gives four
+iterates that are genuinely spread inside the same basin, which is what makes the cancellation
+real. The occlusion transplanted from the second program feeds the same effect from the other
+side: it injects input noise that keeps the tail iterates diverse, and the averaging is what pays
+that noise back. That is why the two changes are one design and not two.
+
+The two mechanisms also attack the same failure from opposite ends. Occlusion makes "the content
+was never visible at this step" an in-distribution condition, which is pressure to maintain the
+binding in memory rather than to lean on the nearest visible observation. Averaging removes the
+per-image jitter in the memory's addressing projections, which is where a fragile binding would be
+destroyed. Neither program does either.
+
+----------------------------------------------------------------------------------------------
+NOTHING RESOLVES ROUTING OUTSIDE THE MODEL
+
+Neither new file reads a command string, a file path, an observation's text, or any metadata. The
+optim impl sees only parameter tensors, their shapes and a step count. The arch impl sees only
+tok_emb, types and key_pad, and its only action on them is a Bernoulli mask over observation
+positions drawn from torch.rand, independent of content. Nothing resolved by my code enters the
+model's input at scoring time; occlusion is gated on self.training and the instrument calls
+net.eval() (baseline_interleave.leakage_ok does so before scoring, and flatten_predictions does
+so again), so the scored forward is bit-for-bit the unoccluded forward.
+
+----------------------------------------------------------------------------------------------
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+  1. The tail LR hi is too high and the four snapshots are not in one linearly-connected basin. Then
+     their mean is not a valid model at all and the score collapses rather than degrading. hi is
+     ~0.57 of the peak LR, reached only after warmup, hold and a third of the cosine decay, which is
+     the regime SWA prescribes; but this is unmeasured here and it is the single largest risk.
+  2. The routing circuit is not noise-limited but capacity- or step-limited. If the model has simply
+     not converged inside the budget, averaging iterates from an under-trained trajectory removes
+     nothing useful and the four restarts cost the progress a monotone decay would have made.
+  3. The image-specific displacement is not zero-mean across the snapshots. If the blocked curriculum
+     drifts systematically rather than oscillating, averaging shifts toward the middle of the drift
+     instead of cancelling it, and buys only variance reduction and no transfer.
+  4. Occlusion at p=0.12 blinds too many windows. Each cups window exposes N contents once; dropping
+     an expose observation makes that window unanswerable, so a fraction of training positions become
+     label noise. If that fraction dominates the pressure it is meant to create, the arch change is a
+     net negative and the optim change has to carry the candidate alone.
+  5. The optimiser's internal step counter does not reach S. _train calls opt.step() exactly once per
+     loop iteration and returns early only when the loss is non-finite, in which case the run is
+     discarded with ok=False, so the averaged weights would simply never be written. This degrades to
+     the parent's behaviour rather than breaking, but it also means a run that is near-divergent gets
+     no benefit.
+
+Speed: the added cost is avg_cycles+1 copies of the parameter vector into a float32 accumulator
+(about 3M parameters, five times over the whole run) plus one extra spectral-cap projection on a
+single (768,768) matrix. That is negligible against the per-step forward/backward, and the step
+budget is unchanged. This is a construction-time claim, not a measured one; no miniature run was
+used to support any statement in this file.

@@ -1,0 +1,46 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives"
+  },
+  "arch": {
+   "impl": "r25_span_occluded_closure_transport",
+   "params": {
+    "obs_info_bias": 4.0,
+    "ref_d": 128,
+    "ref_pd": 64,
+    "ref_recency_init": 0.1,
+    "occ_p": 0.15,
+    "span_mean": 3.0,
+    "span_max": 6,
+    "occ_ramp_start": 300,
+    "occ_ramp_end": 1000
+   }
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity"
+  },
+  "batcher": {
+   "impl": "r25_routing_depth_systematic_curriculum",
+   "params": {
+    "alpha_max": 1.5,
+    "depth_ramp_frac": 0.35,
+    "depth_cap": 6,
+    "n_block_images": 1,
+    "hard_frac_max": 0.75,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave"
+  },
+  "head": {
+   "impl": "r20_dualpre_transition_consistency",
+   "params": {}
+  }
+ }
+}

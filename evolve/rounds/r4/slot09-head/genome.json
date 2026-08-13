@@ -1,0 +1,20 @@
+{
+  "chunks": {
+    "objective": {"impl": "r22_exact_target_equivalence_quotient"},
+    "arch": {"impl": "r20_dualkey_contentgated_transition_worldmodel"},
+    "optim": {"impl": "r18_spectral_capped_transition_readout"},
+    "target": {"impl": "within_sequence_contrast_equalizer"},
+    "batcher": {
+      "impl": "r20_depthtilted_sysblock_curriculum",
+      "params": {
+        "depth_base": 1.0,
+        "depth_pow": 2.0,
+        "hard_frac_max": 0.75,
+        "n_block_images": 1,
+        "ramp_frac": 0.3
+      }
+    },
+    "stream": {"impl": "baseline_interleave"},
+    "head": {"impl": "r4_chainlink_route_transport", "params": {}}
+  }
+}

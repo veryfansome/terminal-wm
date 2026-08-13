@@ -1,0 +1,109 @@
+CANDIDATE: objective = r4_trajectory_transport_contrast   (only the objective axis changed)
+
+THE CROSSOVER, IN ONE SENTENCE
+The parent's contribution is its negative geometry: a band-pass confusability ring over
+target-target distances that makes close-but-distinct observations into hard negatives while
+zeroing the weight of near-identical ones. The partner's contribution is plain squared error to
+the target at full weight -- the exact quantity the eval's decision rule uses, unweighted, over
+every row. This design keeps both (ring-importance negatives; MSE at weight 1.0 instead of the
+parent's 0.05 anchor, and every distance in the loss computed in the eval's own unweighted
+per-dim squared L2 rather than the parent's precision-weighted metric), and adds one new
+mechanism that neither program has: the loss recovers TRAJECTORY structure from its own inputs
+and spends most of its discriminative pressure on the rows where a content has been carried
+across a chain of moves.
+
+WHAT THE NEW MECHANISM COMPUTES
+
+Everything below happens inside loss(), under no_grad, from tensors the contract already hands
+over. Nothing is parsed, nothing is injected into the model's input, and none of it runs at
+scoring time.
+
+1. Sequence segmentation (_segment_ids). The harness builds ctx["prev"] as a strict-causal shift
+   of the target within each sequence, so the first command row of every sequence in the batch
+   has prev exactly equal to the zero vector and no other row does. cumsum over that indicator
+   gives a segment id per row, i.e. which trajectory each row came from. If fewer than two
+   starts are found (no ctx, or a single sequence) the whole trajectory-local machinery switches
+   off and the loss degrades to MSE + the ring listwise term.
+
+2. Content equivalence classes. Pairwise per-dim squared distance between target rows; rows
+   within thr_eq = clamp(1e-4 * mean_off, 1e-5, 1e-2) are one class. Two steps that returned
+   byte-identical observation text get byte-identical frozen embeddings, so their distance is
+   ~1e-6 (gram round-off) while the closest genuinely distinct pair of observations in this data
+   -- two templated config files differing only in their canary -- sits two to three orders of
+   magnitude above the threshold. Checked on the jail's train_sample.jsonl: exact-duplicate
+   observation text is common, near-duplicate-but-distinct text is not close to it.
+
+3. Generic rows. A class whose size reaches max(8, 0.01n) is marked generic. On the real data
+   this is exactly the set of rows whose observation carries no content: `mv A B` and
+   `cat A > B` return empty output, so their observation renders to "cwd=/ exit=0\n" for every
+   such step on every system (227 of 724 sample rows), and the boilerplate `ls -1 /` listing is
+   the next largest class (35, then 18; the largest genuine content class is 4). Generic rows
+   are excluded from the identity structure, and class size biases the softmax partition so a
+   400-strong identical-target class is not forced apart from itself -- the parent's InfoNCE,
+   with labels = arange, pushes each mv row's prediction AWAY from ~400 vectors identical to its
+   own target, which is a large mis-directed gradient on ~40% of every batch.
+
+4. The transported mark (the point of the design). Row t is transported when its target class
+   has an earlier occurrence IN THE SAME SEGMENT, both rows non-generic, and every such earlier
+   occurrence carried a different command. "Different command" is measured as the minimum cosine
+   distance between row t's command embedding and its predecessors' (ctx["cmd"]), smoothed into
+   a gate 1 - exp(-cd_min / (0.25 * mean_cd)): a re-read of the same path gets exactly zero, a
+   read of a path the content was moved to gets ~1. In the sample data 8.3% of rows are
+   transported and 1.7% are same-command re-reads correctly scored zero.
+
+5. What the mark buys. Transported rows get (a) a 1 + 6*gate multiplier on the listwise term,
+   (b) a second cross-entropy whose candidate set is restricted to their own trajectory's other
+   distinct non-generic contents, and (c) a margin hinge against the nearest of those contents
+   in d = mean_i (pred_i - cand_i)^2, the eval's decision variable verbatim. Same-trajectory
+   distinct contents also get an additive log-importance bonus in the global listwise term.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca is a paired difference over windows that expose N contents at N locations, chain them
+through silent moves, and read one location; the swapped arm re-routes the same contents over
+the same board. The candidates that must be told apart at the read are precisely the N contents
+of that board, and the swapped arm's answer is one of the other N-1. So the negative set that
+matters is "the other contents of this same trajectory", which is what item 5 constructs, and
+the positive is "the content that was exposed earlier under a different path", which is what
+item 4 selects. Both parents' losses are blind to this: their negatives are drawn from the whole
+batch by target-target distance, so the fraction of gradient that lands on a move-chain read
+with its own board as competition is roughly its share of rows (~8%), and the parent's
+precision-weighted metric is not the metric the pick is made in. Here transported rows carry
+55-77% of the gradient norm while the model is still poorly fit, falling to ~26% once it fits
+well -- the pressure is self-limiting, and full-weight MSE on every row is untouched underneath
+it, so general prediction is not traded away.
+
+There is a second, architecture-specific reason to expect a large move rather than a small one.
+The inherited arch (r23) already contains the machinery this loss asks for: a dual-address
+transport memory that reads content at a source address and writes it at a destination address,
+and a pointer head that copies one verbatim earlier prefix observation into the prediction. Its
+contribution enters through a zero-initialised (D,D) readout behind a gate biased to -2, i.e.
+it starts switched off and only grows if the loss pays for it. A loss whose gradient is
+dominated by generic and single-exposure rows has almost no reason to switch it on, because
+those rows are predictable without any transport at all. This loss pays for it exactly where the
+copy is the right answer, and punishes copying the WRONG board content, which is the difference
+between using the pointer and leaving it dark.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- If exact-duplicate observation text does not survive to exact-duplicate embeddings (a
+  non-deterministic encoder, or a standardization dim with near-zero variance amplifying
+  round-off past thr_eq), the transported mark goes empty and the candidate collapses to
+  MSE + ring listwise. Failure mode is "no better than the parent", not divergence.
+- If the eligible scored windows are dominated by chains whose contents were never exposed
+  earlier in the trajectory under a different path, training has nothing analogous to weight and
+  the extra terms are inert on the scored slice.
+- The mark is a label-space fact, so it cannot be used at scoring time and it does not have to
+  be: it only decides which training rows get pressure. But it also means a model can satisfy
+  the transport CE by learning "copy the most recently exposed content" -- a position heuristic,
+  which cancels only in expectation and buys nothing real. The restricted candidate set is the
+  guard against that (the wrong board content is an explicit negative with a margin), and if
+  that guard is too weak, the number moves into the analytic band rather than above it.
+- Upweighting transported rows 6x could cost enough general fit that the model's embeddings get
+  worse everywhere, dragging the eligible windows down with them. Full-weight MSE on every row
+  is the counterweight; if it is not enough, the failure shows as a fall in the reported
+  pick-rate gate alongside a flat comp_ca.
+- Cost, unmeasured on the real harness: one extra n x n gram (command cosines) on top of the two
+  the parent already forms. Measured at n = 1984, D = 768 on CPU: 39 ms per forward+backward of
+  the loss alone, which is a small fraction of a step on the GPU lane. No loop over rows, no
+  linear solve, no per-step allocation that scales worse than n^2.

@@ -1,0 +1,167 @@
+CANDIDATE r4-11-flatbasin-lsam-tailavg
+axes changed: optim (new impl), head (new impl). arch / objective / target / batcher / stream inherited.
+
+=====================================================================
+1. WHAT THE CROSSOVER IS
+=====================================================================
+
+The two programs I was given differ on exactly two axes:
+
+  parent   arch r22_observation_occlusion_denoising   head r3_rename_registry_occupancy_routing
+  partner  arch r18_pathstate_latent_transition       head r2_dualaddress_move_transport
+
+and they share optim r18_spectral_capped_transition_readout.
+
+arch: r22 IS r18 (it subclasses R18PathStateLatentTransition and only adds ramped observation
+occlusion in training mode; its eval forward calls super().forward unchanged). Selecting r22
+therefore keeps the partner's whole latent-transition world model AND the parent's occlusion
+regime. Nothing is dropped on that axis.
+
+head: this is the only axis where one program's mechanism would otherwise have to be discarded.
+So the head I propose runs BOTH memories on one trunk rather than choosing:
+
+  - the registry memory (from the parent) contributes the mechanism where a move RE-ADDRESSES a
+    slot: the slot's content vector is left byte-identical and only its address key is rotated
+    toward the destination key, with source/destination roles decided at run time by which key
+    currently indexes more occupancy;
+  - the transport memory (from the partner) contributes the mechanism where source and
+    destination keys are produced by two extractors sharing ONE path-to-key projection, so both
+    keys land in a single address space by construction, and a move writes the value READ at the
+    source key into the destination key of a delta-rule outer-product store.
+
+Both inject their read at command positions through a per-dimension scale initialised to zero
+(_RenameRegistry.out_scale, _DualAddressTransport.out_scale), so the composed forward is exactly
+the bare arch forward at initialisation and the composition cannot break the arch. The wraps
+chain cleanly: the registry wrap replaces net.forward first, the transport wrap captures that as
+its own orig_forward, and the two use disjoint attribute names (rename_registry /
+_rename_registry_state vs dualaddr_transport / _dualaddr_transport_state), disjoint stashes, and
+disjoint parameter sets. Both auxiliaries run and are summed; the transport's aux_weight is set to
+0.5 (_TRN_OVERRIDES) so it acts as a second supervision signal rather than an equal competitor to
+the registry's.
+
+The two auxiliaries mine DIFFERENT positions from the same batch, which is the point of keeping
+both: the registry mines "bridges" in the command-similarity graph (a command strongly similar to
+one earlier and one later command that are mutually dissimilar), the transport mines steps whose
+observation duplicates an earlier step's observation under a different command with at least one
+content-free step in between. On this data those are different families of move chain. In
+train_sample.jsonl an mv step's observation is EMPTY (output "", rendered as "cwd=/ exit=0\n"), so
+a move carries no content in its observation and the two miners can only key on commands and on
+observation duplication - neither of them resolves a move chain, and neither puts anything into
+the model's input.
+
+=====================================================================
+2. WHAT THE NEW OPTIM COMPUTES THAT NEITHER PARENT COMPUTES
+=====================================================================
+
+Both programs' optim returns the FINAL iterate of a cosine-to-floor AdamW/Muon trajectory. My
+optim keeps that base intact (same AdamW betas/wd, same Muon on the (key_d x d) addressing
+projections found by the shape+sibling rule, same power-iteration soft spectral cap on the (D,D)
+latent-transition readout) and adds two mechanisms that neither program has. Both act on where in
+the loss landscape training ends up, not on what the model is fed.
+
+(a) CARRIED LAYERWISE SHARPNESS-AWARE PERTURBATION (_FlatBasinOpt._displace / ._undisplace)
+
+Sharpness-aware minimisation (Foret et al. 2021) replaces grad L(w) by grad L(w + e) with
+e = rho * g/||g||; ASAM (Kwon et al. 2021) makes that displacement scale-invariant by measuring it
+in units of the weights. Plain SAM needs two backward passes per step; the harness gives me one
+(it calls opt.step() with no closure, after a single loss.backward()). I get the SAM gradient with
+one backward by carrying the displacement ACROSS steps:
+
+  end of step t:    w <- w + e_t,   e_t^(l) = rho * (||w^(l)|| / (||g_t^(l)|| + eps)) * g_t^(l)
+  step t+1:         the harness's forward/backward is evaluated at w + e_t, giving g_{t+1}
+  start of step t+1: w <- w - e_t   (exact restore of the stored tensor)
+                    AdamW/Muon apply g_{t+1} to the undisplaced w; cap projects; average samples w
+
+So every gradient the optimiser consumes is measured at a displaced, higher-loss point in the
+direction of the PREVIOUS step's gradient, while every weight that is updated, weight-decayed,
+spectrally capped and averaged is the undisplaced one. Using the previous step's direction is the
+gradient-reuse approximation of LookSAM (Liu et al. 2022); it is exact SAM whenever the gradient
+direction is stable between consecutive steps, which is the regime AdamW with momentum is in.
+
+The displacement is layerwise and relative: ||e^(l)|| = rho * ||w^(l)|| exactly, i.e. each 2-D
+parameter is displaced by a fixed 5% of its own Frobenius norm. That is the ASAM idea (the
+displacement is measured in the weights' own scale) in the cheapest form that needs no host
+synchronisation: no .item(), no isfinite().all() per parameter, one nan_to_num per parameter to
+absorb a zero-norm or non-finite gradient. Only ndim==2 parameters are displaced, so LayerNorm
+gains, biases, the zero-init residual out_scale vectors and the scalar memory-decay logit
+(logit_decay, pos_scale) are never touched - those are the parameters where a relative
+displacement would be meaningless or destabilising.
+
+(b) CONSTANT-LR TAIL AVERAGING WITH TERMINAL WRITE-BACK (_accumulate / _finalize)
+
+The schedule is warmup -> hold at 1.0 -> cosine decay that REACHES floor_ratio at the start of the
+tail -> constant floor_ratio for the last avg_frac of steps (parent's schedule instead decays
+cosine-to-floor over everything after the hold, so its LR is still moving at the last step). Over
+that constant-LR tail the undisplaced parameters of every step are accumulated into a running mean
+(Ruppert-Polyak / SWA, Izmailov et al. 2018, in the running-mean form a.lerp_(w, 1/n)), and on the
+final optimiser step the mean is written into the parameters and the spectral cap is re-applied.
+The model the instrument sees is therefore the tail mean, not the last iterate.
+
+Two facts make this safe here rather than merely plausible. The trunk contains no BatchNorm - only
+LayerNorm - so SWA's usual "re-estimate the batch statistics after averaging" step is unnecessary
+and its absence is not a bug. And the spectral norm is convex, so sigma(mean of capped weights) <=
+mean of sigma <= cap: averaging cannot violate the cap the parent's mechanism maintains, and the
+re-projection in _finalize is belt-and-braces.
+
+The step count is known exactly: the harness runs `for step in range(1, steps+1): ... opt.step()`,
+so opt.step() is called exactly `steps` times and self.t == steps identifies the last one. The
+write-back is guarded by n_avg >= 2 and by isfinite on the accumulator.
+
+=====================================================================
+3. WHY THIS SHOULD MOVE comp_ca
+=====================================================================
+
+comp_ca is measured on windows held out BY IMAGE: the net must carry a content's identity through
+a silent move chain on a filesystem it never trained on. That is a domain-generalisation
+measurement, not an in-distribution one. The flat-minima literature outside this problem's field
+says specifically that this gap - not the in-distribution loss - is what flatness buys: SWAD (Cha
+et al., NeurIPS 2021) shows that densely averaging iterates inside a flat region reduces the
+domain-generalisation gap where the same trajectory's final iterate does not, and SAM's own
+transfer results point the same way. The parent optimises hard and hands back one point of a noisy
+trajectory; both of my mechanisms change which point is handed back.
+
+The reason to expect this to bite HERE and not be a generic 0.1% tweak: the thing comp_ca scores
+is a routing decision made by a recurrent associative memory whose addressing keys are unit-normed
+and whose reads are gated. Whether a read lands on the right slot on an unseen image is decided by
+narrow margins in key space, so it is exactly the kind of decision that flips under the parameter
+jitter of a final iterate and is stabilised by averaging. The training signal is also unusually
+noisy for this genome - dropout 0.1, ramped stochastic observation occlusion from the r22 arch,
+a hard-negative curriculum batcher, and now two mined auxiliaries - which widens the terminal noise
+ball that tail averaging collapses and increases the headroom for the displacement to push the
+trajectory into a basin whose bottom is broad rather than a spike that only the training images
+occupy.
+
+Neither mechanism touches the metric, the split, the eval, the input, or anything my code knows
+about the move chain. The move chain is resolved nowhere in this proposal.
+
+=====================================================================
+4. WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+=====================================================================
+
+- If the gradient direction is NOT stable between consecutive steps at this batch size, the
+  carried displacement is an arbitrary direction rather than an ascent direction, and (a)
+  degenerates into isotropic weight noise. That is a regulariser, but a weaker and blunter one; at
+  rho=0.05 it would most likely be a wash rather than a loss.
+- If 5% of each layer's weight norm is too large for this recurrent memory, the delta-rule
+  recurrence could be pushed into its clamp/nan_to_num guards on the displaced forward, producing
+  gradients that are finite but uninformative. The guard against catastrophe is that the update is
+  always applied to the undisplaced weights, so a bad displacement costs one step's gradient
+  quality and cannot corrupt the parameters; but a persistent version of this would flatten
+  learning. rho is a genome param and is the first thing to lower.
+- If the trajectory has not converged by the start of the tail - a fixed step budget with a
+  slow-converging memory mechanism is a real possibility - then averaging the last 25% averages
+  genuinely different functions and the mean is worse than the endpoint. The constant floor_ratio
+  of 0.12 is the lever: it is high enough that the tail explores the basin, low enough that it
+  should not be exploring different basins. If eval health shows the averaged net worse than the
+  parent's on the absolute pick rate as well as on comp_ca, this is the cause.
+- If the two head memories interfere - both are residuals into the same command-position
+  prediction, both are trained toward the same next observation by InfoNCE - the composite could
+  be worse than either alone. The zero-init injection scales and the 0.5 transport aux weight are
+  what makes this a small bet rather than a large one; the failure signature is a health/absolute
+  reading no better than the parent with comp_ca unchanged.
+- Speed: the composite head adds one more O(n) Python-level recurrent loop per forward and one
+  more mining pass per step, and the optim adds ~5 elementwise kernels per 2-D parameter per step
+  plus one per parameter over the tail. All of this is unmeasured from here - I cannot run the real
+  harness - but none of it changes the step budget, only wall-clock per step.
+- If training aborts early on a non-finite loss, _finalize never runs and the returned net is left
+  displaced. That run is already discarded by the harness (ok=False), so it cannot be scored.

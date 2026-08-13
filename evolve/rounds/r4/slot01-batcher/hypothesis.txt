@@ -1,0 +1,144 @@
+CANDIDATE: r25 — routing-depth systematic curriculum (batcher) x span-occluded closure transport (arch)
+
+WHAT THE TWO PROGRAMS EACH CONTRIBUTE
+
+The two programs I was given share objective, optim and batcher. They differ on arch and head. One
+carries ramped stochastic OBSERVATION OCCLUSION over a path-state trunk; the other carries a
+REFERENCE-CLOSURE TRANSPORT branch that resolves a whole chain of content references in one
+triangular solve, with a head that also supervises the shared transition operator on the arch's own
+memory content. Picking either arch throws away the other's mechanism. This candidate keeps both:
+the transport branch is the trunk, and the occlusion is applied to it — upgraded, because the
+weakness of iid occlusion is exactly what the transport branch is for. It also keeps the strictly
+larger of the two heads (r20 contains the r18 head verbatim and adds the memory-pre arm, which is
+live on this trunk — I checked that _MEM_ATTRS and pos_scale all resolve on the closure arch).
+On my own axis, both programs carry the same image-blocking batcher; that mechanism is kept and a
+new one is added on top of it.
+
+
+MECHANISM 1 — batcher: routing depth read off the commands, then Madow systematic PPS
+File: batcher__r25_routing_depth_systematic_curriculum.py
+
+At construction the batcher parses each training sequence's COMMAND STRINGS (s["cmds"], which the
+encoder keeps on every fit dict) into content-routing edges: `mv SRC DST` and `cp SRC DST` give an
+edge SRC->DST, and any command containing a shell redirection gives an edge from each absolute-path
+argument on the left of `>`/`>>` to the file on the right. Scanning the commands in order and
+carrying a per-path hop counter (mv moves the counter off SRC onto DST; cp/redirect takes the max
+over sources and writes DST) yields ONE number per sequence: the longest content-routing chain the
+sequence describes. On the real training trajectories in evolve/jail_data/train_sample.jsonl this
+number reproduces the window's own recorded routed depth on 20 of 24 sequences and over-estimates
+by taking the max over all contents on the other 4 — it is the deepest chain present, which is the
+statistic I want.
+
+That number is the sampling weight exponent base: w_i = (1 + min(d_i, depth_cap)) ** alpha(step),
+with alpha smoothstep-ramped from 0 to alpha_max over the first depth_ramp_frac of training. Batches
+therefore start uniform and end tilted toward deep chains.
+
+The draw itself is not multinomial. Each step the pool is randomly permuted, then STABLE-SORTED by
+depth, the weights are cumulated, and a Madow systematic probability-proportional-to-size sample is
+taken: with W the total weight and m the number of picks, a single uniform phase u ~ U(0, W/m) is
+drawn and the picks are the elements whose cumulative weight first exceeds u + j*W/m for
+j = 0..m-1. This is survey sampling's systematic PPS design, not the ML default; it gives exactly
+the same first-order inclusion probabilities as weighted sampling with replacement, but because the
+list is ordered by the variable of interest, the number of picks drawn from each depth level is
+pinned to within one of its expectation every single step. The random permutation before the sort
+keeps WHICH sequence fills a given depth slot fully random, so no pair of sequences is
+systematically co-sampled or excluded.
+
+The parent's mechanism is retained around this: a ramped fraction hard_frac_max of the batch is
+restricted to n_block_images sampled images so the contrastive objective keeps its dense same-system
+in-batch negatives, and that blocked share is drawn by the same depth-weighted systematic rule.
+
+WHAT IT COMPUTES THAT NEITHER PROGRAM COMPUTES: a per-sequence longest-routing-chain statistic, and
+a batch whose depth composition is a near-deterministic function of the step rather than a random
+variable. Both programs sample sequences iid (uniform, or uniform within a blocked image pool) and
+neither looks at the commands at all.
+
+WHY IT SHOULD MOVE THE MEASURED QUANTITY: the measurement is a paired difference on windows of
+depth 3 and depth 4+, and it rewards only carrying a content's identity through a chain. In the real
+training trajectories the routed depth is spread over 1..6, with about half the sequences at depth
+<= 2 — chains too short to require carrying anything, since a one-hop move is solvable by local
+adjacency. Uniform sequence sampling therefore spends about half of the transport gradient on the
+regime the score does not test. Setting alpha_max = 1.5 shifts the sampled depth mass so the mean
+sampled depth goes from 3.12 to 3.82 (measured on the jail's 24 real sequences replicated to 240 to
+imitate a split, blocking off), i.e. deep-chain exposure roughly doubles relative to depth<=2
+exposure, without starving any sequence: a depth-1 sequence keeps ~1/6.5 the selection rate of a
+depth-6 one, and a sequence with no routing edges at all keeps ~1/18, so image-holdout breadth is
+preserved and every sequence is still seen. The systematic draw is what makes that shift usable
+rather than noisy: measured on the same replicated set with
+blocking off, the step-to-step standard deviation of the batch's mean routing depth is 0.032 under
+this sampler against 0.179 under multinomial sampling with identical weights and 0.168 under the
+baseline's uniform iid — a 5.5x reduction in the variance of the very quantity being curricularised.
+Under a fixed step budget, a curriculum whose per-step realisation is that noisy is mostly a
+different noise process; pinning it is what turns the tilt into a schedule.
+
+NOT A LEAK: the parsed depth is used only to weight WHICH sequences are put in a batch. It is never
+written into any tensor, never reaches collate, never reaches the loss, and is not computed at
+scoring time at all — the batcher exists only inside the training loop. Nothing in the model's input
+differs from what it would be under the baseline batcher; only the frequency with which sequences
+appear differs. The rule I am staying inside is the one that permits parsing commands to choose
+training SAMPLES and forbids putting resolved routing into the model's input.
+
+
+MECHANISM 2 — arch: contiguous-SPAN occlusion instead of iid occlusion
+File: arch__r25_span_occluded_closure_transport.py
+
+Subclass of the reference-closure transport arch. In training mode only, before the parent forward
+runs, a per-row set of spans is drawn over the observation token positions: span lengths from a
+clamped geometric law (L = 1 + floor(log U / log q), q = 1 - 1/span_mean, clamped to span_max) and
+the span count set to round(p * n_pair / span_mean) so the expected occluded share is p; every
+observation token inside a span is zeroed and key-padded. p is smoothstep-ramped from 0 to occ_p
+between occ_ramp_start and occ_ramp_end forward passes, and everything is gated on self.training, so
+the eval forward is bit-for-bit the parent's. Zero new trainable parameters (verified: parameter
+count identical to the unmodified arch), and no change to loss, head or batcher.
+
+WHAT IT COMPUTES THAT NEITHER PROGRAM COMPUTES: gaps. One program occludes each observation
+independently, so at its occlusion rate a hole is almost always length 1; the other never occludes
+at all. Under this implementation, measured at occ_p = 0.15 with span_mean = 3 over 2000 rows of 31
+observation slots, the realised occluded share is 0.159 and 68% of the occluded tokens sit in runs
+of 3 or more consecutive slots. The distinction matters because with independent holes the surviving neighbour observation is one
+attention hop away, and a trunk can bridge a single hole by local interpolation without ever using
+the reference graph. A contiguous gap of several steps removes that shortcut: the only surviving
+route across the gap is the command-side reference closure, which is scored from raw command
+embeddings and is unaffected by the occlusion. So the occlusion budget is spent applying gradient
+pressure exactly to the branch that does the routing (ref_gate / ref_read / ref_own), instead of
+being absorbed by the local-copy path.
+
+WHY IT SHOULD MOVE THE MEASURED QUANTITY: at the scored position the model is asked what content
+sits at a location after a silent chain of moves; the mv steps that make up the chain carry
+observations that are present but content-free, so the answer is only reachable by transporting the
+content from the read that exposed it, several steps earlier, through the command graph. Training
+under contiguous gaps is training on prefixes where the nearest informative observation is several
+steps away, which is the same shape of problem. The score is a paired native-minus-swapped
+difference, and only genuine content carriage survives both arms, so a trunk that has been pushed
+onto the reference branch rather than onto local copying should gain on the difference and not only
+on the native arm.
+
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- If the training split's routing depths are far more concentrated than the jail sample suggests
+  (say nearly all sequences already depth >= 3), the depth tilt is close to a no-op and the batcher
+  contributes only the variance reduction, which is a second-order effect. This is the single
+  assumption I could not check beyond 24 real sequences.
+- If deep-chain sequences are systematically correlated with a small subset of images, tilting
+  toward depth narrows the effective image diversity and hurts the image-held-out transfer that the
+  whole measurement depends on. The (1 + d)^1.5 form with depth_cap = 6 keeps the shallowest
+  sequence at ~1/6 the rate of the deepest rather than at zero specifically to bound this, but a
+  strong depth/image correlation would still bite.
+- Contiguous occlusion destroys strictly more information per unit of budget than iid occlusion:
+  when the occluded span covers the ONLY exposure of a content that is read later, that read becomes
+  unpredictable and the gradient is noise. If most cups exposures are single-shot (they are), the
+  useful fraction of spans is the fraction that lands between an exposure and a read rather than on
+  the exposure itself. If occ_p = 0.15 with mean span 3 puts too much mass on exposures, the
+  regulariser turns into label noise and this loses to the iid version.
+- The image-blocking share is inherited at hard_frac_max = 0.75 with n_block_images = 1, so 75% of a
+  late batch comes from one image. If the depth tilt and that blocking interact badly — one image's
+  pool being shallow, so the blocked share collapses onto very few sequences — the effective batch
+  diversity falls. The systematic draw inside the blocked pool bounds how concentrated it can get,
+  but does not eliminate it.
+- I could not run the real harness. Everything above about speed and correctness was checked on the
+  jail's real trajectories with the real chunk modules (10 full train steps through
+  objective + target + optim + head with finite loss, stream leakage_ok passing, eval forward
+  deterministic and occlusion-free, state_dict round-trip, forward+backward wall time within noise
+  of the unmodified arch, batcher determinism / bounds / no global-RNG use / fit not mutated). No
+  claim here about the score is measured.

@@ -1,0 +1,92 @@
+MECHANISM: a tied-weight, multi-hop BACKWARD pointer chase over the strictly-earlier command
+prefix, added as one new channel on top of the parent's arch (r22_prefix_content_xattention),
+which itself sits on the r18 path-state trunk. Only the arch axis changed; every other axis is
+the parent's.
+
+WHAT THE DATA FORCED THE DESIGN TO BE. Reading evolve/jail_data/train_sample.jsonl: a cups window
+is a run of `cat <path>` exposure steps whose observation IS the content, then a run of
+`mv <src> <dst>` steps whose "output" field is the empty string — so render_obs gives those steps
+the near-constant observation `cwd=/ exit=0\n`. Every bit of routing information in a window
+therefore lives in the mv COMMAND embedding and nowhere else, and the observation stream carries
+a nearly identical vector at every mv position. The scored step is a `cat <path>` cups_test whose
+own observation is withheld. Consequently the whole mechanism reads only (a) raw command
+embeddings at strictly-earlier positions, (b) the raw observations paired with those strictly
+earlier commands, and (c) the causal hidden state at the current command. Nothing in it is gated
+on the current step's observation, so it is fully live at exactly the position where it is judged.
+
+WHAT IT COMPUTES.
+1. One shared two-layer GELU address trunk maps every command's raw 768-d embedding to a hidden
+   code, and n_addr=2 pairs of unit-normalized linear heads read out of that code a SOURCE address
+   and a DESTINATION address per step, each key_d=64. These are the partner program's dual-address
+   heads (r23), kept verbatim as a mechanism: for `mv A B` the src head must produce A and the dst
+   head B; for `cat P` both must produce P.
+2. The chase. The query at command i starts as command i's OWN source address (for a read `cat Q`
+   that is Q). Hop k scores the query against the DESTINATION addresses of all steps j < i
+   (cosine summed over the 2 address channels, one learned temperature), masks to j < i and to
+   valid pairs, softmaxes, and does two things with that one attention distribution:
+     - reads content_k = attn @ raw_obs_j, the observation paired with the matched step;
+     - forms follow_k = attn @ src_addr_j and sets q_{k+1} = unit(g*follow_k + (1-g)*q_k) with g a
+       learned gate on the hidden state and the hop's own features.
+   So hop k+1 searches for whatever put content at the location hop k had come from. Six hops.
+3. Halting. Per hop a scalar logit is produced from [hidden state, a 32-d projection of content_k,
+   attention sharpness, content RMS, cosine of content_k to a LEARNED null-observation direction,
+   a learned hop embedding]; a softmax over the six logits mixes the six candidate contents. The
+   learned null direction is what lets the model discover, from data, that a matched mv returns
+   the uninformative constant observation and that it should keep hopping, while a matched
+   exposure returns real content and it should stop.
+4. The mixture is injected into command-position predictions through a zero-init (D,D) readout
+   under a sigmoid gate, so the forward pass is bit-identical to the parent at initialization
+   (verified: torch.equal on a 3x25 batch with padding).
+
+WHAT NEITHER PARENT COMPUTES. The parent (r22) has exactly ONE content lookup: a single
+cross-attention whose query comes from the hidden state and whose values are raw prefix
+observations. One hop resolves depth 0, and can only resolve depth d by hoping the trunk has
+already collapsed the chain into the hidden state. The partner (r23) resolves depth by FORWARD
+simulation: a [64,768] content store that at each step reads the source slot, writes to the
+destination slot and erases the source, under rank-2 delta-rule updates. This proposal is neither.
+It is an ITERATED BACKWARD RESOLUTION: no content is stored or transported at all; the chain is
+re-walked from the read location outward at query time, K times, with tied weights, over the
+actual token sequence. The state carried between hops is a 64-d address, not a 768-d content, so
+nothing accumulates interference across the whole window and the depth-4 answer is not the
+survivor of thirty rank-2 writes into a shared store. This is End-To-End Memory Networks
+(Sukhbaatar et al. 2015) with a learned query transition — the construction that took bAbI from
+one supporting fact to three — translated here with the memory being (destination address ->
+source address, paired observation) triples and the hop transition being "replace the query with
+the retrieved source address".
+
+WHY THAT SHOULD MOVE THE MEASURED QUANTITY. comp_ca is native_hit minus swap_stayed on a
+role-swapped chain over the same board with the same read command. A predictor keying on the read
+LOCATION is identical in both arms and scores exactly zero; the objective only pays for carrying a
+particular content's identity through the moves. The chase pays precisely for that: to answer, the
+model must follow d successive source/destination bindings that exist only in the mv command
+embeddings, and when the two contents exchange their move-position sets the chain from the read
+location terminates at a different exposure, so a working chase flips its answer and a broken one
+does not. A single-hop lookup, by contrast, has no representation in which the depth-3 and depth-4
+windows (the whole eligible slice: 60 at d3, 29 at d4+) differ from a name lookup, which is the
+structural reason its per-window difference sits at zero.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL.
+- The frozen encoder mean-pools contextual token embeddings, so `mv A B` mixes both paths into one
+  768-d vector. If that vector retains no linearly-recoverable asymmetry between the first and the
+  second path argument, the src and dst heads cannot be separated and every hop matches the wrong
+  step. The chase then degenerates to noise, the halting softmax learns to concentrate on hop 0,
+  and the result is the parent's one-hop channel plus a zero-mean perturbation. This is the single
+  largest risk and it is shared with the partner program's transport store.
+- Address collision: if the dst head cannot discriminate the ~5 cups paths inside a window from the
+  ~20 unrelated paths in the same trajectory, attention smears and the retrieved content is an
+  average of several observations, which loses to the true one under the retrieval metric.
+- The halting softmax could collapse onto one hop early in training and never explore the deeper
+  ones. The hop embedding and the learned null direction are there to give it a gradient signal to
+  do otherwise, but the fixed step budget may not be long enough.
+- Cost: measured on CPU at batch 64 x length 26 the forward is about 1.3x the parent's. That is
+  wall-clock, not steps; the step budget is fixed, so the risk is schedule, not undertraining.
+
+UNMEASURED. I cannot run the real harness from here. Everything above about the score is a
+prediction. What I did verify locally: build() imports and runs; output shapes are
+(B,L,768)/(B,L,d) with a prediction at every position; the forward is exactly equal to the
+parent's at initialization; perturbing the observation token at position 11 changes no command
+prediction at index <= 11 and does change later ones (the no-leakage property the guard checks);
+finite outputs at L in {0,1,2,3,4,25}, with a fully padded row, and with all-zero attention when no
+key is allowed; gradients reach every new parameter; the two address-head pairs land in the
+optim's Muon group as (64,256) identical-shape pairs and the new readout lands in its (D,D)
+spectral-cap group.

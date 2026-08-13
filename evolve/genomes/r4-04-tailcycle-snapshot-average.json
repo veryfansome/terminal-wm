@@ -1,0 +1,42 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives"
+  },
+  "arch": {
+   "impl": "dualkey_contentgated_occlusion_denoising",
+   "params": {
+    "occ_p": 0.12,
+    "occ_ramp_start": 300,
+    "occ_ramp_end": 1000
+   }
+  },
+  "optim": {
+   "impl": "tailcycle_snapshot_average_spectral_muon",
+   "params": {
+    "avg_frac": 0.35,
+    "avg_cycles": 4
+   },
+   "bs": 64
+  },
+  "target": {
+   "impl": "identity"
+  },
+  "batcher": {
+   "impl": "r20_depthtilted_sysblock_curriculum",
+   "params": {
+    "depth_base": 1.0,
+    "depth_pow": 2.0,
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave"
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency"
+  }
+ }
+}

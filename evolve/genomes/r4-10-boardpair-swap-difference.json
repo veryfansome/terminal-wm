@@ -1,0 +1,40 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "boardpair_swap_difference",
+   "params": {}
+  },
+  "arch": {
+   "impl": "r22_retrieval_composition_renderer",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r3_cuebalanced_routing_blocks",
+   "params": {
+    "alpha_max": 2.5,
+    "ans_max_sim": 0.995,
+    "chunk": 256,
+    "coll_share": 0.5,
+    "cue_cap": 4.0,
+    "cue_gamma": 1.0,
+    "cue_iters": 4,
+    "hard_frac_max": 0.75,
+    "max_centers": 8000,
+    "n_block_images": 2,
+    "n_blocks": 2,
+    "nb_k": 16,
+    "proj_dim": 128,
+    "ramp_frac": 0.3,
+    "sim_thresh": 0.85
+   }
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency",
+   "params": {}
+  }
+ }
+}

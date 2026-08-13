@@ -1,0 +1,52 @@
+{
+ "id": "r4-11-flatbasin-lsam-tailavg",
+ "notes": "crossover of r3-09-rename-registry-occupancy with the r18-pathstate/dualaddress program; new optim (carried layerwise sharpness-aware perturbation + constant-LR tail averaging) and a composite head that runs both content-routing memories",
+ "chunks": {
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives",
+   "params": {}
+  },
+  "arch": {
+   "impl": "r22_observation_occlusion_denoising",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r4_flatbasin_lsam_tailavg",
+   "params": {
+    "lr": 0.0005,
+    "wd": 0.0005,
+    "warmup_frac": 0.04,
+    "hold_frac": 0.3,
+    "floor_ratio": 0.12,
+    "avg_frac": 0.25,
+    "beta2": 0.95,
+    "key_d": 64,
+    "momentum": 0.95,
+    "ns_steps": 5,
+    "rms_match": 0.2,
+    "spectral_cap": 4.0,
+    "spectral_iters": 2,
+    "rho": 0.05
+   },
+   "bs": 64
+  },
+  "target": {
+   "impl": "identity"
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave"
+  },
+  "head": {
+   "impl": "r4_registry_transport_composite",
+   "params": {}
+  }
+ }
+}

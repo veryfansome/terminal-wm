@@ -1,0 +1,119 @@
+CANDIDATE: arch = r24_backchain_pointer_resolution (crossover; only the arch axis changes)
+
+WHAT THE TWO PROGRAMS CONTRIBUTE
+
+Parent: the r18 path-state latent-transition trunk (arch) and the dual-address move-transport head
+(head) — a source/destination decomposition of each command plus a contrastive aux that mines
+steps whose observation duplicates an earlier observation under a different command with a
+content-free step in between, i.e. exactly the reads that follow a move chain.
+Partner: r22's prefix-content cross-attention (arch) — a masked softmax over strictly-earlier
+steps whose VALUES are the raw 768-d observation embeddings, so the prediction can be an exact
+copy of an observation the model has already seen.
+
+My arch subclasses R22PrefixContentXAttention, so both the r18 trunk and the r22 prefix-copy
+channel survive untouched; the genome keeps the parent's head, so the composed-read contrastive
+aux survives too. The partner's head (transition forward-model consistency) is the one thing I
+drop: only one head fits, and the parent's is the one whose mined examples land on the scored kind
+of position. What I add is a third channel that neither program has.
+
+WHAT I ADD
+
+A K-hop BACKWARD POINTER CHASE over the command sequence, computed at every command position.
+
+1. Addresses. Each command's raw frozen 768-d embedding x_i goes through LayerNorm, one shared
+   GELU layer -> a_i in R^256, then two learned DIAGONAL role gates sigmoid(role_src),
+   sigmoid(role_dst) in R^256, and then ONE SHARED projection addr_proj: R^256 -> R^64, unit-
+   normalized. So src_addr_i and dst_addr_i are two role-selected views of the same feature vector
+   pushed through the SAME map: "first path in this command" and "second path in this command",
+   living in one common address space by construction. Both parents (and r2's head) instead use two
+   independent linear heads, which have no structural reason to place the same path string at the
+   same address when it appears as the destination of one mv and as the source of the next.
+   Addresses depend on that command alone — not on the trunk hidden state, not on context.
+
+2. Follow matrix. follow[j, j'] = softmax over j' < j of
+   <src_addr_j, dst_addr_j'> / temp - softplus(recency) * (j - j' - 1), masked to valid earlier
+   commands. Read as: standing at step j, jump back to the most recent earlier step that PUT
+   something at the location step j is asking about. temp and recency are learned scalars.
+
+3. Absorb probability. absorb_j = sigmoid(MLP(a_j, obs_feat(obs_j))) * (obs_j is live). Read as:
+   does step j's own observation carry the content, or must the chase keep going? This is the
+   mechanism the data demands: in the training trajectories every `mv A B` step has empty output,
+   so its rendered observation is the constant "cwd=... exit=0\n" and carries no content, while a
+   `cat P` step's observation IS the content. A move step must be a pass-through node, not an
+   answer.
+
+4. Chase. alpha_1 = follow[i, :]; alpha_{t+1} = (alpha_t * (1 - absorb)) @ follow;
+   acc = sum_t alpha_t * absorb. Mass only ever moves to strictly earlier positions, so after K=8
+   hops acc[i, j] is the probability that a chain of address matches starting at command i is
+   absorbed at earlier step j. copy_i = (acc_i @ obs) / max(mass_i, 1e-4) — a convex combination of
+   raw earlier observation embeddings — is injected into pred at command position i through a
+   (D,D) readout initialized to 0.05*I (the answer is a COPY of an observation, so identity is the
+   right prior; the spectral cap in the genome's optim keeps that readout bounded) under a sigmoid
+   gate fed the absorbed mass, the chase sharpness and the copy's RMS.
+
+WHAT THIS COMPUTES THAT NEITHER PROGRAM COMPUTES
+
+A resolution of the move chain by COMPOSITION AT READ TIME, backwards. The parent's memories
+(r18's path slots, r2's head transport) compose forwards and incrementally: content is physically
+carried through an outer-product store one write at a time, so per-hop addressing error multiplies
+over depth and there is no place to re-sharpen. The partner's cross-attention is exactly ONE hop:
+it can copy an earlier observation but cannot ask "and where did the thing at THAT location come
+from". Mine composes several address matches into one retrieval, each hop a normalized softmax, and
+it is the composition itself that is differentiable: the gradient of the copied content flows back
+through every hop's address match, so the training signal that says "you copied the wrong content"
+lands on the addressing at every link of the chain rather than only on the last write.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca is (native_hit - swap_stayed) over windows where a content is routed by a chain of silent
+moves and one location is then read. In these trajectories the observation of `cat <final path>` is
+the byte-identical text of the earlier `cat <original path>` (same cwd, same exit, same file bytes),
+so its frozen embedding is the SAME vector: a correct chase makes the prediction an exact copy of a
+vector that is in the candidate set, which is as good as a prediction can be under the nearest-
+candidate metric. Under the role-swapped arm the move commands are re-encoded, so the follow matrix
+changes, the chase lands on the partner's content, and swap_stayed goes to 0 while native_hit stays
+1 — the per-window difference is +1. Keying on the read location alone cannot do this: the read
+command is identical in both arms, so any channel that only looks at it contributes exactly 0.
+I verified the algebra with an oracle-addressed forward pass: on a depth-3 chain the chase returns
+the moved content with cosine 1.000, and on the role-swapped version of the same board it returns
+the partner's content instead.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- The pooled frozen embedding of "mv A B" may not linearly separate A from B. Both paths are mean-
+  pooled into one vector; if the encoder's contextual token embeddings do not keep enough of the
+  first-vs-second-path distinction, the role gates cannot recover two different addresses and the
+  follow matrix degenerates. This is the single biggest risk, and it is the same bet the parent's
+  dual-address head already makes — I make it with a stronger structural prior (shared projection,
+  role selection by gating) rather than a weaker one (two free linear heads).
+- Learning the chase end-to-end may be too slow for the step budget. Nothing supervises the hops
+  directly; they get gradient from the genome's contrastive objective and from the head's aux on
+  the final prediction. Mitigations built in: the readout starts at 0.05*I rather than 0 so the
+  addressing has first-order gradient from step 1, and absorb starts near 0.5 everywhere so all
+  hops carry mass at init.
+- If absorb learns to be ~1 everywhere, the chase collapses to a single hop and the channel becomes
+  a second copy of the partner's prefix cross-attention with raw-command addresses. That is a
+  graceful degradation, not a break, but then the candidate should score like the partner, not
+  above it.
+- The recency bias could dominate: if softplus(recency) stays large, the chase walks back one step
+  at a time regardless of address. It is initialized to ~0.25 per intervening step against an
+  address score range of +/-2 (temp 0.5, learned) and is itself learnable.
+
+WHAT IT IS NOT
+
+No command text is parsed anywhere; nothing in this file knows what "mv" is. The addresses, the
+follow matrix, the absorb decision and the number of effective hops are all learned from the frozen
+embeddings. Nothing resolved by my code is placed in the model's input: the chase runs inside the
+module on the same tokens the harness hands it, and it only ever reads strictly earlier positions.
+
+CORRECTNESS CHECKED HERE
+
+- forward is bit-comparable to r22 at init up to the 0.05*I readout (max |delta| 0.028).
+- Causality: perturbing the observation at pair j moves no command prediction at index <= j
+  (max delta exactly 0.0 at every tested j) and does move later ones.
+- L in {0,1,2,3,4,5,7,33}, padded rows, and the odd-L case where the last command has no
+  observation: finite outputs, correct shapes.
+- Six real training steps with the genome's objective, optim (Muon + spectral cap) and head: finite
+  losses, gradient reaching every new parameter.
+- Cost: +8% wall clock per fwd+bwd over r22 at B=64, L=64 on CPU (the chase is K-1 batched
+  [n,n]x[n,n] matmuls).

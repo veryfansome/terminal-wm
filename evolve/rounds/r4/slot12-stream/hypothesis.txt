@@ -1,0 +1,147 @@
+WHAT I CHANGED
+
+One new axis: stream = r4_pathslot_dualaddress_code. The genome is a crossover: the arch and the
+objective come from the second program (r23_dual_address_transport_pointer,
+r3_fwl_orthogonalized_ring_contrast), the batcher comes from the parent
+(r2_routedepth_tilt_readcollision_blocks, its params verbatim), and optim / target / head are the
+same in both programs and are carried through unchanged.
+
+
+THE MECHANISM
+
+Every COMMAND token is still the standardized frozen command embedding, except that 208 of its 768
+coordinates -- three fixed, disjoint index sets chosen once by hashing the coordinate number, so
+the choice is deterministic and machine-independent -- are overwritten with a lexical dual-address
+code parsed out of that command string alone:
+
+  SOURCE slot   96 dims   sign(blake2b("path\x1f" + <source path>))   in {-1,+1}^96
+  DEST   slot   96 dims   sign(blake2b("path\x1f" + <dest path>))     in {-1,+1}^96
+  TAG    slot   16 dims   six structural flags in {-1,+1}, tiled
+
+Parsing is `cmd.split()`: if a redirection token is present, source = first absolute path left of
+it and dest = first absolute path right of it; else if the verb is `mv` and two absolute paths are
+present, source = the first and dest = the second; else source = the first absolute path and there
+is no dest. A missing source or dest gets a fixed NULL code instead of zeros, so "no destination"
+is one well-defined address rather than a degenerate one. The six TAG flags are has-dest, verb==mv,
+verb==cat, verb==ls, has-redirection, has-source. Those four command shapes plus the bare-verb case
+are the only shapes that occur in evolve/jail_data/train_sample.jsonl (I counted: (W,P) 401,
+(W,P,P) 172, (W,P,R,P) 81, (W,W,P) 59, (W,) 7, (W,W) 4), and the parser was checked against them.
+
+OBSERVATION tokens are untouched, the layout is unchanged (L = 2*maxn, cmd at even, obs at odd,
+types/key_pad/tgt/cmd_mask bit-identical to the baseline collate on the same batch -- asserted in
+test), and CUPS_LAYOUT stays "interleave2". collate applies the coding by calling code_cmds and
+nothing else, so what the gate reproduces is exactly what training saw.
+
+
+WHAT IT COMPUTES THAT NEITHER PARENT COMPUTES
+
+An exact equality test between two path occurrences.
+
+In both parents the only carrier of a move is the frozen mean-pooled sentence embedding of a string
+like `mv /tmp/w/cups/etc/ssh/sshd_config.cfg.7 /tmp/w/cups/etc/ssh/sshd_config.cfg.8`. Two facts
+about that vector are the bottleneck. First, it is close to symmetric in its two arguments: source
+and destination are pooled into one average over ~40 subword positions that differ in a single
+character, so a linear read cannot say which path is the source and which is the destination.
+Second, distinct addresses are nearly parallel: the pooled embeddings of `...magic.txt.4` and
+`...magic.txt.6` differ by one digit out of a long shared prefix. Chain composition needs precisely
+the operation those two facts destroy -- "is the destination of this move the same path as the
+source of that one?" -- and it needs it to be an equality, not a similarity, because a chain that
+routes through `.txt.4` and a chain that routes through `.txt.6` share every character but the one
+that matters.
+
+The code makes both operations exact and linear. The same path string produces the same 96-bit
+sign vector wherever it occurs, so the DEST slot of a move and the SOURCE slot of a later command
+have normalized inner product 1.0 when the paths are equal and ~N(0, 1/96) otherwise (measured on
+the real path strings from the sample: identical 1.000, and the pair
+`.../sshd_config.cfg.7` / `.../sshd_config.cfg.8` -0.021). I have not measured the pooled encoder's
+cosine on that pair -- there are no cached embeddings in this jail -- so the claim that it is close
+to 1 is an argument from how mean pooling over a long shared subword prefix behaves, not a
+measurement. Source and destination now live in disjoint coordinate sets, so
+"the address I read from" and "the address I write to" are two different linear functionals of the
+raw token instead of one ambiguous average.
+
+That is a re-tokenization, not an answer. Nothing in the code says which content is where. It is a
+pure per-command function of the command string; it never looks at another step, at any
+observation, at any target, or at any move already made. Resolving `cat P` still requires finding
+the latest earlier move whose DEST slot equals P's SOURCE slot, taking that move's SOURCE slot, and
+repeating until an exposure step -- the entire chain integration is left to the model, over the
+same number of hops as before.
+
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN native_hit ALONE
+
+comp_ca cancels anything keyed on which location is read. My code cannot escape that cancellation:
+the read command is the same string in both arms, therefore its coded token is bit-identical in
+both arms (asserted in test: native and role-swapped chains over the same board give an identical
+read-position token, while the move rows differ). Prefix-causality is trivially satisfied because
+the code of step i depends only on cmds[i]; I verified that coding a prefix equals the prefix of
+coding the whole sequence.
+
+What does differ between the arms is the move commands, and that is exactly where the code is
+informative. The quantity that survives both arms is "which content did this chain of moves put
+here", and the chain is a sequence of address equalities. The chosen arch is the one program in
+this pair that is built to execute those equalities: r23 derives a SOURCE address and a DESTINATION
+address per step from the RAW 768-d command embedding through a shared GELU layer and two
+unit-normalized heads, then runs one delta-rule scan that reads the content at the source address,
+writes it at the destination address and erases the source, and finally uses the retrieved value to
+query a masked softmax that copies one raw prefix observation verbatim. That machine is a literal
+mv interpreter, and every part of it is currently starved by the address it is fed: two heads
+reading the same near-symmetric pooled vector cannot emit different addresses, and unit-normalized
+addresses derived from two nearly parallel path embeddings cannot address distinct memory cells.
+The stream supplies the
+separable, near-orthogonal address the arch was designed to consume; I claim the pairing, not
+either half alone. Because the scan is recurrent over steps, it resolves depth-3 and depth-4 chains
+in one pass rather than needing one trunk layer per hop, which is the eligible slice (d3 60,
+d4+ 29).
+
+The other two picks are chosen against the failure mode this creates rather than for extra
+capacity. A crisp path code makes a NEW shortcut easy: memorize "path P -> the content last seen at
+P". That shortcut contributes exactly zero per window (it is location-keyed and cancels), but it
+consumes capacity and would dilute the routed signal, so it has to be actively suppressed.
+r3_fwl_orthogonalized_ring_contrast is the suppressor: it cross-fits a detached ridge from the
+causal command embedding to the target on the opposite parity half of each batch and subtracts rho
+times each row's fitted value from the prediction and from every candidate before distances are
+formed, so a negative is hard exactly to the extent that the difference between two observations is
+NOT explained by the difference between their two commands. With the address code in the basis,
+"explained by the command" is now a much sharper notion, and what is left to be contrasted is the
+part of the answer that the read location does not determine -- the routed part. It is the only one
+of the two objectives that opts into ctx via extract_cmd_input, so it is the only one that sees the
+new coding at all; the hash codes do not generalize out of fold, so the ridge can still only remove
+what genuinely generalizes. The parent's batcher tilts batches toward sequences whose deepest
+routed read has the most hops and blocks together sequences whose deepest reads have near-duplicate
+command embeddings but different answers; under the new coding those near-duplicate reads become
+exactly distinguishable addresses, so the block turns into "same shaped question, different chain",
+which is the hard case for a location-keyed predictor and the easy case for a transport model.
+
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+1. The pooled command embedding is not actually the bottleneck -- the arch could already read
+   source and destination apart, and the address heads fail for some other reason (too few hidden
+   units, the delta-rule memory saturating, the gates never opening). Then the code buys nothing
+   and I have only paid the coordinate cost.
+2. The coordinate cost is real. I overwrite 208 of 768 standardized dimensions. I am relying on the
+   mean-pooled embedding being far lower rank than 768 so that 560 surviving coordinates still
+   carry the semantics; if some skill in the blend (the cat/ls reads that are not routed at all)
+   depends on the destroyed coordinates, its retrieval degrades. That would show as native_hit
+   falling on non-cups steps without swap_stayed following.
+3. Recovering a ±1 code through LayerNorm + a shared GELU layer of 256 units into two 64-d
+   unit-normalized heads may be lossy enough that the equality test stays soft. GELU is roughly
+   half-wave on a sign code, so exact recovery of a 96-bit code wants more units than are there; if
+   the recovered addresses stay blurry, the memory cells still collide.
+4. The new lexical shortcut wins anyway. If the model latches onto "path -> last content" despite
+   the orthogonalized negatives, native_hit and swap_stayed rise together and comp_ca does not
+   move. This is the failure I consider most likely, and the diagnostic is a rise in native with
+   swapped-held tracking it.
+5. Address collisions inside a window. 96 bits gives distinct-path inner products with standard
+   deviation 0.10; a window with many paths has a worst-case pair well above that. If two distinct
+   locations in one board collide hard enough, the scan routes content to the wrong cell.
+
+Cost is not a risk here: measured on the sample trajectories (CPU, 64-sequence batches), collate
+with the coding takes ~5.5 ms per batch warm and ~8.4 ms with the hash cache cleared every batch,
+against ~19 ms for the baseline collate -- it is faster than the baseline because the token stream
+is filled by per-sequence slice assignment rather than a per-step Python loop. The module imports
+only hashlib and torch. So the step budget is unaffected. Every number in
+this file that is not from the sample file is a structural claim I checked with an assertion, not a
+measurement of the objective -- I cannot run the real harness from here, and I make no prediction
+about the size of the score change beyond the argument above.

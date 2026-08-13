@@ -1,0 +1,117 @@
+CANDIDATE: rolesplit_srcdst_channel (stream) + srcdst_transport_occlusion (arch)
+Crossover: parent's latent-transition memory + dual-pre head, partner's occlusion denoising,
+joined by the one thing neither has — a memory that moves content from one address to another.
+
+WHAT THE DATA SAYS (read off evolve/jail_data/train_sample.jsonl, all 24 sequences)
+
+A cups window is: several `cat <path>` exposures that reveal distinct contents, then a chain of
+`mv A B` steps, then `cat <final path>`. The mv steps produce EMPTY output; their rendered
+observation is only "cwd=/ exit=0\n", byte-identical for every mv in the window. So no routing
+information exists anywhere except in the mv command strings, and any model that carries a
+content across the chain must integrate the command tokens themselves.
+
+The chain paths are adversarial for a mean-pooled frozen encoder. A real window from the sample:
+
+  cat .../var/spool/mail/root.msg          <- exposes content X
+  cat .../g72/f654.dat                     <- exposes content Y
+  mv .../var/spool/mail/root.msg      .../var/spool/mail/root.msg.1
+  mv .../var/spool/mail/root.msg.1    .../etc/ssh/sshd_config.cfg.2
+  mv .../g72/f654.dat                 .../var/spool/mail/root.msg.3
+  mv .../etc/ssh/sshd_config.cfg.2    .../etc/ssh/sshd_config.cfg.4
+  ...
+  cat .../etc/ssh/sshd_config.cfg.8         <- answer is content Y
+
+Consecutive links differ by one trailing character, and two interleaved chains cross each other.
+Whole-command mean-pooled z_cmd for two adjacent links is therefore nearly the same vector, and
+the source and the destination of a single mv are pooled into the same blob.
+
+THE TWO THINGS THIS ADDS THAT NEITHER PARENT HAS
+
+(1) STREAM. code_cmds parses each command's own string into (verb, src, dst, redirect flags),
+    and rewrites coordinates 0..135 of that command's token as
+
+        tok[0:136] = 0.25 * clip(z_cmd[0:136], -4, 4) + channel(cmd)
+
+    where channel = [ sign_code(src) | sign_code(dst) | 8 form bits ], sign_code(p) being the
+    +/-1 expansion of a SHAKE-256 digest of the normalized path string, 64 dims. The SAME
+    sign_code function fills both blocks at the same relative offsets, so a path occupies the
+    identical 64-vector whichever role it plays, and one fixed linear map applied to block A and
+    to block B yields the same key for the same string. Distinct paths get expected-zero overlap
+    (measured on the two real chain links above: same path 1.00, adjacent link -0.22).
+
+    The point of ATTENUATING the carrier inside the channel instead of adding on top of it: the
+    thing that makes these commands unlearnable is not lack of signal but common mode. All mv
+    commands in a chain share nearly all of z_cmd, so a key read from an added code is dominated
+    by a direction common to every link, and after the unit() normalisation the arch applies to
+    its addresses, the keys collapse together. Scaling the carrier to a quarter inside the 136
+    channel coordinates leaves the code 16x the residual carrier energy there, so the address
+    read out of either block is path identity with the shared command content suppressed. The
+    other 632 coordinates of z_cmd are untouched, so verb/semantic content is intact for every
+    non-cups step.
+
+(2) ARCH. The parent's r18 transition memory reads AND writes the same slot:
+        p = unit(tr_path(x_cmd)); s_pre = p . mem; mem = decay*mem + p (x) (v - s_pre)
+    It can update a location's content in place, but it structurally cannot move content from one
+    location to another, which is exactly what mv does. srcdst_transport_occlusion splits the
+    address into two:
+        s_pre  = unit(tr_path(x_cmd)) . mem        content currently at the SOURCE
+        d_pre  = unit(tr_dst(x_cmd))  . mem        content currently at the DESTINATION
+        v      = (1-w)*obs + w*transition(s_pre, cmd)
+        mem   += p_dst (x) (v - d_pre)             delta-rule write at the DESTINATION
+        mem   -= p_src (x) (erase * s_pre)         source is emptied,
+                                                   erase = sigmoid(gate) * (1 - p_src.p_dst)
+    The returned read stays a SOURCE read, so a `cat P` step (whose src and dst strings are equal,
+    hence whose two blocks carry the identical code) reads slot P, has p_src = p_dst, has
+    (1 - p_src.p_dst) = 0 so no erase, and reduces exactly to the r18 update. tr_dst is
+    initialized as a copy of tr_path, so the whole module is bit-identical to r22 at init
+    (verified: max |pred_r22 - pred_new| = 0.0 at step 0); the two projections get different
+    gradients — one through the read term, one through the write term — and separate in training
+    (verified: they have drifted after 20 optimizer steps).
+
+WHY THIS SHOULD MOVE comp_ca AND NOT SOMETHING ELSE
+
+comp_ca = native_hit - swap_stayed. A predictor keyed on the read path alone gives the same
+answer in both arms and scores exactly zero. The measured quantity is only moved by a model whose
+answer at the read FOLLOWS the moves. Hand-wiring the addressing (cmd_proj passing the two
+blocks through, tr_path selecting block A, tr_dst selecting block B, mut gate driven by the
+"dst != src" bit, transition set to identity, erase on) on a depth-3 two-content window:
+
+    native arm    r22 single-address: cos(read, A) = +0.44   cos(read, B) = -0.89
+                  srcdst transport  : cos(read, A) = +0.99   cos(read, B) = -0.11
+    swapped arm   r22 single-address: cos(read, A) = +0.44   cos(read, B) = -0.89   (identical)
+                  srcdst transport  : cos(read, A) = -0.11   cos(read, B) = +0.99   (follows)
+
+The single-address memory is invariant to the role swap — a per-window contribution of exactly
+zero, whatever it predicts. The two-address memory tracks the swap, which is a per-window +1.
+That is an existence proof that the mechanism is EXPRESSIBLE, not a claim that it is learned; the
+weights above were set by hand, not trained. What makes it plausibly learnable here is the r20
+dual-pre head, inherited unchanged: it already supervises this same transition operator on both
+raw observations and the memory's own retrieved content toward mined future post-mutation reads,
+so the operator gets direct gradient on its deployment distribution, and the partner's occlusion
+schedule already trains the trunk to predict from prefixes with observations missing — which is
+what the scored position is, since its own observation is withheld.
+
+NOTHING IS RESOLVED IN MY CODE. code_cmds is a pure function of one command's own string and its
+own embedding: no cross-step state, no chain following, no lookup of which content ended where.
+It is trivially prefix-causal (position-local), so a window that is a prefix of a sequence codes
+identically to the full sequence (verified). The read command's string is the same under the
+native and role-swapped chains, so its token is bit-identical in both arms (verified). What the
+coding hands the model is the atomic relation "this string here, that string there" — the model
+still has to chain dst(step k) to src(step j) across an arbitrary number of hops, and the score
+only moves if it does.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- cmd_proj is 768 -> d=176, and the two code blocks are 128 of those 768 coordinates. If the
+  trunk cannot afford to spend ~128 of its 176 latent dimensions preserving both blocks
+  separably, the addresses stay entangled and the transport degenerates back toward r18.
+- Attenuating 136 coordinates of z_cmd to a quarter costs some general next-observation accuracy.
+  If those coordinates happen to carry information the low-rank command embedding does not carry
+  redundantly elsewhere, native_hit on ordinary reads falls and the differential can fall with it.
+- tr_dst starting as an exact copy of tr_path may separate too slowly inside the step budget; the
+  gradients differ so the symmetric point is not a fixed point, but the timescale is unmeasured.
+- The erase term is gated by (1 - p_src . p_dst). If training makes the two keys similar for mv
+  as well, the source is never emptied and stale content accumulates at abandoned paths, which
+  would show up as the model answering with a content that HAD been at the read path earlier.
+- Everything above is unmeasured on the real harness. I could not run it; the numbers quoted are
+  from hand-wired forward passes and shape/causality checks on the jail's sample trajectories.

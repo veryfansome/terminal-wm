@@ -1,0 +1,41 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives"
+  },
+  "arch": {
+   "impl": "r22_prefix_content_xattention"
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout"
+  },
+  "target": {
+   "impl": "zca_shrunk_target_whitening"
+  },
+  "batcher": {
+   "impl": "r2_routedepth_tilt_readcollision_blocks",
+   "params": {
+    "alpha_max": 2.5,
+    "ans_max_sim": 0.995,
+    "chunk": 256,
+    "coll_share": 0.5,
+    "hard_frac_max": 0.75,
+    "max_centers": 8000,
+    "n_blocks": 2,
+    "nb_k": 16,
+    "proj_dim": 128,
+    "ramp_frac": 0.3,
+    "sim_thresh": 0.85
+   }
+  },
+  "stream": {
+   "impl": "r3_srcdst_hashslot_coding"
+  },
+  "head": {
+   "impl": "r2_dualaddress_move_transport",
+   "params": {
+    "pred_weight": 0.0
+   }
+  }
+ }
+}

@@ -1,0 +1,24 @@
+{
+  "chunks": {
+    "objective": {"impl": "r12_antiretrieval_ring_negatives"},
+    "arch": {"impl": "r22_prefix_content_xattention", "params": {}},
+    "optim": {"impl": "r18_spectral_capped_transition_readout", "params": {}},
+    "target": {"impl": "identity"},
+    "batcher": {
+      "impl": "r4_hopdepth_scaffold_stratified_quota",
+      "params": {
+        "curr_frac": 0.75,
+        "ramp_frac": 0.35,
+        "warm_frac": 0.1,
+        "tau_up": 0.5,
+        "lam_down": 0.35,
+        "n_block_images": 1,
+        "depth_cap": 6,
+        "min_stratum": 8,
+        "demand_pow": 1.0
+      }
+    },
+    "stream": {"impl": "r3_srcdst_hashslot_coding"},
+    "head": {"impl": "r2_dualaddress_move_transport", "params": {}}
+  }
+}
