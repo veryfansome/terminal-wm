@@ -119,7 +119,6 @@
   "standing_rules": []
  },
  "budget": {
-  "max_generations": 40,
-  "max_full_evals": 90
+  "disabled": true
  }
 }
