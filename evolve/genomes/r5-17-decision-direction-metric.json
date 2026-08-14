@@ -1,7 +1,7 @@
 {
  "chunks": {
   "objective": {
-   "impl": "r12_antiretrieval_ring_negatives",
+   "impl": "r5_decision_direction_metric_quotient",
    "params": {}
   },
   "arch": {
@@ -9,7 +9,7 @@
    "params": {}
   },
   "optim": {
-   "impl": "r5_relsam_spectral_transport_keys",
+   "impl": "r18_spectral_capped_transition_readout",
    "params": {}
   },
   "target": {
@@ -25,11 +25,11 @@
    }
   },
   "stream": {
-   "impl": "baseline_interleave",
+   "impl": "r4_role_bound_path_atom_codes",
    "params": {}
   },
   "head": {
-   "impl": "r5_dualextractor_displacement_transport",
+   "impl": "r2_dualaddress_move_transport",
    "params": {}
   }
  }

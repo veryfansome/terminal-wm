@@ -1,20 +1,18 @@
 {
  "chunks": {
   "objective": {
-   "impl": "r12_antiretrieval_ring_negatives",
-   "params": {}
+   "impl": "r4_relocation_address_ring_quotient"
   },
   "arch": {
-   "impl": "r18_pathstate_latent_transition_worldmodel",
+   "impl": "r24_backchain_pointer_resolution",
    "params": {}
   },
   "optim": {
-   "impl": "r5_relsam_spectral_transport_keys",
+   "impl": "r18_spectral_capped_transition_readout",
    "params": {}
   },
   "target": {
-   "impl": "identity",
-   "params": {}
+   "impl": "confusable_contrast_metric"
   },
   "batcher": {
    "impl": "r6_sysblock_hardneg_curriculum",
@@ -25,11 +23,10 @@
    }
   },
   "stream": {
-   "impl": "baseline_interleave",
-   "params": {}
+   "impl": "baseline_interleave"
   },
   "head": {
-   "impl": "r5_dualextractor_displacement_transport",
+   "impl": "r2_dualaddress_move_transport",
    "params": {}
   }
  }

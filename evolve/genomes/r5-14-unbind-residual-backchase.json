@@ -1,0 +1,42 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives"
+  },
+  "arch": {
+   "impl": "r25_unbind_residual_backchase",
+   "params": {
+    "chase_hops": 6,
+    "addr_hidden": 256,
+    "chase_temp": 0.4,
+    "lex_w_init": 3.0,
+    "recency_init": -1.8,
+    "absorb_bias": -0.5,
+    "readout_init": 0.2,
+    "chase_gate_bias": -2.0
+   }
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout"
+  },
+  "batcher": {
+   "impl": "r2_routedepth_tilt_readcollision_blocks",
+   "params": {
+    "alpha_max": 2.5,
+    "ans_max_sim": 0.995,
+    "chunk": 256,
+    "coll_share": 0.5,
+    "hard_frac_max": 0.75,
+    "max_centers": 8000,
+    "n_blocks": 2,
+    "nb_k": 16,
+    "proj_dim": 128,
+    "ramp_frac": 0.3,
+    "sim_thresh": 0.85
+   }
+  },
+  "head": {
+   "impl": "r20_dualpre_transition_consistency"
+  }
+ }
+}

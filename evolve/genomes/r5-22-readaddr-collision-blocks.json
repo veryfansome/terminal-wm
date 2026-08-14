@@ -1,0 +1,50 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives"
+  },
+  "arch": {
+   "impl": "r25_span_occluded_closure_transport",
+   "params": {
+    "obs_info_bias": 4.0,
+    "occ_p": 0.15,
+    "occ_ramp_end": 1000,
+    "occ_ramp_start": 300,
+    "ref_d": 128,
+    "ref_pd": 64,
+    "ref_recency_init": 0.1,
+    "span_max": 6,
+    "span_mean": 3.0
+   }
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout"
+  },
+  "target": {
+   "impl": "identity"
+  },
+  "batcher": {
+   "impl": "r5_readaddr_collision_blocks_depth_strata",
+   "params": {
+    "alpha_max": 1.5,
+    "depth_ramp_frac": 0.35,
+    "depth_cap": 6,
+    "deep_min": 3,
+    "deep_frac_max": 0.75,
+    "block_frac_max": 0.75,
+    "addr_share": 0.6,
+    "n_addr_keys": 3,
+    "cross_frac": 0.5,
+    "min_block": 4,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave"
+  },
+  "head": {
+   "impl": "r20_dualpre_transition_consistency"
+  }
+ }
+}
