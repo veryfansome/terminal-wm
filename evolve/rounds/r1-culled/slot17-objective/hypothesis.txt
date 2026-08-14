@@ -1,0 +1,157 @@
+CANDIDATE: objective r1_trajectory_transport_recall + arch r1_redisplay_occluded_composition_renderer
+AXES CHANGED: objective, arch.  Inherited unchanged: optim, target, batcher, stream, head.
+
+THE CROSSOVER
+The two parents differ on exactly one axis: the parent's arch is the r22 composition renderer
+(extra capacity to COMBINE retrieved channels into target_read), the partner's arch is r22
+observation-occlusion denoising (train-time removal of obs tokens, so prediction from missing
+evidence is in-distribution). I keep both: my arch subclasses the composition renderer and adds
+occlusion inside its forward, and I make the occlusion CONTENT-TARGETED rather than uniform. My
+assigned axis, objective, carries the new mechanism and is built from the SAME statistic the new
+occlusion uses, so the two changes are one design and not two.
+
+
+1. MECHANISM — what the code computes that the parents do not
+
+(a) The objective recovers per-trajectory segments from the flattened command rows. The harness
+builds ctx["prev"] as torch.cat([zeros, tgt[:, :-1]]) before masking, so the first command row of
+every sequence in the batch — and only that row — has an exactly-zero prev. Setting WANTS_CTX and
+thresholding ||prev||^2 <= 1e-6 therefore reconstructs the batch's sequence boundaries exactly
+(verified: on batches of sequences of length 4,5,6,7 the recovered segment sizes are 4,5,6,7). Rows
+are contiguous per sequence, so within-segment position differences are just row-index differences.
+
+(b) From the target-target distance matrix tt (already computed for the inherited ring) it forms,
+for each row i, the nearest EARLIER target in the same segment: dmin_i, its hop distance hop_i, and
+the distance to the immediately preceding target dprev_i. With a batch-adaptive scale sigma =
+0.35 * mean(within-segment earlier-pair tt) it builds a detached row weight
+
+    u_i = 1 + 3 * exp(-dmin_i/sigma) * (1 - exp(-dprev_i/sigma)) * (1 - exp(-(hop_i-1)/1.5)),
+    u normalised to mean 1.
+
+Read literally: a row is upweighted when its answer REPEATS content that was displayed earlier in
+the same window (recall), is NOT the content displayed one step ago (surprise), and the display it
+repeats sits several steps back (depth). On a hand-built window [A,B,C,mv,mv,A,B,B] the measured u
+is 0.59-0.66 on the first five rows and on the immediate repeat, and 2.18 on the two rows whose
+content came back from five hops away — a 3.7x concentration on exactly the deep-carry rows.
+
+(c) It adds a WITHIN-TRAJECTORY listwise term: for each row, a softmax over -dist2(pred_i, tgt_j)/T
+restricted to j in the same segment (near-duplicate targets are suppressed by the inherited
+1-exp(-tt/delta) mask), cross-entropy against j = i, weighted by u. dist2 is the eval's own
+per-dimension-mean squared L2, in the inherited precision-weighted metric.
+
+(d) It adds a prev-centred differential term: 1 - cos(pred_i - prev_i, tgt_i - prev_i), gated by how
+large the true change is, weighted by u.
+
+(e) The inherited ring-negative focal listwise, the MSE anchor and the gated global repulsion hinge
+are kept verbatim; the only change to them is that the focal listwise is now weighted by u.
+
+(f) The arch drops each obs token during training with probability
+p_t = ramp * (0.10 + 0.45 * exp(-dmin_t/sigma)), where dmin_t is the distance from obs_t to the
+nearest EARLIER valid obs in the same row — i.e. the same recall statistic as (b), computed inside
+the forward. Measured drop rate on the window above: 0.10-0.13 on novel observations, 0.53-0.56 on
+re-displays. The dropped token is zeroed and key-padded, which under the r18 trunk also zeroes the
+pair's write gate, so an occluded observation is simply never written to the delta-rule memories.
+
+
+2. WHY THIS SHOULD MOVE comp_ca
+
+The metric is a paired difference over the SAME board: native chain minus role-swapped chain. Every
+term common to both chains cancels. What does not cancel is which stored content the model places at
+the queried location, and the swap's confusion set is precisely {the contents of the other files in
+that same window}. Two structural consequences:
+
+- MSE and any full-batch contrastive spend most of their gradient on what all candidate observations
+  of a window share (cwd line, exit code, output formatting, system identity). A softmax over
+  distances to a fixed candidate set is invariant to a common translation of the prediction and all
+  candidates, so the within-trajectory term (c) has ZERO gradient on that shared component and all
+  of its gradient on the relative arrangement — the same quantity the paired difference isolates.
+  The parents cannot express this: their negative set is the whole flattened batch (roughly 1000
+  rows, of which only ~15 are same-window), and the ring reweighting is a function of target-target
+  distance alone, which cannot tell a same-window confuser from a cross-system row at the same
+  distance. Same-window confusers are a ~1.5% minority of the parents' negatives; here they are
+  100% of the local term's negatives.
+
+- Deep windows (d3, d4+ = all 89 scored windows) are the ones where the content at the query was
+  last displayed several hops back. Rows of that shape exist in ordinary shell trajectories (a file
+  is cat'ed, other things happen, it is cat'ed again) but are a small minority, and under a uniform
+  row weighting their gradient is swamped by rows solvable by copying the previous observation. (b)
+  detects them from the target statistics alone and multiplies their gradient by up to ~4x while
+  explicitly giving hop-1 repeats no bonus — the shortcut the metric cancels gets no extra pull.
+
+- (f) manufactures more of them. Occluding a re-display forces the later prediction of that same
+  content to reach past the removed copy to the original display, converting a d2 example into a
+  d3+ example in the model's input while leaving the target untouched. The parent's arch alone has
+  the capacity to compose retrieved channels but is trained on a corpus whose typical carry distance
+  is short; the partner's arch alone increases carry distance but at random, mostly deleting novel
+  evidence that nothing can recover. Targeting the occlusion at redundant copies is what makes the
+  union more than a union, and it uses the same statistic the loss uses to score the resulting rows.
+
+- (d) supervises the direction of the change relative to the current state, which is the quantity the
+  r18 delta-rule memories and the latent transition operator actually carry, and which the inherited
+  head aux already supervises off-line; the objective now supervises it on the main path too.
+
+CAUSALITY. ctx["prev"] and ctx["cmd"] are the harness's declared causal side-channels. The occlusion
+decision for obs_t is a function of obs_{<=t} and changes the token stream only at index 2t+1, which
+under the causal mask is invisible to every command position <= t; command position t+1 legitimately
+sees obs_t's absence. Verified: stream.leakage_ok passes on a trained net, and eval forward is
+occlusion-free (self.training is False) and bit-deterministic.
+
+ANTI-COLLAPSE. Measured on n=60 random targets: a zero prediction scores 7.358, the target mean
+scores 7.357, a near-true prediction scores 0.008. Both listwise terms are cross-entropies over
+distinct targets, which no constant can minimise; u is a function of the targets only, so it cannot
+be gamed by the prediction.
+
+
+3. WHAT I EXPECT IF I AM WRONG, AND THE CHEAPEST OBSERVATION THAT SHOWS IT
+
+If the mechanism is right, comp_ca rises and the rise is concentrated in the d4+ bucket, while
+next-obs retrieval health stays at or near the parent's (the local term is aligned with, not opposed
+to, the global one).
+
+If I am WRONG, the most likely shapes are:
+  (i) The within-trajectory term is redundant with the global one because same-window observations
+      are already the batch's nearest neighbours under the ring. Signature: comp_ca within noise of
+      the parent's +0.0300 and retrieval health unchanged. Cheapest check: log, for one training
+      batch, the fraction of each row's top-32 ring-weighted negatives that are same-segment. If
+      that fraction is already high (>0.3), the term adds little and the design is a wash.
+  (ii) The transport weighting is measuring the wrong rows. Cheapest check: dump u alongside the
+      (segment, position, hop) triple for one real batch and eyeball whether the high-u rows are
+      re-reads of earlier file contents rather than, say, every `cd` back to a directory already
+      visited. If most high-u rows are cwd repeats, u is tracking navigation, not file identity, and
+      comp_ca will not move.
+  (iii) The targeted occlusion removes so much of the recoverable evidence that training degrades.
+      Signature: next-obs retrieval health drops materially versus the parent while comp_ca does
+      not rise. Cheapest check: the training loss curve — if it plateaus higher than the parent's
+      after the ramp completes at step 1000, occ_p_redisplay=0.55 is too aggressive.
+No performance number for this candidate is measured; everything above is either an algebraic
+property of the code or a measurement on synthetic tensors, and I did not run the real harness.
+
+
+4. THE RISK I SEE IN MY OWN DESIGN
+
+The single biggest risk is (ii) above in a specific form: in shell trajectories a large share of
+"the observation repeats an earlier observation" cases are not file-content transport at all but
+`cd` returning to a previously visited directory, or a command whose output is empty/identical
+boilerplate. render_obs puts cwd and exit code in every observation, so two unrelated steps in the
+same directory with short outputs can be near-identical in embedding space. Those rows would receive
+high u and high occlusion probability while carrying no file identity, diluting the mechanism at
+best and, at worst, training the model to reproduce cwd strings from memory — a behaviour that is
+identical under native and swapped chains and therefore cancels to exactly zero in comp_ca while
+consuming most of the reweighted gradient. The dupmask partially protects the loss (an exact
+duplicate is removed as a negative) but does NOT protect u, which uses dmin directly, nor the
+occlusion, which targets exactly those rows. Mitigations already in the code are weak: sigma is
+batch-adaptive rather than absolute, and the surprise factor removes only the hop-1 case. A safer
+variant would key u on the residual tgt - prev rather than on tgt, so that the shared cwd/format
+component is removed before the nearest-earlier search; I did not do that because the residual of a
+re-display is not stable across different intervening observations, and I judged the direct content
+match the more faithful surrogate for the swap test. This is the assumption most likely to be wrong.
+
+Second risk: the objective now has four additive terms and their relative weights (_TRAJ_W = 1.0,
+_DIFF_W = 0.15, _TRANSPORT_KAPPA = 3.0) are chosen from magnitude reasoning, not tuning — the global
+listwise starts near log(n) ~ 7 and the local one near log(15) ~ 2.7, so the local term is roughly a
+third of the total pressure at init. If the true optimum needs the local term to dominate, this
+candidate under-shoots rather than fails.
+
+Cost: the objective adds ~14 ms/iteration over the parent's ~24 ms at n=1216 on CPU (no new matmul —
+the segment work reuses the dist2 and tt matrices the parent already builds); the occlusion adds one
+B x n_pair x n_pair batched matmul per step. Both are small against the arch's per-step recurrence.

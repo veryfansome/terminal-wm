@@ -10,7 +10,7 @@ DESCRIPTION = (
     "mem-pre arm supervising the SAME shared transition operator on the arch's own memory "
     "content s_pre_k (computed via the arch's input block + _transition_reads under no_grad, "
     "detached) toward the same mined future reads — training the operator on its deployment "
-    "distribution (brief findings 6+7) inside the single pass. One mining pass, RNG-draw count "
+    "distribution inside the single pass. One mining pass, RNG-draw count "
     "identical to the r18 head; mem arm auto-disables on archs without the memory surface."
 )
 

@@ -1,0 +1,46 @@
+{
+ "name": "r5-08-depth-stratified-epoch-reshuffle",
+ "chunks": {
+  "objective": {
+   "impl": "r22_exact_target_equivalence_quotient",
+   "params": {}
+  },
+  "arch": {
+   "impl": "r4_complement_address_transport",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {},
+   "bs": 64
+  },
+  "target": {
+   "impl": "identity"
+  },
+  "batcher": {
+   "impl": "r5_depth_stratified_epoch_reshuffle_blocks",
+   "params": {
+    "base_frac": 0.25,
+    "depth_beta": 1.2,
+    "ramp_frac": 0.3,
+    "block_frac_max": 0.5,
+    "group_size": 4,
+    "max_repeat": 20.0,
+    "min_stratum": 16,
+    "depth_cap": 4,
+    "bucket_cap": 32,
+    "max_filter_buckets": 1200,
+    "proj_dim": 128,
+    "sim_thresh": 0.6,
+    "ans_max_sim": 0.995
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave"
+  },
+  "head": {
+   "impl": "r3_occupancy_routed_copy_transport",
+   "params": {}
+  }
+ }
+}

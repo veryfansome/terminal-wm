@@ -1,0 +1,182 @@
+CANDIDATE  head = r4_chainlink_route_transport
+AXES CHANGED  head (new impl); arch, batcher recombined from the two parent programs.
+
+=====================================================================
+1. WHAT THE MECHANISM IS
+=====================================================================
+
+A head-owned router that runs at EVERY forward (train and eval) and computes, inside the
+model, a distribution over "which earlier observation is the content at the location this
+command names", composed over an arbitrary number of silent moves.
+
+Per batch, over the n command positions (tok[:, 0::2]) and their observations (tok[:, 1::2]):
+
+  g_j    = gelu(path_in(cmd_j))                        one shared command encoder
+  q_j    = unit(src_key(g_j))                          the address this command READS
+  kd_j   = unit(dst_key(g_j))                          the address a move would WRITE to
+  s_j    = gelu(step_in([g_j, gelu(obs_in(obs_j))]))
+  move_j = sigmoid(move_out(s_j)) * live_j             "this step carried content elsewhere"
+  beta_j = sigmoid(write_out(s_j)) * live_j            "this step leaves content anywhere"
+  w_j    = unit(move_j * kd_j + (1 - move_j) * q_j)    a NON-move writes where it reads
+
+  score[i,j] = <q_i, w_j> / link_temp + log(beta_j + 1e-6),   masked to j < i, both live
+  A          = softmax_j(score)                                rows with no key set to 0
+
+A[i,j] is a one-hop link: "the location command i names was last written by step j".
+The content at i then satisfies the linear recurrence
+
+  content(i) = sum_{j<i} A[i,j] * ( move_j * content(j) + (1 - move_j) * obs_j )
+
+i.e. if the writer j was itself a move, take whatever j took; otherwise take j's own
+observation.  Writing M = A * move and R = A * (1 - move), this is (I - M) C = R O with M
+strictly lower triangular, so it is solved EXACTLY by one unit-lower-triangular solve:
+
+  T       = solve((I - M), R)          absorption matrix, [B, n, n]
+  routed  = T @ obs                    routed[i] = sum_j T[i,j] obs_j
+
+T is sub-stochastic and strictly lower triangular (verified numerically against a brute-force
+forward recurrence: max error 6e-8; row sums <= 1; upper triangle exactly 0).  Composition
+depth is free: a depth-4 chain is the same solve as a depth-1 chain.
+
+Injection:  pred[:, 0::2] += sigmoid(read_gate(g)) * read_out(routed), with read_out a
+(D,D) Linear zero-initialised in weight and bias, so the wrapped net is bit-identical to the
+unwrapped net at initialisation (verified: max |pred_wrapped - pred_base| = 0.0 on the r20,
+r22 and baseline archs).  The full (D,D) form, rather than a per-dimension scale, is chosen
+because the genome's target chunk rescales the target space and the injected observations are
+raw; a full matrix can absorb that map, and the optim's spectral cap already covers (D,D).
+
+TRAIN-TIME AUX (five terms, all mined from the batch embeddings alone, no command text):
+
+  duplicate-cluster labels: mv / redirect steps render as "cwd=... exit=0\n" with empty
+  output, so their observation embeddings are EXACTLY equal.  clus_j = number of other steps
+  in the sequence with an identical observation.  contentful = clus <= 3, mutation = clus >= 4.
+  A read-back is a step i with an earlier step j whose observation is identical, whose command
+  is not, both contentful, and at least one mutation strictly between them.
+
+  (a) gate BCE          move_j -> mutation_j ; beta_j -> (contentful | mutation)_j
+  (b) ROUTE CE          -log( sum_{j in origins(i)} T[i,j] + 1e-6 ) over mined read-backs
+  (c) anchor            cos + 0.2*mse between routed[i] and obs_i on mined read-backs
+  (d) spread            hinge on <w_i, w_j> for distinct-content pairs, and on <q_j, kd_j>
+                        for mutations, so a move does not degenerate into a self-loop
+  (e) transition        f(obs_origin, cmd_lastmutation) ~= obs_readback on the arch's shared
+                        transition_from_emb, cosine + 0.2*mse
+
+Term (a) is what makes term (b) non-trivial: with move_j pinned to 1 on the observation-free
+steps, the ONLY way to put T-mass on the true origin is to compose A across every move in the
+chain.  A direct read->origin link would require move = 0 on those steps, which (a) forbids.
+
+=====================================================================
+2. WHAT NEITHER PARENT COMPUTES
+=====================================================================
+
+The parent head (r18_transition_forwardmodel_consistency) computes nothing at eval at all:
+wrap returns a config dict, forward is untouched, and its whole contribution is a training
+term on the arch's transition operator.  Its miner requires the observation to CHANGE between
+two cosine-similar commands (change_floor 0.25).  On this data a move chain PRESERVES content
+-- `cat A` gives C, `mv A B`, `cat B` gives the same C, byte for byte -- so that miner is
+pointed at the opposite event from the one the objective measures.  Term (e) keeps the
+parent's mechanism (supervise the shared transition operator, cosine + MSE) and re-aims it at
+preservation across a detected mutation.
+
+The crossover partner's arch (r20 dual read/write key + presence gate) can represent a move in
+its recurrence, and the parent's arch (r22 prefix content cross-attention) gives the readout a
+convex combination of earlier RAW observations.  This head keeps the second mechanism and
+generalises it: r22 attends one hop over earlier observations; T is the same object closed
+under the move recurrence, so it is the K-hop version of exactly that computation.  The genome
+therefore takes the r20 arch (whose dual read/write address is the transport primitive the
+r18/r22 single-slot read-modify-write cannot express) and lets the head supply the multi-hop
+content readout.
+
+The shown r2 head builds a dual-address delta-rule memory and supervises its READ with an
+embedding-space InfoNCE.  That is satisfied by any read landing near a similar observation; it
+never says which earlier step the content came from.  Neither parent, and neither shown prior,
+materialises an explicit differentiable distribution over origin positions, and none trains
+that distribution against a label.  That distribution -- T -- is the new object here.
+
+=====================================================================
+3. WHY THIS SHOULD MOVE comp_ca
+=====================================================================
+
+comp_ca = native_hit - swap_stayed, paired over a board whose non-move command tokens are
+identical in both arms.  Two properties matter.
+
+First, the router has NO positional input.  q and w are functions of command embeddings only;
+position enters solely through the causal mask and the ordering of the recurrence.  A is
+therefore structurally incapable of expressing "the k-th mover" or "the first content" -- the
+analytic non-tracker family the brief warns about.  What changes between the native and the
+role-swapped arm is which command embeddings agree on addresses, so the routed content differs
+between arms exactly to the degree the address matching is real.
+
+Second, the quantity trained is the quantity measured.  Term (b) is a classification over at
+most n positions with an exactly-known label, which is a much lower-variance gradient than a
+768-dimensional regression toward an observation, and it lands on the routing itself rather
+than on a downstream reconstruction.
+
+Measured gradient split (CPU, B=32, synthetic batch with the real duplicate structure): the
+aux puts 1.666 of its 1.666 gradient norm on router parameters and 0.017 on arch parameters,
+while the main loss puts 1.717 on arch parameters and 0.124 on the router.  They are close to
+orthogonal in parameter space, so under the harness's global clip_grad_norm_(1.0) the router
+is trained without taking the arch's share.  This is why route_weight is left at 1.0 despite
+the aux value being comparable to the main loss.
+
+Nothing resolved is put into the model's input.  The duplicate-cluster labels and the mined
+read-back pairs appear only inside loss terms at train time.  At scoring time T is produced by
+the router's own parameters from command embeddings and strictly earlier observations, both of
+which are already the model's legitimate input.
+
+Causality: content(i) uses only A[i,j], move_j, beta_j and obs_j for j < i.  It never touches
+obs_i or move_i, so it is switched ON, not off, at the scored position whose observation is
+withheld.  Verified: the stream's leakage_ok probe returns True after randomising every router
+parameter, on all three archs tested.
+
+=====================================================================
+4. WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+=====================================================================
+
+(1) The decisive assumption: that the frozen mean-pooled encoding of `mv SRC DST` retains
+    enough order information for two linear maps of one shared nonlinear feature to emit
+    different SRC and DST addresses that agree with the address `cat SRC` and `cat DST` emit.
+    Mean pooling is symmetric in the two path arguments; only the encoder's contextual token
+    representations break that symmetry.  If they do not break it enough, q and kd cannot
+    separate, w collapses to q everywhere, the router degenerates to "content stays where it
+    was", and comp_ca should land near the parent's.  This is the single point of failure and
+    it is unmeasured -- I cannot run the encoder from inside the jail.
+
+(2) Credit through a depth-4 chain is a product of four softmax weights.  If routed mass stays
+    near the 1e-6 floor on deep windows, the -log gradient is carried almost entirely by the
+    shallow mined examples.  The partner's depth-tilted batcher is kept precisely to ramp deep
+    sequences in after shallow ones have shaped the addresses, but that this ordering is
+    sufficient is a guess, not a measurement.
+
+(3) An empty FILE read renders identically to a move (empty output, exit 0, same cwd) -- there
+    is one in the sample data -- so the cluster miner labels it a mutation and term (a) tells
+    it move = 1.  It will then route instead of depositing.  The content it would have
+    deposited is the empty-observation embedding either way, so the damage is bounded, but a
+    pack with many empty reads would put noise into the gate supervision that terms (b) and
+    (d) then have to overcome.
+
+(4) The gate BCE could be too strong a prior: on an `X >> Y` append, "Y now holds X's content"
+    is only true of the final append, so move = 1 is partly wrong there.  Those steps are a
+    minority of the mutations in the sample but they are not zero.
+
+(5) Cost is unmeasured on the GPU lane.  On CPU at B=64, n=31 the wrapped step costs about
+    11% over the bare r20 arch (2.00s vs 1.80s for 3 forward+backward steps); the triangular
+    solve is O(B n^3) with n around 31 and is not the expensive part.  On MPS the solve falls
+    back to an n-step forward substitution loop (verified to agree with the direct solve to
+    3e-8), which would be slower but is not the scoring device.
+
+=====================================================================
+5. WHAT WAS ACTUALLY VERIFIED, AND WHAT WAS NOT
+=====================================================================
+
+Verified by running the code in this jail: bit-identical predictions at initialisation on the
+r20, r22 and baseline archs (max abs diff 0.0); stream leakage_ok True with randomised router
+parameters on all three; the triangular solve matches a brute-force recurrence to 6e-8 and the
+MPS fallback to 3e-8; T strictly lower triangular with row sums <= 1; all 16 router parameters
+and the arch's transition operator receive gradient; aux is finite and returns a hard 0.0 on
+sequences shorter than 3 steps and before the ramp; odd-length (withheld final observation)
+and single-step batches run clean; the genome resolves and passes evolve.genome.validate.
+
+NOT verified, because the harness cannot run from here: any effect on comp_ca, whether the
+addresses separate at all on real encoder embeddings, convergence inside the step budget, and
+GPU wall-clock.  No number in this file is an eval result.

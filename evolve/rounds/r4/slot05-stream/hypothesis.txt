@@ -1,0 +1,97 @@
+MECHANISM ADDED (stream axis): role-bound path-atom codes on command tokens.
+
+What the data forced this design. In train_sample.jsonl a move step is
+  {"cmd": "mv /tmp/w/cups/g53/f149.tmp /tmp/w/cups/usr/share/misc/magic.txt.1", "output": "", "exit": 0}
+so its rendered observation is "cwd=/ exit=0\n" and carries nothing about the move. The ONLY carrier
+of a move in the token stream is the command embedding, and that embedding is a mean-pooled sentence
+vector in which the source path and the destination path are averaged into one 768-d point. There is
+no linear function of that token that returns "the destination of this mv" separately from "the
+source of this mv". Every downstream mechanism that has to ask "which earlier command wrote to the
+location I am now reading" is therefore asking a question the input does not expose.
+
+The impl parses each command STRING ON ITS OWN into a verb/redirect shape and its non-flag path
+arguments, assigns each argument a role (mv/cp: arg0 -> src, arg1 -> dst; a > or >> target -> dst and
+the argument before it -> src; anything else -> read), and for each path derives two deterministic
+blake2b-seeded +/-1 Rademacher vectors of length 128, one for the full path string and one for its
+basename. Each atom is bundled twice into a 128-d code: once multiplied elementwise by a fixed +/-1
+role vector (Plate-style VSA role-filler binding, self-inverse for sign vectors) and once unbound.
+The code is written over the LAST 128 coordinates of the command token; coordinates 0..639 of the
+standardized command embedding pass through untouched, and OBSERVATION tokens are never touched.
+
+WHAT THIS COMPUTES THAT NEITHER PARENT COMPUTES. Neither program has any separable representation of
+the two path arguments of a mutating command. The parent stream hands the net the raw mean-pooled
+blend. The partner arch (r18) works around the blend by learning a verb-quotient of the command
+projection to get one addressing key per command — one key, so a mv can only be modelled as an
+in-place edit of a single slot, never as "read slot A, write slot B". The partner head (r18) mines
+its (pre, mutating-cmd, post) triples with a cosine threshold on those same blended embeddings.
+After this coding the following are exact, arithmetic facts about the token stream, verified on the
+real command strings from train_sample.jsonl (numbers from the check I ran, dot products in the
+128-d band, C = 128):
+
+  q = (read token band) elementwise-multiplied by S_read*S_dst, a fixed diagonal +/-1 map that any
+  learned linear key/query projection can realise:
+     q . (mv whose DESTINATION is that path)      = +93.0
+     q . (mv with a different destination)        =  +4.3
+  q2 = (mv token band) elementwise-multiplied by S_src*S_read:
+     q2 . (the cat that exposed that source path) = +81.8
+     q2 . (an unrelated read)                     =  +1.6
+
+That is a clean, linearly available hop operator. One attention head can now compute "the mv whose
+dst is the location I am reading", carry its src atom, and a second head can compute "the expose
+step that read that src", whose observation token IS the content. Chaining k of those is exactly the
+depth-3/depth-4 routing the eligible windows ask for, and the r18 arch already has the machinery to
+cash it in: its path-addressed delta-rule memory keys off h_cmd0 (the transformer hidden state, i.e.
+after the hops) and writes obs_tok as the value, so a resolved query retrieves the exposed content
+and direct_gate copies it into the prediction. The parent supplies the interleave2 layout and the
+identity target this all sits on; the partner supplies the memory, the transition operator and its
+spectral-capped readout; the new stream is the piece that makes the partner's addressing able to
+express a move at all.
+
+WHY IT SHOULD MOVE THE MEASURED QUANTITY. comp_ca is native_hit minus swap_stayed on the same board.
+A model keyed on the read location predicts identically in both arms and scores exactly zero; a model
+keyed on move-order cancels only in expectation. The only thing that separates the arms is which
+CONTENT the chain routes to the read location, and the two arms differ ONLY in the mv command
+strings. This coding does not resolve any chain: it exposes atomic path identity and nothing else,
+and the chain still has to be integrated by the model's own attention across steps. So a gain here
+has to come from the model actually following the moves, which is the quantity being measured.
+
+The unbound (role-free) copy of every atom is there on purpose: it raises the token-token cosine of
+two commands that touch the same path and lowers it for two commands that merely look alike
+lexically, which is the similarity the partner head's triple mining runs on. Because the coding also
+adds norm to every token, the absolute scale of that cosine shifts down; I therefore set the head's
+path_thresh to 0.55 instead of its 0.60 default. On my arithmetic (same-path pair gains ~+55 in the
+numerator, different-path pair gains ~0 while both gain ~150-290 in the denominator) 0.55 under this
+coding is strictly MORE precise than 0.60 under the uncoded stream and recovers the recall. This is
+an unmeasured calibration argument, not a measured one; its failure direction is graceful, because a
+threshold that ends up too high just makes aux_loss return 0.0.
+
+CONTRACT SAFETY, by construction. code_cmds(cmds, z_cmd) computes row i from cmds[i] alone, so it is
+position-local and therefore prefix-causal. The scored READ position's command string is the same
+string in the native and the role-swapped arm, so its coded token is bit-identical across arms —
+only the mv tokens re-encode, which the contract explicitly permits. collate calls code_cmds itself,
+so the gate that replays the coding against a real collate sees identical bytes. Observation tokens,
+tgt, cmd_mask and the interleave2 layout are unchanged, so CUPS_LAYOUT stays "interleave2" and the
+forced-choice candidate bank is untouched. Nothing in the coding is gated on an observation being
+present, so it is fully active at the scored position where the observation is withheld.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL.
+1. Capacity. The 128-d code has to survive cmd_proj (768 -> d=176) and then file_read/path_read
+   (176 -> key_d=64). Random codes are near-isometric under a dense projection, but if the learned
+   projection spends its 176 dimensions on the lexical embedding instead of the code band, the hop
+   operator is never formed and the run is just the partner's run minus 128 embedding coordinates.
+2. Lexical loss. Overwriting the last 128 of 768 standardized coordinates removes about one sixth of
+   the encoder's linear information. Ordinary next-observation prediction (and therefore native_hit
+   and the health reading) leans on path semantics that a hash destroys — /etc/passwd looks like
+   nothing in particular to a Rademacher vector. If the routing gain does not materialise, this cost
+   is paid with nothing bought.
+3. Novel atoms at eval. Eval windows are held out by IMAGE and their cups paths are freshly random,
+   so every code at scoring time is a vector the net has never seen. The mechanism only transfers if
+   the net learns the content-independent matching operation rather than memorising atoms. This is
+   the induction-head assumption; it is the load-bearing bet of the design.
+4. Parser drift. Roles are assigned from the literal string. A command form outside what the data
+   shows (pipes, quoting, 2>, multi-file mv) gets its paths coded as reads rather than src/dst; that
+   degrades to a role-free identity code rather than breaking, but it does not help.
+5. Threshold coupling, as described above.
+
+No performance number here is measured. The dot products are exact properties of the coding, computed
+on real command strings from the jail's sample; nothing has been trained.

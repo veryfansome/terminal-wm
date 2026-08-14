@@ -1,0 +1,55 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives"
+  },
+  "arch": {
+   "impl": "r24_reference_closure_transport",
+   "params": {
+    "obs_info_bias": 4.0,
+    "ref_d": 128,
+    "ref_pd": 64,
+    "ref_recency_init": 0.1
+   }
+  },
+  "optim": {
+   "impl": "r4_twotimescale_router_polyak_tail",
+   "bs": 64,
+   "params": {
+    "lr": 0.0005,
+    "wd": 0.0005,
+    "warmup_frac": 0.04,
+    "hold_frac": 0.3,
+    "floor_ratio": 0.1,
+    "beta2": 0.95,
+    "key_d": 64,
+    "momentum": 0.95,
+    "ns_steps": 5,
+    "rms_match": 0.2,
+    "spectral_cap": 4.0,
+    "spectral_iters": 2,
+    "router_out_max": 128,
+    "router_lr_mult": 2.0,
+    "router_wd": 0.0,
+    "avg_frac": 0.25
+   }
+  },
+  "target": {
+   "impl": "identity"
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "r3_srcdst_hashslot_coding"
+  },
+  "head": {
+   "impl": "r20_dualpre_transition_consistency"
+  }
+ }
+}

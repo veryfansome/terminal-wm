@@ -1,0 +1,173 @@
+CANDIDATE: objective = r3_fwl_orthogonalized_ring_contrast, on the crossover genome
+(arch r23_dual_address_transport_pointer + optim/batcher/head from the parent lineage,
+target identity, stream baseline_interleave).
+
+AXES CHANGED vs the parent genome: objective (new impl), arch (parent's
+r22_retrieval_composition_renderer -> the partner's r23_dual_address_transport_pointer),
+target and stream written out explicitly as identity / baseline_interleave (the values the
+partner declares, and the values genome.py already defaults to, so those two are no-ops).
+
+
+1. WHAT THE DATA FORCES, READ OFF evolve/jail_data/train_sample.jsonl
+
+A cups window is: several `cat <path_i>` steps whose observation is content_i (expose); then
+one or more `mv <src> <dst>` steps whose observation is EMPTY ("cwd=/ exit=0" and nothing
+else, so the mv OBSERVATION token carries no information at all and only the mv COMMAND
+token names the two addresses); then a `cat <final_loc>` step (role cups_test) whose
+observation is whichever content the move chain routed to final_loc. The same shape recurs
+in the cvar windows with redirections instead of mv. So the only route from the read command
+to the right answer runs: read-command -> the mv command tokens -> the expose observation
+token that holds that content.
+
+Two properties of these observations matter for a loss:
+  (a) Every one of them is a `cat` of a small text file. A large part of each target
+      embedding is the "generic answer" - the cwd/exit prefix, the file's format, the fact
+      that it is a short config-ish blob - and that part is largely predictable from the
+      command text alone, per row, with no history. The part that actually distinguishes the
+      N contents of a window is a small canary-carrying remainder.
+  (b) A large mass of rows (every mv, every redirect op) has a target that is literally the
+      same string, hence the same embedding, as many other rows.
+
+
+2. THE MECHANISM I ADDED, AND WHAT IT COMPUTES THAT NEITHER PARENT COMPUTES
+
+Both programs I was given use r12_antiretrieval_ring_negatives: an in-batch listwise
+softmax over squared L2 distances from pred_i to every candidate target t_j, with the
+negatives band-pass weighted by target-target distance. Every distance in it is a RAW
+distance. Nothing in either program conditions on the command that produced the row.
+
+I opt into the WANTS_CTX extension and add a Frisch-Waugh-Lovell / double-machine-learning
+orthogonalization step (Chernozhukov et al.'s partialling-out: regress the nuisance out of
+both sides, then estimate on the residuals). Per minibatch, under no_grad:
+
+  - basis = [ctx["cmd"], 1]  ->  [n, D+1].  ctx["cmd"] is the model's own causal command
+    input for that row (stream.extract_cmd_input), so this is a per-row function of causal
+    inputs only; the no-future-leakage property is untouched.
+  - a linear kernel-ridge map basis -> tgt is fit CROSS-FITTED: rows of even global index get
+    their fitted value from a map fit on the odd rows and vice versa, so no row's fitted
+    value is fit on itself. Ridge lambda = 0.1 * mean(diag(gram)), scale-free.
+  - shift_i = rho * fitted_i with rho = 0.9, and BOTH sides are shifted:
+        pres = pred - shift,   tres = tgt - shift
+    before any distance, ring or logit is formed.
+
+The algebra that makes this the right operation, and which is what a reviewer should check
+against the code:
+
+    d_res(i,i) = || (p_i - s_i) - (t_i - s_i) ||^2  =  || p_i - t_i ||^2      UNCHANGED
+    d_res(i,j) = || (p_i - t_j) - (s_i - s_j) ||^2                            CHANGED
+
+The positive term is algebraically identical to the parent's, so absolute calibration in the
+raw observation space - the space the eval's squared-L2 decision actually lives in - is not
+touched. What changes is only the geometry of the NEGATIVES: candidate j is pulled toward
+anchor i by exactly the amount of the difference t_i - t_j that a per-row linear map of the
+two commands already explains. Two window-mates whose observations differ mainly because
+they are cats of two different paths become a near-collapsed pair; the loss can only
+separate them on the command-UNEXPLAINED remainder, which is the canary content. That is
+precisely quantity (a) above, and it is what neither r12 nor r22 computes: they weight
+negatives by how far apart two targets are, this one weights them by how far apart two
+targets are AFTER removing what their two commands account for.
+
+I verified the diagonal invariance numerically (max |d_raw(i,i) - d_res(i,i)| = 6e-8 in
+float32 on a 1600x768 synthetic) and that off-diagonal distances contract while the diagonal
+does not.
+
+Three consequences of the shift are handled explicitly in the code rather than left to luck:
+  - The temperature, the ring bandwidth lam, the repulsion margin and its softness tau are
+    all written as FRACTIONS of the batch's mean off-diagonal distance in whichever space
+    they are measured in (_TEMP_FRAC 0.125, _LAM_FRAC 0.5, _MARGIN_FRAC 0.25, _TAU_FRAC
+    0.125). Orthogonalization compresses the distance scale, and with the parent's absolute
+    _TEMP = 0.25 that compression would silently raise the softmax temperature. On the raw
+    standardized scale (mean off-diagonal ~ 2) these fractions reproduce the parent's 0.25 /
+    0.5 / 0.25 exactly, so in the rho -> 0 limit the objective degenerates to the parent's.
+  - The duplicate suppression and the multi-positive equivalence classes are keyed on the RAW
+    target distance tt_raw, not the residual one, because "these two observations are the
+    same string" (property (b)) is a fact about the data. After shifting, two mv rows with
+    identical targets no longer sit at distance zero from each other, so a residual-space
+    duplicate test would turn them into mutual false negatives. Numerically-equal targets are
+    pooled into one class, get inverse-class-size candidate mass and a logsumexp numerator
+    over the class (this part is a recombination of r22_exact_target_equivalence_quotient's
+    idea, moved onto a raw-distance criterion inside a residualized objective).
+  - Rows are weighted as anchors by energy_i = mean(tres_i^2) through the gate
+    energy/(energy + 0.25*median(energy)). A row whose observation is entirely explained by
+    its own command carries nothing to track, so it stops competing for listwise gradient
+    with the rows that do. In this data that reallocates the contrastive budget away from the
+    "mv -> empty output" mass and onto the expose/test reads.
+
+The raw untouched squared-error anchor ((pred-tgt)^2).mean() is kept at weight 0.05 and is
+the anti-collapse guarantee: a constant prediction cannot minimize it. Measured on a
+1600x768 synthetic with a duplicate-heavy target set: constant 9.05, mediocre 5.03,
+near-perfect 1.44 - monotone in prediction quality.
+
+Cost, measured: forward+backward at n=1600, D=768 on CPU is 59 ms against the parent's 25 ms
+(two ridge solves of ~800x769 plus one extra no-grad n x n Gram for the raw duplicate test).
+This is an unmeasured extrapolation to the scoring box, but on a GPU lane those are
+milliseconds against a step that already forms two n x n x D products, so I do not expect the
+fixed step budget to be at risk. I have not run the real harness.
+
+
+3. WHY THIS IS A CROSSOVER AND NOT JUST A LOSS TWEAK
+
+The partner's unique contribution is r23_dual_address_transport_pointer: a source/destination
+address pair per command, a delta-rule content store that reads at the source, writes the
+read value at the destination and erases the source, and a pointer softmax that copies ONE
+raw earlier observation embedding verbatim into the command-position prediction through a
+zero-init readout. That is a machine built to do exactly the mv chain, and at init it
+contributes literally nothing (zero-init tp_out, tp_gate biased to -2).
+
+The parent's unique contribution is the r12 ring-negative listwise family, which is what
+makes close-but-distinct window-mates the thing being discriminated at all.
+
+They are complementary rather than merely co-present, and the new objective is the thing that
+couples them. Under a raw-distance loss most of the loss magnitude sits in the generic
+component of each observation, which the transformer trunk can produce on its own from the
+command token; a zero-init copy path has to compete against an already-adequate trunk for a
+share of a gradient that is mostly about the generic part, which is a weak reason for its gate
+to open. After orthogonalization the generic component is removed from the negatives'
+geometry and the down-weighting removes the uninformative rows, so nearly all of the listwise
+gradient is about the one thing the trunk structurally cannot supply and the pointer-copy path
+structurally can: which earlier observation is the right one to reproduce. The loss is
+reshaped to pay for the arch's mechanism.
+
+
+4. WHAT IT DOES NOT DO
+
+Nothing here resolves a move chain and hands the answer to the model. The nuisance map is
+linear, per-row, and its only input is that row's own command embedding plus a bias - it has
+no access to any other step, so it cannot represent "which content is at final_loc" even in
+principle. Its output is never added to any model input; it is subtracted from BOTH sides of a
+distance under no_grad and cancels exactly on the diagonal. The model's prediction, the
+targets, and the eval are untouched.
+
+Worth stating because it is the closest thing to a leak: the ridge is fit on the batch's
+targets. If a command string appears twice in a batch with the same observation (it does -
+`cat /tmp/w/cvar/g3/out.dat` is read twice in the sample trajectory), the map can learn that
+pair and subtract most of that row's content. The effect is that such a row loses signal and
+is then down-weighted by the energy gate; it cannot gain the model information, because
+nothing computed here reaches the model.
+
+
+5. WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+  - If the generic component of a cups observation is NOT well approximated by a linear
+    function of the frozen command embedding, the fitted shift is small, the negatives are
+    barely re-weighted, and the candidate degenerates to the parent's objective with a
+    relative temperature - a null result, not a regression. My synthetic sweep is the honest
+    evidence here and it is not the real data: with a fast-decaying command spectrum the
+    residual aligned with the content component at cos 0.91, with a slowly-decaying one only
+    0.48. Real frozen sentence-encoder embeddings are strongly anisotropic, which is the
+    favourable case, but I could not measure it.
+  - If the ridge over-fits and removes the content as well as the generic part, the residual
+    targets collapse, the energy gate zeroes most rows, and the objective reduces to the 0.05
+    raw MSE anchor alone - which would be a real regression. Cross-fitting plus lambda =
+    0.1 * mean(diag(gram)) is the guard; the failure signature would be a training loss that
+    falls to roughly 0.05 * MSE with no contrastive component.
+  - If the eval's discriminative work is dominated by the generic component after all - i.e.
+    if the N foils within a window differ mostly in format rather than in canary - then
+    deliberately refusing to reward that component costs accuracy.
+  - If r23's transport/pointer path never opens its gate for reasons unrelated to the loss
+    (optimization, the -2.0 tp_gate bias, the step budget), the coupling argument in section 3
+    does not fire and only the objective's own effect remains.
+  - The two seeds' worth of run-to-run spread on this measurement is not visible to me, so a
+    small positive would not be distinguishable from luck. The mechanism is aimed at a large
+    move (it changes which rows and which pairs receive essentially all of the contrastive
+    gradient), and if it only moves the number slightly it should be read as not having fired.

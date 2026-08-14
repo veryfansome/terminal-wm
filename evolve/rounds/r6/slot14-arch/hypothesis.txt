@@ -1,0 +1,122 @@
+CANDIDATE: chain_referent_closure_transport (crossover; axes changed: arch, head, batcher)
+
+THE MECHANISM
+
+Both parents route content through a RECURRENT memory: a step writes a value at an address and a
+later step reads that address, so carrying one content across k hops requires k correct
+write-then-read events in a row through a delta rule whose signal has to survive decay and
+interference at every hop. The gradient that would teach hop k has to pass through hops 1..k-1.
+That is the structural reason a depth-4 window is much harder than a depth-3 window for this
+lineage, and it is the thing I am attacking.
+
+I replace that with a POINTER-CHASING formulation solved in closed form. Every command asks one
+question from its raw embedding alone: which strictly earlier command last wrote the location I am
+about? Call that soft pointer A (row j = query, column i = key, strictly lower triangular). Each
+step carries a register
+
+    R_j = own_j * obs_j + (1 - own_j) * sum_i A_ji R_i
+
+where own_j is a learned gate saying "my own observation IS the content". This is a linear system
+in R with unit-lower-triangular matrix (I - (1-own)*A), so it is solved by ONE triangular solve
+instead of unrolled: a depth-k route costs the same as a depth-1 route, and the gradient reaches
+every link of the chain directly rather than through k recurrent steps. The prediction at command j
+uses pulled_j = sum_i A_ji R_i, passed through the trunk's existing command-conditioned transition
+operator and injected through a zero-initialised (D,D) readout.
+
+Four things make the pointer itself a content-routing device rather than a similarity blur:
+
+1. ROLE-SEPARATED COSINE MATCH WITH LEARNED TEMPERATURE. The query is a read-role projection of the
+   asking command, the key is a write-role projection of the earlier command, both unit-normalised,
+   scored at a learned temperature (init 10). A mean-pooled embedding of "mv A B" is roughly
+   verb + src-role(A) + dst-role(B); because the encoder is contextual, the src and dst occurrences
+   of a path do not land on the same vector, so two SEPARATE linear maps can align "the path I read"
+   with "the path you wrote" in a shared code. One shared map provably cannot: it would return the
+   sum of both of a move's paths.
+2. A WEIGHTED-L1 MISMATCH TERM over a low-dimensional code, added to the logit. Exact string
+   agreement is not a bilinear form; a dot product cannot express "these differ in no coordinate".
+   |p_j - p_i| followed by a learned linear map can.
+3. A LEARNED RECENCY SLOPE on (j - i). I checked this against the real trajectories in
+   evolve/jail_data/train_sample.jsonl: for a read of a moved location, the correct referent is
+   exactly the MOST RECENT earlier command mentioning that path, in every routed read in the sample,
+   including the case where the path had also been read earlier under its original name.
+4. A LEARNED CONSUMPTION PENALTY (the part I have not seen anywhere in this lineage; borrowed from
+   Sinkhorn/optimal-transport attention, made one-sided so it stays causal). Plain softmax
+   normalises over keys only, so nothing stops every later read from latching onto the same salient
+   earlier command. Here the mass already claimed on key i by strictly EARLIER queries is subtracted
+   from its logit: score_ji -= kappa * sum_{j'<j} A_j'i, with kappa learned. In this data a freshly
+   created destination is written once and consumed once, so "already claimed" is real evidence
+   against being my referent. Column normalisation over ALL queries would have been the textbook
+   Sinkhorn step and would have made query j depend on later commands; the running form uses only
+   earlier queries, so the scored final read sees exactly what it saw in training.
+
+WHY THE THREE AXES MOVE TOGETHER
+
+arch: the mechanism above.
+
+The parent's OBSERVATION OCCLUSION is kept, and it stops being a generic regulariser here: an
+occluded observation is key-padded, so own_j collapses to zero for that step and its register
+becomes a pure RELAY of whatever its own referent holds. Occlusion therefore trains exactly the
+relay path the chain needs, and it is the live, data-driven form of the crossover partner's
+obs-absent composition idea (whose type-2 branch is unreachable under this stream, so copying it
+literally would have been a dead branch). The same relay is what makes a move step work at all:
+every mv in the sample data has an empty observation, so own must be driven by whether the
+OBSERVATION carries content, which is why the own gate reads the observation's own hidden state.
+That is causally safe -- own_j gates only R_j, which is read only by steps after j.
+
+head (parent r18_transition_forwardmodel_consistency -> partner erasing_dualaddress_transport_batchhard):
+the partner's head is a strict superset of the parent's: identical forward-model consistency terms
+on the shared transition operator my closure also consumes, PLUS a label-free batch-hard triplet
+that mines slots whose observation duplicates an earlier slot's under a different command with a
+content-free step between, and requires the memory read to be nearer the content actually present
+than to the nearest stale content. That is direct supervision for "a moved-from location stops
+returning what it used to hold", which the plain next-observation loss only supplies indirectly. Its
+own erasing two-address memory is a stateful second route to the same answer and is zero-initialised
+at the prediction.
+
+batcher (parent r6 image blocks -> partner r2 route-depth tilt): the closure's routing parameters
+(temperature, recency, kappa, the own gate) only receive gradient from windows that actually contain
+multi-hop chains. The partner's batcher scores each training sequence by the exact hop count of its
+deepest routed read, parsed from the command strings, and tilts block membership toward deep ones
+while keeping the image blocks the parent's batcher provided. It raises the density of the only
+examples that teach the new parameters anything.
+
+WHAT I EXPECT, AND WHAT WOULD FALSIFY IT
+
+Unmeasured -- I could not run the harness. Prediction: comp_ca above the parent's +0.0300, with the
+gain concentrated in the d4+ windows rather than spread evenly, because the closed-form solve is
+what removes the depth penalty. Falsified if the d3 and d4+ arms move together by the same amount
+(then whatever helped is not depth-specific), or if the closure gate g_cc trains toward zero (then
+the trunk preferred to ignore the whole route).
+
+HOW IT MEETS THE METRIC, NOT HOW IT SCORES
+
+The differential cancels exactly for a predictor keyed on WHICH LOCATION is read. This mechanism is
+keyed on which earlier command wrote that location, and then recursively on the content that command
+was holding; under the role-swapped chain the same read location points into a different chain of
+writes and therefore returns the partner's content, which is what makes the difference non-zero for
+a genuine tracker. The consumption penalty happens to work against the first-mover magnet -- one
+early command cannot be everyone's referent -- but I am not claiming that as a scoring argument in
+either direction; the shortcut reading is a measurement, not something to legislate.
+
+CORRECTNESS NOTES (checked, not assumed)
+
+- Init-identity with the parent verified to max abs diff 0.0 on a random batch: the readout is
+  zero-initialised and the new modules are constructed AFTER the inherited __init__ so the inherited
+  parameters draw the same init RNG stream.
+- Odd length verified. n_cmd = (L+1)//2, n_pair = L//2; the final command has no observation, so its
+  obs/hidden rows are zero-padded and obs_present is False there, forcing own = 0. Nothing indexes
+  obs at the final command. L = 12, 11, 3, 1 and 0 all produce finite output of the right shape.
+- Causality verified with the stream's own leakage probe, with an ACTIVE closure (readout and gate
+  forced non-zero) and again with the partner head wrapped around it -- not only at the inert
+  zero-init point where the probe would pass vacuously. pulled_j sums registers of strictly earlier
+  steps only; the consumption running sum uses strictly earlier queries only.
+- Reachability verified: every new parameter (cc_q, cc_k, cc_p, cc_diff, cc_keybias, cc_null,
+  cc_own, cc_gate, cc_ln, cc_read and the three scalar logits) receives non-zero gradient from the
+  training loss at command positions, and the readout receives gradient even at exact zero init.
+  Nothing new lives inside no_grad or on a branch this layout never takes; there is no types == 2
+  branch.
+- No nn.Module internals shadowed: every new attribute is cc_*.
+- Cost: CPU forward+backward at B=64, n=32 is about 1.6x the parent arch alone including the head.
+  The added sequential loop is n_cmd iterations of O(B*n) work, negligible beside the two [B,key_d,D]
+  recurrences the trunk already runs; the triangular solve is [B,n,n] on n <= 32.
+- The stream is untouched, so no code_cmds obligation arises.

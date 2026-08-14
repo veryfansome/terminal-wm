@@ -1,0 +1,101 @@
+MECHANISM: an algebraic-unbind backward chase over commands, added on top of the parent arch.
+
+WHAT THE DATA FORCES. In the training sample a routing window is: several `cat <path>` steps whose
+observation IS the content, then a chain of `mv <src> <dst>` steps, then a `cat <path>` read. Every
+mv step's observation renders to "cwd=<cwd> exit=0\n" with empty output — it is the SAME string for
+every mv in a window, so its embedding carries no information about which file moved. The only place
+the routing lives is the mv COMMAND embedding, a mean-pooled 768-d vector of the text "mv S P". So
+resolving a read of P means: find the earlier mv whose DESTINATION is P, recover its SOURCE S, find
+the earlier mv whose destination is S, and so on, until the step whose observation is the content.
+
+WHAT I ADDED. For each command position j the module computes one shared GELU feature a_j from the
+raw command embedding, then two same-shape address heads: bag_j = W_bag a_j and key_j = W_key a_j.
+The chase state leaving j is NOT a third free head; it is
+
+    res_j = alpha * bag_j - beta * key_j + b        (alpha, beta scalars init 1.0, b a key_d vector)
+
+so the only new degrees of freedom for the outgoing address are two scalars and a bias: three roles
+(start query, match key, outgoing state) are served by two weight matrices. Matching is a masked
+softmax over strictly-earlier commands of
+
+    <unit(query), unit(key_k)>/temp  +  lex_w * cos(e_j, e_k)  -  softplus(recency) * gap(j,k)
+
+with a learned NULL column appended, so mass that matches nothing leaves the chase. The start row
+for a queried command uses bag as the query; the follow matrix uses res. Each step also emits an
+absorb probability tau_j from its command feature and its own observation feature. The chase runs
+start, then K-1 applications of the follow matrix, accumulating (mass * tau) at every hop; the
+accumulation is renormalized into a convex combination of strictly-earlier RAW observation
+embeddings and added to the command's prediction through an identity-scaled (D,D) readout under a
+sigmoid gate fed the absorbed mass, the chase sharpness and the copy scale.
+
+WHAT THIS COMPUTES THAT NEITHER PARENT COMPUTES. Neither program has any multi-hop pointer chase.
+The parent (r18 path-state + r22 composition renderer) resolves content through delta-rule
+associative memories whose write value at a mv step is that step's observation — which, per the
+paragraph above, is a content-free constant; the composition renderer then mixes the retrieved
+channels vector-wise but never follows a second link. The partner is the same trunk without the
+renderer. Both therefore have, at best, one associative hop between a location and a content.
+This module composes K links, and it composes them by ADDRESS SUBTRACTION: if the pooled embedding
+of "mv S P" is approximately additive over the paths it names, then bag("mv S P") ~ psi(S) + psi(P)
++ const and key("mv S P") ~ psi(P) + const, so res ~ psi(S) — the source path is recovered as what
+is LEFT OVER after the destination is removed, without ever having to separate first-argument from
+second-argument order inside a mean-pooled vector. For a one-path command (`cat P`) bag and key
+describe the same path, so res collapses toward the constant b and matches only the null column,
+which is the correct behaviour for a chain terminal.
+
+The symmetry between source and destination is broken by the loss, not by me: the final read
+location is the destination of the last mv touching it and is never a later mv's source, so only
+the destination reading of key yields a chase that reaches an exposing observation. The mirrored
+solution reaches nothing and gets no gradient reward.
+
+WHY IT SHOULD MOVE THE MEASURED QUANTITY. The score is native_hit minus swap_stayed on the same
+board. Under the role swap the read token and the destinations are identical and only the move
+commands are re-encoded, so anything keying on the location being read cancels exactly. What does
+not cancel is a prediction whose value is the content the mv chain actually deposited. This
+mechanism's output is literally a convex mixture of prefix observation embeddings selected by
+following mv commands backwards — when the chase is right the mixture concentrates on the exposing
+step and the identity-scaled readout emits that content verbatim, which is exactly the target
+space (collate puts standardized z_obs into the token stream). Change the mv commands and the chase
+lands somewhere else, which is the sign the metric pays for. It is also not a first-mover position
+lookup: the recency term is a penalty on gap and the chase must traverse links, so a fixed ordinal
+position is not reachable without the address match.
+
+WHY IT SHOULD LEARN INSIDE THE STEP BUDGET. Two things carry it. (1) The lexical term
+lex_w * cos(e_j, e_k) with lex_w init 3.0 means that at step zero, before any address head has
+learned anything, the start row for `cat P` already concentrates on earlier commands that share the
+long path string P — the mv into P and the mv out of P — and every follow row concentrates on
+commands sharing a path with the current one. The chase begins inside the right neighbourhood and
+the address heads only have to learn the direction (destination, not source) within it. (2) The
+readout is initialized to 0.2 * I rather than zero, so the copied observation already points at the
+target subspace and the gradient path from the main loss to the address heads exists at step one.
+
+FAILURE MODES — what would have to be true for this not to work. (a) If the frozen sentence encoder
+is not even roughly additive over the two paths in "mv S P", then bag minus key is not the source
+path and the residual matches nothing; the null column absorbs the mass, the gate closes, and the
+candidate degenerates to the parent plus noise. (b) If the lexical prior is too strong it will pull
+the start row onto the mv that moved content OUT of P (also path-sharing) as often as the mv that
+moved content IN; lex_w is learnable and can be reduced, but if the address term never sharpens the
+mixture stays blended and the copy is an average of several contents, which loses to the parent's
+single-hop retrieval. (c) If tau cannot separate exposing steps from mv steps, mass is absorbed at
+mv positions and the copy is dominated by the constant empty-output embedding; tau sees the step's
+own observation feature and mv observations are literally a constant string, so this is the part I
+expect to be easy. (d) Six hops of [B,n,n] matmuls plus one (D,D) readout is small next to the
+trunk's existing per-step Python loops, so I do not expect a speed problem, but I have not measured
+it — there is no torch in this jail and no number here is measured.
+
+CAUSALITY. The scored position is a command whose own observation is withheld, so nothing here may
+be gated on that observation. bag, key, res and the lexical term are functions of COMMAND embeddings
+only. The only use of observations is tau_j and the copied value obs_j, and both are multiplied by
+accumulated mass that is exactly zero for j >= i: the start and follow matrices are multiplied by an
+explicit float 0/1 strictly-lower-triangular mask after the softmax (not merely masked_fill before
+it), and mass therefore moves strictly backward by induction, so acc[i, j] is exactly 0.0 for
+j >= i and the products are exactly zero rather than small. A command's prediction is a constant in
+its own and every later observation.
+
+CROSSOVER. arch inherits from the parent's r22_retrieval_composition_renderer, which already
+contains the partner's r18 path-state latent-transition trunk, so both programs' architectures are
+kept whole and the chase is added on top of the parent's forward. head takes the PARTNER's
+r20_dualpre_transition_consistency, which is the parent's r18 forward-model-consistency aux verbatim
+plus a second arm supervising the same operator on the arch's own memory reads — a strict superset.
+batcher keeps the PARENT's r2_routedepth_tilt_readcollision_blocks, whose image blocks subsume the
+partner's r6 image-blocking curriculum and add hop-count tilt and read-collision neighbourhoods.
+objective and optim are the same in both programs and are unchanged.

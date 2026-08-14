@@ -1,0 +1,46 @@
+{
+  "chunks": {
+    "objective": {"impl": "r12_antiretrieval_ring_negatives"},
+    "arch": {"impl": "r22_retrieval_composition_renderer"},
+    "optim": {
+      "impl": "r3_stiefel_addressing_plateau_tailavg",
+      "bs": 64,
+      "params": {
+        "lr": 5e-4,
+        "wd": 5e-4,
+        "warmup_frac": 0.04,
+        "hold_frac": 0.30,
+        "floor_ratio": 0.15,
+        "beta2": 0.95,
+        "key_d": 64,
+        "momentum": 0.95,
+        "ns_steps": 5,
+        "rms_match": 0.2,
+        "spectral_cap": 4.0,
+        "spectral_iters": 2,
+        "retract_rate": 0.2,
+        "retract_ns": 6,
+        "avg_frac": 0.25
+      }
+    },
+    "target": {"impl": "identity"},
+    "batcher": {
+      "impl": "r2_routedepth_tilt_readcollision_blocks",
+      "params": {
+        "alpha_max": 2.5,
+        "ans_max_sim": 0.995,
+        "chunk": 256,
+        "coll_share": 0.5,
+        "hard_frac_max": 0.75,
+        "max_centers": 8000,
+        "n_blocks": 2,
+        "nb_k": 16,
+        "proj_dim": 128,
+        "ramp_frac": 0.3,
+        "sim_thresh": 0.85
+      }
+    },
+    "stream": {"impl": "baseline_interleave"},
+    "head": {"impl": "r20_dualpre_transition_consistency", "params": {"mem_arm_w": 0.5}}
+  }
+}

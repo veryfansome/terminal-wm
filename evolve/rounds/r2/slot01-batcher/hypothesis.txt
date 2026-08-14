@@ -1,0 +1,121 @@
+MECHANISM
+
+The new batcher reconstructs, from command text alone, the thing the objective actually measures:
+which content is sitting at a location after a chain of silent moves.
+
+At construction it replays each training sequence's `cmds` list through a symbolic content
+tracker that maintains one integer per path, the number of hops that routed the content now at
+that path:
+
+    mv SRC DST                 hops[DST] = hops.pop(SRC, 0) + 1
+    cp SRC DST                 hops[DST] = hops.get(SRC, 0) + 1
+    cat SRC > DST              hops[DST] = hops.get(SRC, 0) + 1
+    cat SRC >> DST             hops[DST] = max(hops.get(DST, 0), hops.get(SRC, 0) + 1)
+    cat SRC   (no redirect)    a READ of SRC at routing depth hops.get(SRC, 0)
+
+Reads with depth 0 are ignored; a read with depth d >= 1 is a "routed read" — the observation the
+model must predict there is the content of some *other* file, reachable only by following the
+move chain. That is exactly the shape of the scored window (expose, silent chain, read), so the
+tracker labels the training steps that carry the capability under test.
+
+Two quantities come out of the replay, per sequence i:
+
+  demand[i]  = sum over routed reads of min(depth, 4)
+  sigs[i]    = the set of (image, normalized read path, capped depth) triples of its routed reads,
+               where the path is normalized by collapsing long hex runs and digit runs to '#'
+               (/tmp/w/cups/g53/f149.tmp -> /tmp/w/cups/g#/f#.tmp).
+
+Sequences are indexed into buckets by signature. A batch is then composed as
+
+  n_hard = bs * hard_frac_max * min(1, step / (ramp_frac * total_steps))
+
+hard slots, filled by drawing whole GROUPS of group_size DISTINCT sequences from one bucket —
+bucket chosen with probability proportional to size^0.5 * exp(depth_beta * depth), members chosen
+without replacement with probability proportional to 1 + demand — and bs - n_hard uniform slots,
+drawn iid exactly as the parent does, with rejection so no index repeats inside a batch when
+len(fit) >= bs. The whole batch is permuted before return. Everything is drawn from one private
+torch.Generator seeded with `seed`; `fit` is only read.
+
+WHAT NEITHER PARENT COMPUTES
+
+The parent (baseline_uniform) computes nothing about the data: every sequence is equally likely at
+every step. The crossover partner's batcher (r6_sysblock_hardneg_curriculum) computes exactly one
+property, s["image"], and blocks a few whole systems into a batch; it is blind to whether a
+sequence contains a move chain at all, how deep that chain is, and whether any read lands on a
+routed location. This impl computes the routing depth of every read in the training split by
+symbolically executing the move/copy/redirect commands, which is a property of the chain, not of
+the system, and it is the property the eval slices on (the parent's own feedback line reports the
+eligible slice as d3 / d4+).
+
+The crossover: the parent's contribution is kept as the uniform base — an unbiased, full-coverage
+sample that is the majority of every early batch and never falls below 1 - hard_frac_max, so the
+model still sees the whole distribution of systems and verbs. The partner's contribution is kept
+in two places: the annealed hard fraction with a linear ramp (uniform first, structured later), and
+same-image blocking — my bucket key BEGINS with the image, so every collision group is also a
+same-system block, which is a strict refinement of the partner's pool rather than a replacement.
+The new part is what makes a pool "hard": not merely same-system, but same-system AND same
+normalized destination shape AND same chain depth.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca is native_hit minus swap_stayed. It is positive only for a model whose prediction at the
+read follows the content the chain routed there, and it is zero by construction for a model that
+keys on the location name, because that model emits the same prediction in both arms. Two forces
+act on that:
+
+1. Reweighting. Under any per-example loss, a batcher is an importance sampler: it changes which
+   empirical risk is minimized. Routed reads are a minority of steps inside a sequence and their
+   density varies across sequences (a sequence carries a variable number of cvar groups and cups
+   movers). Weighting buckets by exp(depth_beta * depth) and members by 1 + demand raises the
+   effective weight of exactly the steps whose target is only predictable by carrying a content
+   identity across a move, at the expense of ambient ls/uname/cat steps that are predictable from
+   the command string alone. A location-keying solution has zero loss headroom on those steps and
+   nonzero headroom on routed reads, so shifting mass toward routed reads increases the gradient
+   pressure that separates the two solutions.
+
+2. Collision. A group of group_size distinct sequences that share image, normalized read path and
+   depth presents the network with near-identical surface contexts whose correct targets are
+   different contents. Averaging is not a solution for any member of the group, so the update must
+   use the only feature that distinguishes them: which expose step the chain routed to that path.
+   This is hard-example mining translated from metric learning into this setting, and it is why the
+   pool is defined by path shape rather than by system: two sequences from the same image whose
+   reads land on differently-shaped paths are not confusable and are not a useful pair.
+
+Force 2 is amplified when the loss couples rows within a batch. That is why this proposal takes the
+crossover partner's objective (r22_exact_target_equivalence_quotient) and its arch / optim / head
+rather than the parent's plain MSE stack: a batcher that composes a negative pool is only worth its
+slot next to a loss that consumes one, and the partner's stack is the one in front of me that does.
+Force 1 does not depend on that and would still act under plain MSE.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- Dispersion. If routing depth and routed-read count are effectively constant across training
+  sequences, the demand weights and the depth tilt are near-uniform and force 1 vanishes; the impl
+  then reduces to collision grouping alone. I have read one full training sequence verbatim: it
+  carries a cups window of depth 1 with two movers and four cvar groups with one to three
+  redirect ops each, so within-sequence structure varies — but I have NOT measured the
+  across-sequence distribution of depth, and that is the single assumption most likely to be wrong.
+- Bucket population. If the normalized path shapes are almost unique per sequence, few buckets
+  reach two members, most groups degenerate, and the batch is nearly uniform. The normalization
+  collapses the numeric parts of the synthetic cups/cvar paths, which is what should make shapes
+  recur, but this is unmeasured.
+- Coverage loss. Concentrating half the batch on deep-chain sequences reduces the number of
+  distinct systems seen per step. The eval holds out by IMAGE, so if the mechanism trades
+  cross-system generalization for chain specialization the number can move down, not up. The
+  uniform base and the ramp bound this, but do not eliminate it.
+- Wrong home. If the partner's objective does not in fact couple rows within a batch, force 2 is
+  inert and only force 1 remains; and if the partner's arch/optim/head are themselves weak, the
+  child inherits that weakness regardless of the batcher.
+- Parse drift. The tracker assumes whitespace-separated commands with no spaces in paths and no
+  pipelines; the sequence I read satisfies this. Commands it cannot parse are skipped, which
+  under-counts depth rather than mis-counting it, so the failure is a weakened signal rather than
+  a wrong one.
+
+All performance statements here are unmeasured. No miniature run was used to support any of them.
+
+COST
+
+One pass over every training sequence's command list at construction (O(total steps), pure Python
+string work), then per step roughly bs/group_size multinomial draws over the bucket table plus one
+randint block and one randperm. This is negligible beside a transformer step and does not change
+the step budget.

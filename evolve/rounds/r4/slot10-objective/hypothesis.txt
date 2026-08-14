@@ -1,0 +1,140 @@
+CANDIDATE: boardpair_swap_difference (axis objective) + r3_cuebalanced_routing_blocks (axis batcher)
+
+WHAT THE CROSSOVER IS
+
+The two programs I was given differ on exactly one axis: the parent trains with
+r6_sysblock_hardneg_curriculum (image-blocked hard negatives, hard_frac_max 0.75, ramp_frac 0.3),
+the partner with r3_cuebalanced_routing_blocks (same image-blocked hard-negative mechanism, same
+two knob values, plus per-sequence weights that rake the chain-order marginals of the deepest
+routed read toward uniform inside hop-count strata, plus read-collision blocks). Read as code,
+r3 contains r6's mechanism and adds one: it makes routed reads dense and order-balanced in every
+batch. I take r3 for that reason, and keep every other axis of the parent. The invention is on my
+own axis, and it is built to consume exactly what r3 supplies: a loss whose new terms only fire on
+rows where a content has been re-read after moving, and which therefore gets more signal per step
+the denser those rows are. Parent's objective mechanism is kept whole as the backbone.
+
+WHAT THE MECHANISM IS, CONCRETELY
+
+Backbone (unchanged from the parent's r12): per-dimension precision weighting, focal listwise
+softmax over in-batch squared-L2 distances with confusability-ring negative reweighting, gated
+repulsion hinge, small MSE anchor.
+
+New, and neither parent computes any of it:
+
+1. Exact trajectory segmentation inside the loss. The harness builds ctx["prev"] as
+   cat(zeros, tgt[:, :-1]) over the padded [B, maxn] target block and then selects with cmd_mask,
+   so the flattened rows are sequence-major and the first row of every sequence has prev exactly
+   equal to the zero vector while every other row has prev equal to the preceding standardized
+   observation. _segment_ids reads that off with prev.abs().amax(1) == 0 and a cumsum, recovering
+   the trajectory partition of the batch exactly. (Verified on synthetic batches: 32 sequences in,
+   32 distinct segment ids out.) Every new term below is confined to within-segment pairs. The
+   parent has no notion of a trajectory; the closest archived mechanism uses a fixed +/-32 band in
+   flattened order, which straddles sequence boundaries and misses long ones.
+
+2. Content-repeat rows. Row i is a content repeat when some earlier row j of the SAME segment has
+   an exactly duplicated target (squared distance below 0.5% of the batch target scale) and the
+   command embeddings of i and j are not the same command (cosine < 0.999), and when the
+   batch-wide duplicate count of i's target is at most 12. In the training data
+   (evolve/jail_data/train_sample.jsonl) this selects precisely the cups_test / cvar_test reads:
+   `cat /tmp/w/cups/usr/share/misc/magic.txt.1` whose output is byte-identical to the earlier
+   `cat /tmp/w/cups/g53/f149.tmp`, and `cat /tmp/w/cvar/g3/out.dat` after
+   `cat .../s1.dat > .../out.dat`. The duplicate-count cap is what excludes the huge cluster of
+   observations that render as "cwd=/ exit=0" with empty output — every mv and every redirection
+   step produces one, so that cluster is hundreds of rows per batch, an order of magnitude above
+   the cap, while a genuine content is duplicated two or three times. The same-command test
+   excludes plain re-reads of an unmoved path (`cat /tmp/w/cvar/g0/s1.dat` issued twice), which
+   are name-keyed memory rather than routing.
+
+3. Board pairs and the two new terms. A pair is two content-repeat rows in the same segment whose
+   targets are different contents. For such a pair, with dt = t_a - t_b, dp = p_a - p_b, and
+   den = ||dt||^2 floored at 1% of the typical squared row separation:
+
+       diff = relu( 1 - <dp, dt> / den )
+       swap = relu( m - <p_a - (t_a+t_b)/2, dt> / den ) + relu( m + <p_b - (t_a+t_b)/2, dt> / den )
+
+   with m = 0.25, each averaged over pairs, each added with weight 0.5.
+
+   `diff` is the regression coefficient of the prediction difference on the target difference,
+   hinged at one. `swap` is the eval's own decision rule written out: ||p_a - t_a||^2 <
+   ||p_a - t_b||^2 with a margin gamma*||dt||^2 is algebraically identical to
+   <p_a - (t_a+t_b)/2, dt> >= (gamma/2)*||dt||^2, so the hinge demands, in the unweighted
+   squared-L2 variable the probe actually ranks with, that each of the two predictions land on its
+   own content's side of the midpoint between the two contents that share this board.
+
+WHAT THIS COMPUTES THAT NEITHER PARENT COMPUTES, AND WHY IT SHOULD MOVE comp_ca
+
+The division by den is the point. The frozen encoder maps two canary files built from the same
+template to nearly the same vector: the board's contents differ from each other in a subspace whose
+scale is small next to the overall spread of observation embeddings. Plain MSE, and any fixed-
+temperature distance contrastive including the parent's, allocate gradient in proportion to squared
+distance, so almost none of their budget lands in that subspace — the model is rewarded far more for
+producing something of roughly the right shape than for producing the right content. Dividing each
+pair's inner product by that pair's own squared separation rescales every board pair to unit
+importance regardless of how close its two contents sit. Two contents that are nearly identical in
+embedding space now carry the same weight as two that are far apart. That is a reweighting of where
+the gradient goes, not a new supervision signal, and it is the reweighting the measured quantity
+asks for: comp_ca is decided entirely by which of several same-board, same-format contents the
+prediction is nearest to.
+
+The projection form also makes the term blind to isotropic prediction error: an unbiased noisy
+predictor contributes zero to <dp, dt> in expectation, so `diff` does not double as a second
+regression loss fighting the backbone, and once the model does carry the difference (coefficient
+>= 1, margin met) both terms hit their hinges and their gradient switches off by itself. Measured
+on synthetic batches carrying the same shape as the real windows (96 board pairs): a perfect
+predictor scores diff 0.000 / swap 0.000; the same predictor plus half a unit of isotropic noise per
+dimension scores diff 0.048 / swap 0.000; a constant predictor and a board-mean predictor both score
+exactly diff 1.000 / swap 0.500; and a predictor that has the two board contents interchanged scores
+diff 1.516 / swap 1.016, strictly worse than the constant. Anti-collapse safety is therefore
+structural on the new terms as well as on the backbone: a constant prediction sits at a fixed
+positive value that any content-carrying prediction beats.
+
+Why this should show up in native_hit - swap_stayed rather than in absolute accuracy: the pair terms
+never reward being close to the board's contents in general, only being closer to THIS location's
+content than to the partner's, and the two rows of a pair carry the same read verb, the same
+directory, the same file format and the same board. Everything shared cancels in dt. What is left
+for the model to use is which mv or redirection command wrote the path being read, which is the only
+thing that distinguishes the two rows, and it is exactly the thing the role-swapped arm re-encodes.
+A model that improves on this term has to be reading the move commands; a model that keys on the
+read path alone cannot improve on it at all, because within a trajectory the mapping from path to
+content is a fresh random draw, so there is nothing about the path to memorize.
+
+COST
+
+Reuses the target-target distance matrix the backbone already forms; no second n-by-n matmul is
+taken, and the command embeddings are compared only on the sparse set of candidate duplicate pairs,
+never as a full n-by-n product. The extra work is a handful of n-by-n boolean masks, one nonzero()
+over a sparse mask, and O(pairs * D) gathers. Measured on CPU at n = 1536 rows: 0.0234 s per
+forward+backward for the backbone alone, 0.0323 s with the new terms, i.e. +38% on the loss
+function in isolation. The loss is a small share of a training step next to the transformer's own
+forward and backward, and the added work is elementwise boolean over n-by-n plus a few
+pair-sized gathers, which are the operations a GPU handles best, so I expect the step-budget impact
+to be small — but that expectation is unmeasured, and the honest measured figure is the +38% above,
+on CPU, on the loss alone.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- If content-repeat rows are rare in real batches, the term is starved. In the sample trajectory
+  three rows qualify and they carry two distinct contents, giving two pairs per trajectory, so a
+  64-sequence batch should give of order 130 pairs; my synthetic runs used 192. If the real number
+  is near zero the candidate degrades exactly to its parent's objective on a different batcher, and
+  the round learns that instead. If it is much larger than 4096 the pair list is strided down.
+- If the two contents on a board are genuinely indistinguishable to the frozen encoder, den falls
+  to the floor and the term amplifies a direction that carries no information; the 1%-of-scale
+  floor bounds the amplification but cannot make an uninformative direction informative.
+- If the weight 0.5 on each new term is too high, general next-observation accuracy degrades and
+  native_hit falls faster than swap_stayed, which would push comp_ca down rather than up. On a
+  synthetic batch with a partially-correct predictor (pred = 0.3*tgt + noise, 1536 rows, 192 pairs)
+  the backbone's gradient wrt pred has norm 0.0079 and the two weighted pair terms contribute
+  0.0173, about 2.2x, concentrated on the eighth of rows that appear in a pair. That is deliberately
+  aggressive: a timid setting cannot beat the parent by more than measurement noise, and the hinges
+  switch the pressure off by themselves once the difference is carried. It is also the main risk,
+  and the ratio on real batches is unmeasured.
+- If the harness ever supplies a non-identity target chunk, exact target duplication would stop
+  identifying a repeated content and the term would select the wrong rows. This genome uses the
+  identity target, and the terms are skipped entirely whenever ctx is absent.
+
+NOT DONE, DELIBERATELY: nothing here resolves a move chain and hands the answer to the model. The
+loss only ever looks at targets, at command embeddings for an equality test, and at the previous-
+observation channel for segmentation, all to decide which rows to weight and how. The model's input
+is untouched, and the loss does not run at scoring time at all, so nothing in it is gated on an
+observation that the probe withholds.

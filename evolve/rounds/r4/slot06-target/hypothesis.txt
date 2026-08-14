@@ -1,0 +1,115 @@
+CANDIDATE: ridge-ZCA whitened observation target + a single-metric ring/MSE objective.
+AXES CHANGED: target (identity -> ridge_zca_whitened_obs), objective (r12_antiretrieval_ring_negatives
+-> whitened_metric_ring_mse). arch, optim, batcher, stream, head are the parent's, unchanged.
+
+WHAT THE MECHANISM IS
+
+The target module accumulates, in float32 running-mean form and only inside make_target, the mean mu
+and second moment of the standardized next-observation targets the harness hands it. It returns the
+raw target unchanged for the first 200 calls (and until at least 20000 rows are seen). At that point
+it moves the accumulated covariance to CPU, casts to float64, eigendecomposes it, and builds
+
+    W   = Q diag( g * (lam_i + eps)^(-1/2) ) Q^T,    eps = 0.5 * mean_i(lam_i),
+    g chosen so that mean_i( g^2 (lam_i+eps)^-1 lam_i ) = mean_i(lam_i),
+
+freezes W and W^-1 into buffers, and from then on returns (z_obs - mu) @ W. to_obs returns
+pred @ W^-1 + mu. W is symmetric, so the pair is an exact linear bijection of the fixed observation
+space; the retrieval eval still ranks candidates in the untransformed space. Nothing about the
+transform depends on the command text, on any routing, or on anything that is not a global second-order
+statistic of the training targets; it holds no trainable parameters and reg() returns 0.0. Before the
+freeze, and on any numerical failure, both directions are exactly the identity, so a short run
+degenerates safely to the parent's target.
+
+The objective is the parent's confusability-ring listwise contrastive with two edits: the per-dimension
+precision weights w = (1/(mse_d + eps))^beta, clamped to [0.25, 4], are removed so every distance is the
+plain isotropic squared L2 of whatever space the target axis defines; and the squared-error term is
+raised from a 0.05 anchor to a co-equal summand of weight 1.0. Ring weighting, focal weighting and the
+gated repulsion hinge are kept as they are.
+
+WHAT THIS COMPUTES THAT NEITHER PROGRAM COMPUTES
+
+Neither the parent nor the crossover partner ever measures the covariance of the observation space they
+regress into. Both train in the raw standardized space, where the loss weight a direction receives is
+proportional to its residual variance. The parent additionally re-weights per dimension by INVERSE
+residual error, i.e. it moves weight toward the directions it can already predict. This candidate
+computes the empirical eigenspectrum of the target distribution and re-weights the loss by the inverse
+square root of it (ridge-damped), i.e. it moves weight toward the directions the corpus varies in least.
+The gain g holds the mean per-direction variance of the transformed target equal to that of the raw
+target, so the objective's own constants (_TEMP = 0.25 on distances normalized by d, the margin, the
+duplicate band) stay in the regime they were tuned for; without g the whitening would silently
+rescale the contrastive temperature.
+
+WHY IT SHOULD MOVE THE MEASURED QUANTITY
+
+The scored decision is a forced choice among the N contents on one board by squared L2 to the predicted
+observation embedding. For two candidates t_i and t_j,
+
+    ||p - t_i||^2 - ||p - t_j||^2 = ||t_i||^2 - ||t_j||^2 - 2 p . (t_i - t_j).
+
+Only the projection of the prediction onto the DIFFERENCE between sibling contents can vary with which
+content the chain routed; the constant norm terms are the same in the native and role-swapped arms and
+cancel in comp_ca. Sibling contents on one board are all `cat` of a small config-like file on the same
+image at the same cwd (verified in evolve/jail_data/train_sample.jsonl: cups_expose / cups_test steps
+are cat of files with the same shape and differing canary strings). Their embeddings therefore agree on
+the dominant directions of the observation distribution — the format, verb, image and cwd directions —
+and differ only in low-variance directions. In the raw space those low-variance directions carry
+almost none of the regression loss, so almost all of the gradient the model receives, and almost all of
+the gradient that flows back through the mv command tokens that would have to be attended to in order to
+route a content, is spent on directions that are provably irrelevant to the scored comparison. Ridge-ZCA
+whitening compresses the dynamic range of per-direction loss weight from the raw eigenvalue ratio
+lam_max/lam_min down to the ratio of lam/(lam+eps), without touching what the eval measures, because
+to_obs undoes it exactly. For power-law spectra with mean eigenvalue 1 — what a standardized
+correlation matrix gives — and eps = 0.5, I computed the effect directly: exponent 1.0, ratio 768
+becomes 4.6 (cond W 13); exponent 1.5, 2.1e4 becomes 36 (cond W 24); exponent 2.0, 5.9e5 becomes 631
+(cond W 31). So the reallocation is one to three orders of magnitude depending on how heavy the real
+spectrum is, and the gain g holds the mean per-direction variance at 1.000 in all three cases. The
+prediction of the trunk plus the parent's rename-registry read is then trained under a
+metric in which getting the identity of the content right is most of the loss instead of a rounding
+error of it.
+
+The crossover reading: the parent's contribution kept here is the rename-registry occupancy head with the
+r18/r22 trunk — the only mechanism in either program that transports a content between addresses without
+copying it — plus the ring-weighted negatives that make close-but-distinct siblings the informative
+negatives. The partner's contribution kept here is plain MSE at full weight: the loss whose minimiser is
+the posterior mean, which is exactly what turns weak evidence about which content sits at a location into
+a correct nearest-neighbour pick, and which is stated in the same squared-L2 variable the eval decides in.
+The two are made coherent by removing the parent's inverse-residual per-dimension weights, which pull in
+the opposite direction to the whitening, and letting the target axis be the single place the metric is set.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+1. If sibling contents on a board differ mostly along HIGH-variance directions of the corpus rather than
+   low-variance ones, whitening moves loss weight away from the discriminative subspace and the score
+   should fall below the parent's, not rise.
+2. If the low-variance tail of the frozen-encoder spectrum is dominated by encoder noise rather than
+   content identity, amplifying it injects unlearnable variance, the trunk fits less of everything, and
+   both native_hit and the score drop. The ridge eps = 0.5 * mean eigenvalue is the guard: directions
+   with variance below half the average are progressively damped rather than amplified. If that guard is
+   set too loose, the failure mode is visible as a large rise in latent MSE with no rise in comp_ca.
+3. If the model's ceiling here is not the allocation of loss but the trunk's inability to represent the
+   move chain at all, reweighting the target changes nothing measurable and the result is noise around
+   the parent.
+4. If the scoring path does not route a LEARNED target's prediction through its own to_obs, the
+   predictions are compared in the whitened space against untransformed candidates and the score
+   collapses. The contract states it does; that is the one assumption in this design I cannot check
+   from inside the jail.
+5. Round-trip exactness is linear-algebraic, not bit-exact: W and W^-1 are stored in float32 and applied
+   in float64 (float32 on MPS, which cannot hold float64), so to_obs(make_target(z)) recovers z to a
+   relative error set by the condition number of W, which the ridge holds in the 10-30 range for
+   plausible spectra. Measured on synthetic data: at 64 dims with cond(W) = 2.9 the round-trip
+   relative error was 2.9e-8 with a largest absolute element error of 9.5e-7; at 768 dims on a
+   power-law-1.5 spectrum with cond(W) = 24 it was 1.5e-8, with the mean per-dimension target
+   variance moving from 0.992 to 1.014 and the objective's value from 9.91 to 8.68 on the same
+   random prediction, i.e. the loss stays in its calibrated regime. A gate
+   that demands round-trip equality at default torch.allclose tolerances would reject this, and would
+   reject any non-trivial linear target transform for the same reason.
+
+COST
+
+One extra [n,768]x[768,768] matmul per training step after the freeze (about 2 GFLOP per step at the
+batch sizes in this harness), one 768x768 outer-product accumulation per step during the 200-step warmup,
+and one CPU eigendecomposition of a 768x768 matrix once per run. No extra parameters, no extra optimizer
+state, no change to the forward pass of the model. Measured standalone at 1600x768 in float64 on CPU:
+11.8 ms per call, so under a minute added to a 4000-step run even in the worst case, and far less on
+the GPU lane. Unmeasured on the real harness — I cannot run it from the jail — but the arithmetic is
+small next to the trunk's own D=768 readouts.

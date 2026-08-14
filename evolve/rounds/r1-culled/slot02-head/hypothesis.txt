@@ -1,0 +1,157 @@
+CANDIDATE: head = r22_multihop_rollout_identity_transport   (axes changed: head, arch)
+arch switched from the parent's r18_pathstate_latent_transition_worldmodel to the partner's
+r19_obspresent_imagination_worldmodel. Everything else inherited unchanged.
+
+
+1. THE MECHANISM — WHAT THE CODE COMPUTES THAT NEITHER PARENT DOES
+
+Both parents run the same head, r18_transition_forwardmodel_consistency. It mines a triple
+(i, k, j) = (last same-path touch before k, the mutating command k, first same-path touch after k)
+and trains ONE application of the shared operator: f(obs_i, cmd_k) ~= obs_j. That is a single hop.
+
+My head keeps that term (at half its former weight) and adds two things.
+
+(a) A CHAIN ROLLOUT. `_mine_chains` takes each candidate terminal read j and extracts, in one
+    vectorised topk, the ordered list of its last (chain_hops+1) same-path predecessors
+    q_0 < q_1 < ... < q_m < j. It seeds the state with obs[q_0] — the earliest touch that actually
+    revealed content — and then applies the arch's own `transition_from_emb` once per later slot,
+    producing state = f(...f(f(obs[q_0], cmd[q_1]), cmd[q_2])..., cmd[q_m]). The target is obs[j].
+    With chain_min_hops=2 and chain_hops=3 every mined example is a 2- or 3-fold COMPOSITION of f.
+    The parent's triple is exactly the m=1 special case of this identity, so this is a strict
+    generalisation of the parent's supervision to the depth the eval actually scores.
+
+    On top of the composed rollout the loss adds a duplicate-masked L2-InfoNCE against the batch of
+    terminal observations, plus three PAIRED terms, each of which holds one factor fixed and swaps
+    the other, computed from the same mined chains with a roll-by-one derangement:
+      - start swap: same command chain, another example's initial content. Hinge requires the true
+        rollout to be closer to the target in cosine.
+      - chain swap: same initial content, another example's command chain. Same hinge.
+      - order swap: the SAME two tail commands applied in exchanged order. Hinge requires a
+        relative-RMS separation of at least chain_comm_margin between the two orderings, gated off
+        when the two commands are near-duplicates (cos >= chain_comm_max_cos), where order genuinely
+        should not matter.
+
+(b) An OBS-ABSENT ARCH ROLLOUT that is the reason the arch axis moves to r19. From the same mined
+    chains it builds a synthetic left-compacted sequence: slot 0 is the seed command with its real
+    observation (type 0/1), slots 1..m are the intervening commands emitted as TYPE-2 imagined
+    commands with their observation slots key-padded, and the terminal read command sits last. The
+    r19 arch is the only arch in either parent that understands type 2: it decouples obs_present
+    from valid_cmd so an imagined command writes (1-w)*s_pre + w*f(s_pre,cmd) into its path slot
+    with no observation to fall back on. One forward pass carries 2M rows — the true chains and a
+    copy in which only the seed observation is replaced by another example's — and the loss is
+    InfoNCE + MSE on the true rows plus a hinge that the start-swapped copy must be farther from the
+    target. r19 is bit-for-bit r18 when no type-2 slot exists, so this head is the first thing in
+    the lineage that makes the partner's arch do anything at all.
+
+The head registers NO parameters and never re-points net.forward; the eval forward is verified
+bit-identical to the bare arch after wrap (measured, see 5).
+
+
+2. WHY THIS SHOULD MOVE comp_ca AND WHAT THE PARENTS STRUCTURALLY CANNOT EXPRESS
+
+The score is a paired difference between the native chain of moves and a chain in which two files
+exchanged their moves, on windows the feedback reports as d3 n=60 and d4+ n=29 — every earnable
+window is depth 3 or more, d2 n=0.
+
+The operator in both archs is diagonal affine: f(s,c) = s*(1+gamma(c)) + beta(c). Two consequences
+are algebra, not conjecture:
+
+  (i) A single-hop target f(obs_i, cmd_k) ~= obs_j is fully satisfiable by gamma -> 0 and
+      beta(cmd_k) -> obs_j, i.e. by DECODING THE ANSWER OUT OF THE COMMAND STRING and ignoring the
+      state entirely. On shell data the mutating command names the file, so this shortcut is
+      available and cheap. It is precisely the "keys on the queried name / on which file moved"
+      family the brief says cancels to zero by construction. The parent's fitness is +0.0000.
+  (ii) If gamma -> 0 the composed operator COMMUTES: f_b(f_a(s)) - f_a(f_b(s)) = beta_a*gamma_b -
+      beta_b*gamma_a, which is identically zero when gamma is zero. A commuting transition operator
+      makes the model's answer invariant to exchanging two moves, so the paired difference the
+      metric computes is identically zero however good the model otherwise is. The parent's single-
+      hop aux never composes f, so nothing in the parent's training opposes gamma -> 0.
+
+Term (a) attacks both directly. The start-swap hinge is the sharp one: with the command chain held
+FIXED, every state-independent contribution to the rollout is bit-identical between the true and the
+swapped branch, so their difference is exactly (start_a - start_pi(a)) propagated through the
+composed operator — prod_t (1+gamma_t) for this operator family. A model that decodes the answer
+from the command text gets zero separation and pays the full margin on every example; the only way
+to reduce that hinge is to carry the seed content through all m hops. That is the definition of
+"carrying a file's identity across several hops". The order-swap hinge forbids the commuting
+solution outright, which is the algebraic precondition for a nonzero paired difference. The chain-
+swap hinge is the closest analogue of the scored quantity itself: same board, role-swapped moves,
+the prediction must follow the swapped content.
+
+Term (b) matters because of a second structural fact I verified by reading the arch: `tr_read` is
+zero-initialised, so at init NO gradient from the main loss reaches tr_path, tr_in, tr_out or
+tr_mut_gate — the whole transition subsystem is gradient-isolated and is shaped by the head aux
+alone until tr_read grows. The parent's head only ever touches the operator MLP (measured: 9 tensors
+receive gradient on r18). Term (b) is the only path by which multi-hop supervision reaches the path
+ROUTING (tr_path), the mutation gate and the readout, and it exercises exactly the composition the
+eval performs when several silent moves separate the last informative read from the query.
+
+
+3. WHAT I WOULD SEE IF I AM WRONG, AND THE CHEAPEST OBSERVATION THAT SHOWS IT
+
+Falsifier A (mining is empty on real data). My chains require >= 3 same-path touches before a
+terminal read inside one training window. If real windows rarely contain that, `_mine_chains`
+returns few or no rows, the new terms are ~0, and the candidate degenerates to the parent's head at
+half aux weight — expected result: fitness indistinguishable from the parent, near +0.0000. Cheapest
+check: log rb.numel() and the histogram of sv.sum(1) from `_mine_chains` on one real training batch.
+If that count is under a handful per batch, this design is inert and the fix is to lower
+chain_min_hops to 1 and chain_thresh below 0.60.
+
+Falsifier B (the hinges do not move). If after training the mined rollout still has
+d(pred_true, tgt) >= d(pred_start_swap, tgt), the operator is not transporting content and my whole
+argument fails. Cheapest check: at end of training, recompute the three probe numbers on one batch
+(the exact code is in `_chain_term`). On a structured synthetic probe those numbers went from
+1.019 / 0.825 / 1.020 and order-separation 0.008 at init to 0.223 / 0.292 / 0.808 and 0.407 after
+120 aux-only steps; on real data they may not.
+
+Falsifier C (command-similarity is the wrong notion of "same path"). `_mine_chains` clusters by
+cosine between raw command embeddings, inherited from the parent. If that groups by verb rather than
+by path, my chains are noise and the rollout is trained on unrelated triples. Cheapest check: print
+the decoded command strings for a few mined chains and see whether they share a path.
+
+I would also expect, if I am right, that the gain concentrates in the d4+ bucket rather than d3,
+since that is where composition depth exceeds what a single hop plus the trunk can fake.
+
+
+4. THE RISK I SEE IN MY OWN DESIGN
+
+The biggest one is TRUNK CONTAMINATION from term (b). It feeds the network a synthetic input
+distribution that never occurs at eval — type-2 slots, mostly key-padded observation positions,
+sequences of length 2*chain_hops+3 — and gradients from it flow into the shared transformer,
+cmd_proj, in_norm and the readout head. If the trunk specialises to that layout, ordinary next-
+observation retrieval can degrade and the main objective loses more than the composition gains,
+which would show as a fitness BELOW the parent rather than merely equal to it. I have bounded it
+(imag_weight 0.10, imag_every 3, ramp starting at step 250, 16 examples per firing, and the term
+auto-disables on any arch without three type embeddings — verified it silently disables on r18) but
+I have not measured it on the real data root and I am not claiming it is harmless.
+
+Second risk, smaller: the order-swap hinge asserts that exchanging two same-path commands must
+change the outcome. That is true for two mutations of one path and is exactly the metric's own
+premise, but it is false for two pure reads, and the gate I use (cosine between the two command
+embeddings) only screens near-duplicates, not read/read pairs. Where it is wrong it injects a
+constant-margin pressure toward spurious order sensitivity.
+
+Third, cost. On a synthetic microbenchmark (B=24, 10 command steps, d=176, CPU) the amortised aux is
+55.8 ms/step against 117.4 ms for a bare main forward+backward, i.e. roughly a 45% step-time
+increase before the objective and optimizer are counted. That is measured on a microbenchmark, NOT
+on the real harness, and if the real step budget is tight this alone could sink the candidate.
+
+
+5. WHAT WAS ACTUALLY MEASURED (synthetic; NOT a performance prediction)
+
+- leak_safe accepts defaults, rejects chain_hops=1 and chain_tau=0.
+- Finite loss and finite gradients on r19 and r18, at B in {2,4,16,24}, 2-12 command steps, with and
+  without trailing padding; degenerate batches return a hard 0.0.
+- wrap adds 0 parameters and the eval forward is bit-identical to the unwrapped arch.
+- On r18 the imagination term self-disables (_imag_disabled True) and only the operator MLP gets
+  gradient; on r19 the aux reaches tr_read, tr_out and the trunk head.
+- Anti-collapse: substituting a constant operator f(s,c)=c0 gives chain loss 4.16 and a pure state-
+  copy operator f(s,c)=s gives 4.23, against ~1.1 for a briefly trained real operator. A constant
+  prediction cannot minimise the objective — the InfoNCE floors at log N and all three hinges pay
+  their full margin.
+- The order-swap hinge was originally written in cosine distance and DID NOT MOVE (separation stayed
+  at 1e-4) because 1-cos is quadratic in the difference and its gradient vanishes at the commuting
+  point. It is now a relative-RMS separation, which is linear in the difference; with that change
+  the separation trains from 0.008 to 0.407 against a 0.30 margin. This is the one place where the
+  first draft of the code did not do what this document claims, and it was fixed rather than
+  described away.

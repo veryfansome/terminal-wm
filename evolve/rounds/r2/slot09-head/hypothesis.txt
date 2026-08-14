@@ -1,0 +1,120 @@
+CANDIDATE: head = r23_routed_content_alignment, arch = r22_prefix_content_xattention
+(objective / optim / batcher inherited from the parent unchanged).
+
+WHAT THE CROSSOVER TAKES FROM EACH PROGRAM
+
+The two programs I was given differ in exactly two places. The partner contributes the arch: a
+prefix-content cross-attention channel over the strictly-earlier observations, whose values are the
+raw 768-d observation embeddings, injected into the command-position prediction through a zero-init
+(D,D) readout and a sigmoid gate. Because that arch subclasses the parent's arch, taking it keeps
+every mechanism the parent's arch had (delta-rule path memory, latent transition operator,
+sysfilm) and adds one. The parent contributes the objective: the exact-target-equivalence quotient,
+which puts numerically-equal targets into a single class. That choice is not cosmetic on this data
+— in a cups window the test read's target embedding is the SAME vector as the expose read's target,
+so the partner's r12 objective would place a correct answer in its own contrastive denominator as a
+negative. Keeping the quotient objective and taking the partner's arch is the combination that
+keeps the working half of each.
+
+WHAT THE NEW HEAD COMPUTES THAT NEITHER PARENT COMPUTES
+
+Both parents run the same head (r18_transition_forwardmodel_consistency). That head mines triples
+by COMMAND-embedding similarity and supervises the latent transition operator to RECONSTRUCT a
+future observation, explicitly requiring the mined pre/post observations to DIFFER
+(change_floor = 0.25). Nothing in either program supervises an addressing distribution, and nothing
+in either program mines the event this benchmark is built out of: the same content reappearing at a
+different name.
+
+The new head mines that event directly, from the token stream alone, with no metadata:
+
+  a step j is a TRANSPORT READ if there exists an earlier step i in the same row with
+      mean squared distance(obs_i, obs_j) / 768  <=  dup_eps      (same content)
+      mean squared distance(cmd_i, cmd_j) / 768  >   cmd_eps      (different command text)
+
+Checked against evolve/jail_data/train_sample.jsonl (24 real trajectories, rendered exactly as
+realenv.seq_worldmodel.render_obs / render_cmd render them, with the two degeneracy filters below
+applied): the rule fires 70 times over 24 trajectories, and 61 of those 70 hits are steps whose
+withheld metadata role is literally cups_test or cvar_test — the routed reads. The remaining 9 are
+incidental reads. About 2.9 supervised reads per trajectory, so at bs=64 roughly 190 supervised
+reads per training step. The move depths present in those trajectories run 1..6, i.e. the aux is
+supervised at the same depths the scored slice measures.
+
+Two filters keep the rule from firing on degenerate content. A command with no stdout renders to
+"cwd=<cwd> exit=<code>\n", which is IDENTICAL across every mv and every redirect in a trajectory;
+in the sample it is 30-45% of all steps. Filter 1 drops any observation whose within-row exact
+duplicate class exceeds max_class (6) — this catches those, including the per-row variants with a
+different cwd. Filter 2 finds the single most frequent exact-duplicate class across the whole batch
+(probing 64 evenly-spaced valid positions) and suppresses it when it exceeds modal_frac (5%) of
+valid positions. Verified on the sample: with both filters the mined set is the routed reads listed
+above; on a batch of independent random embeddings the rule fires zero times.
+
+On each mined read j the head then applies a multi-positive log-loss to the arch's OWN prefix
+attention row at that command position, recomputed from the hidden states the arch returned (read
+through a forward hook on the net) with the arch's own xq, xk, 1/sqrt(xattn_dim) scale and
+strictly-earlier mask:
+
+  nll_j = logsumexp_{p in DEN} ( s_jp + log(1+kappa)*ring_jp )  -  logsumexp_{p in POS} s_jp
+
+  POS   = earlier positions with the same content and a different command   (the transported link)
+  DEN   = POS  union  { earlier positions whose content differs }
+  ring  = the top n_stale (2) positions of DEN\POS ranked by cosine similarity of their command
+          embedding to cmd_j — the name-nearest wrong answers.
+
+Prefix positions holding the same content under the SAME command text are in neither POS nor DEN:
+answering by name lookup is not rewarded, and a value-correct position is never punished.
+
+Three things follow that neither parent's head does. (1) The supervision target is content identity
+across a name change, not observation change; the parent's head structurally excludes exactly these
+examples via its change floor. (2) The supervised quantity is an attention distribution, which no
+loss on predictions can reach: the objective only ever sees (pred, target), so the addressing that
+decides WHICH prefix observation gets copied is unconstrained. It is worse than unconstrained at
+init — the partner arch's x_out is zero-initialised, so d(main loss)/d(xq) and d(main loss)/d(xk)
+are exactly zero at step 0 and the addressing is trained by nothing until the readout grows. This
+aux is the only gradient those projections get early, and the optimizer routes the (64,176) xq/xk
+sibling pair to Muon, so they are updated on the orthogonalised manifold. (3) The ring term
+translates the partner objective's confusability-ring idea into addressing space, but ranks the
+ring on COMMAND similarity rather than target similarity — the name-confusable earlier read (e.g.
+an exposed `.../magic.txt` when the query is `.../magic.txt.1`) is precisely the stale answer.
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN THE ABSOLUTE PICK RATE
+
+comp_ca is native_hit minus swap_stayed on the same board. A predictor that answers a read from the
+name of the location being read is identical in both arms and contributes exactly zero. The aux
+does two things that break that tie in the right direction: it rewards mass on the prefix
+observation reachable only through the intervening move commands (the query is built from the
+hidden state of the read command, which can only know that content by having propagated the move
+chain), and it explicitly raises the bar against the name-nearest content-different candidate,
+which is the answer a name-keyed reader would give and is the same answer in both arms. Native and
+swapped chains share the read token and differ only in how the moves route content, so improving
+the routed link should raise native_hit while leaving, or lowering, swap_stayed.
+
+The head adds no parameters, is train-time only, and does not touch the eval forward: it reads
+hidden states through a forward hook that ignores no-grad calls, never re-points net.forward, never
+registers the net inside another module, and returns a hard 0.0 whenever the cached hidden state
+does not belong to the current batch's tok tensor or the arch has no xq/xk/x_out surface (verified:
+on the r18 arch the head reports disabled and returns 0.0 every step).
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- The mined links may be dominated by short chains and by the cvar copy arm, teaching a one-hop
+  "find the earlier identical content" addressing that does not compose over the depth-3 and
+  depth-4 chains the scored slice is made of. The eligible reads do come from depth 1..6 windows,
+  but nothing in the loss weights depth, and a model can satisfy every mined row with a heuristic
+  that only works when a single move separates source from destination.
+- The aux backpropagates into the trunk (verified: gradient reaches cmd_proj, obs_proj and the
+  transformer, not x_out or head). Forcing the trunk to make read commands and observations
+  linkable could cost next-observation accuracy generally, dropping native_hit as much as
+  swap_stayed and leaving the paired difference flat. align_w = 0.3 against a main loss of order 5
+  with a 300-step smoothstep ramp is a guess at the right size, unmeasured.
+- Sharp attention onto the right prefix observation still has to reach the prediction through the
+  zero-init x_out and the gate at bias -2, and only the main loss opens those. If the main loss
+  never opens the gate, correct addressing changes nothing that is measured.
+- The duplicate thresholds are absolute (1e-4 on mean squared distance per dimension, against the
+  1e-5 the objective already uses on the same quantity for standardized embeddings). If the pinned
+  standardization frame put the observation embeddings at a very different scale, the rule would
+  either fire on everything or on nothing; in the latter case the head returns 0.0 and the
+  candidate degrades to the arch/objective crossover with no head.
+
+Performance claims here are unmeasured. What was executed locally is correctness only: mining
+precision against the real sample trajectories, shape/edge handling (n=1, n=2, all-pad rows,
+example cap), gradient routing, finiteness, optimizability of the aux to zero on a synthetic batch,
+and about 10-15% wall-clock overhead per step on CPU at B=64, n=32.

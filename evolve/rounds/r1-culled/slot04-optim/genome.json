@@ -1,0 +1,9 @@
+{
+  "chunks": {
+    "objective": {"impl": "r12_antiretrieval_ring_negatives", "params": {}},
+    "arch": {"impl": "r23_transition_fed_composition_imagwrite", "params": {}},
+    "optim": {"impl": "r23_zeroinit_channel_boost_stiefel_addressing_polyak", "params": {}, "bs": 64},
+    "batcher": {"impl": "r6_sysblock_hardneg_curriculum", "params": {"hard_frac_max": 0.75, "n_block_images": 1, "ramp_frac": 0.3}},
+    "head": {"impl": "r21_evidencegated_imagwrite_algebraic_observer_head", "params": {}}
+  }
+}

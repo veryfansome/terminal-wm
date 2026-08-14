@@ -1,0 +1,38 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r20_dualkey_contentgated_transition_worldmodel",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r20_depthtilted_sysblock_curriculum",
+   "params": {
+    "depth_base": 1.0,
+    "depth_pow": 2.0,
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "head": {
+   "impl": "r4_chainlink_route_transport",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r22_exact_target_equivalence_quotient",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "stream": {
+   "impl": "r6_move_ordinal_hadamard_ledger",
+   "params": {}
+  },
+  "target": {
+   "impl": "within_sequence_contrast_equalizer",
+   "params": {}
+  }
+ }
+}

@@ -1,0 +1,105 @@
+MECHANISM: a prefix-causal alias resolver in the token layout (stream axis only).
+
+What the data forces. In the cups arm a window is: several `cat <path>` steps that expose contents,
+then several `mv <src> <dst>` steps, then one `cat <path>` read whose observation is whatever the
+chain routed there. The `mv` steps produce an EMPTY observation ("cwd=/ exit=0\n"), so the only
+place the routing information exists anywhere in the input is inside the command STRING of each
+move. The model does not see command strings; it sees one frozen mean-pooled 768-d embedding per
+command, in which the source path and the destination path of `mv A B` are averaged into a single
+blob. Recovering "which of the two path-shaped things in this blob was the source" from a bag-of-
+tokens mean pool, and then chaining that recovery across 3-4 moves, is the bottleneck this whole
+objective sits on. Neither parent addresses it: the r18/r22 parent builds a delta-rule associative
+memory whose keys are LEARNED linear projections of that same undifferentiated command embedding,
+and the baseline partner feeds the raw embedding straight through.
+
+What this stream computes that neither parent computes. It parses the command strings — which the
+stream contract explicitly hands it, and which code_cmds is defined over — and maintains a symbolic
+table `loc: path -> content identity`, updated left to right:
+  - `mv A B`  : loc[B] = resolve(A); loc[A] = a per-path "absent" identity; both parent dirs bumped
+  - `cp A B`  : loc[B] = resolve(A)
+  - `rm A`    : loc[A] = absent identity
+  - `cat X > Y`  : loc[Y] = resolve(X)          (verbatim copy — verified against the cvar arm,
+                    where `cat s1.dat > out.dat` then `cat out.dat` returns s1's exact bytes)
+  - `cat X >> Y` : loc[Y] = resolve(X) if Y was untracked, else a compound identity hash of
+                    (old loc[Y], resolve(X)) — so an accumulator never collides with an atomic file
+  - `cd`      : tracks cwd, so relative paths normalize
+  - any shell form it cannot parse (pipe, glob, quoting, $, backtick) that also mutates: it
+    increments an epoch that poisons every subsequent untracked identity, so a stale identity can
+    never produce a false match.
+where resolve(P) = loc.get(P, "p:<epoch>:P") — i.e. an untouched path's identity is itself.
+Each step then gets a KEY = its command text with every path argument replaced by the identity it
+resolves to, plus the current cwd (the observation text contains cwd, so cwd belongs in the key).
+That key is hashed to a deterministic 128-d zero-mean unit-RMS vector, added into the LAST 128
+coordinates of that step's standardized command embedding. Nothing else changes: interleave-2
+geometry, observation tokens, target space, cmd-at-even-index extraction, CUPS_LAYOUT are all the
+partner's baseline, untouched, and the addition is exposed verbatim as code_cmds so collate and the
+scoring instrument produce bit-identical command tokens.
+
+The consequence: the expose step `cat /g53/f149.tmp` and the post-move test step
+`cat /usr/share/misc/magic.txt.1` have DIFFERENT text but, after `mv /g53/f149.tmp
+/usr/share/misc/magic.txt.1`, the SAME resolved key ("cat", identity of f149.tmp) and therefore the
+same 128-d code. Two commands carry the same code exactly when they read the same content.
+
+Why this should move comp_ca. This is a crossover: the partner contributes the untouched
+interleave-2 layout and the intact raw command embedding (the code is additive, in a fixed 128-d
+coordinate slot, at per-dimension RMS 1.0 against standardized data — roughly a 9% token-norm
+increase, no text information deleted); the parent contributes retrieval-by-address — its delta-rule
+file memory writes value = obs_token at key = file_write(x_cmd) and reads at query =
+file_read(x_cmd), strictly causally. Those two mechanisms are complementary in exactly one way: the
+parent's memory is an addressable store whose addresses were previously only approximately
+matchable, and this stream supplies addresses that match EXACTLY when and only when the content is
+the same. The test read's query then lands on the expose step's key and returns the expose step's
+observation embedding, which is bit-for-bit the target (identical rendered text: same content, same
+cwd, same exit code) — so a near-copy achieves near-zero error, and the model's forced-choice pick
+should be the routed content. Crucially this is not a cups-only device: any repeated read anywhere
+in training (`cat P` twice, `ls /d` twice with nothing written to /d in between) also gets a
+matching code, so the copy pathway is trained by a large fraction of ordinary steps rather than by
+the rare deep windows, which is what makes it learnable inside a fixed step budget.
+
+Why the paired difference should open rather than cancel. Under the role-swapped arm the instrument
+re-encodes the move commands and re-runs code_cmds; the resolver then resolves the read location to
+the PARTNER's content, so the same net predicts the partner's content instead. native_hit stays
+high while swap_stayed collapses, and comp_ca = native_hit - swap_stayed opens by construction of
+the mechanism, not in expectation. This is the opposite of the analytic non-trackers the band
+measures: a name-keyed predictor is identical in both arms because the read command's text is
+identical; here the read command's TOKEN differs between arms precisely because the moves differ,
+and it differs in the direction of the content actually present.
+
+Outside-the-domain source, translated as equations not metaphor: Steensgaard-style almost-linear
+points-to / alias analysis from static program analysis, where a store is a map from locations to
+abstract cells and an assignment `*p = *q` unifies cells rather than re-deriving them. `mv A B` is
+exactly the store update loc[B] := loc[A], loc[A] := absent; `cat X > Y` is loc[Y] := loc[X]; the
+append case is the join of two cells into a fresh one. The read's abstract cell is then used as a
+content-addressable key, in the sense of an addressable memory (key-value store read by exact
+address) rather than as a soft similarity.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL, stated honestly and unmeasured:
+1. The code channel is additive inside the same 768 dimensions the text occupies, so the learned
+   key/query projections must separate the code from the residual text in those 128 coordinates.
+   The same-identity inner product over that slot is CODE_SCALE^2 * 128 = 128; the cross terms
+   between text and code, and between two different codes, are on the order of a few tens. If
+   CODE_SCALE = 1.0 is too small for the learned projections to isolate, the pointer never becomes
+   an exact address and the mechanism degenerates to the parent. (Raising the scale trades against
+   swamping the lexical signal; I did not have a way to measure the trade-off from inside the jail,
+   so this is a genuine unhedged risk, not a claim.)
+2. Deleting no information but ADDING a pseudo-random vector to 128 of 768 command coordinates on
+   EVERY step is a real cost for the many steps whose command is unique in its sequence, where the
+   code carries no usable signal and only lowers SNR. If the non-cups packs regress more than the
+   routing windows gain, the blended score can fall.
+3. Parsing. If a capability pack uses mutation forms this resolver mis-models — `mv A DIR/` where
+   the destination is a directory rather than a full path, in-place editors, hard links, archive
+   extraction — the table produces a WRONG identity rather than no identity, and a wrong identity is
+   worse than none because it manufactures a confident false match. The epoch-poisoning fallback
+   covers only the unparseable forms it can detect, not the ones it silently mis-parses. The one
+   deliberate soft spot is `cat X >> Y` where Y pre-existed outside the window: it is treated as
+   creation, which would mis-identify an accumulator.
+4. The r22 write path. The delta-rule memory writes at every step, including the `mv` steps whose
+   observation is empty. If a move's key ever collides with an expose's key, the memory slot is
+   overwritten with an empty observation and the read returns nothing. The design prevents this at
+   the key level — a move's key tuple contains the token "mv" (or a redirection token) and a read's
+   does not, so they hash to different codes — but it does not prevent a collision arising from the
+   672 untouched text dimensions, which is where the parent's keys already came from.
+5. Cost. Parsing is memoized per sequence, keyed by the tuple of its command strings, so each
+   sequence is parsed once for the whole run (a few hundred blake2b hashes per sequence) and every
+   later batch is one dict lookup plus a slice-add. I expect this to be negligible against the step
+   budget, but I could not profile it from the jail and state that as unmeasured.

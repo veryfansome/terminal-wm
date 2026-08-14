@@ -1,0 +1,33 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r22_exact_target_equivalence_quotient"
+  },
+  "arch": {
+   "impl": "r22_retrieval_composition_renderer",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "target": {
+   "impl": "r2_shrunk_zca_content_metric"
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave"
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency",
+   "params": {}
+  }
+ }
+}

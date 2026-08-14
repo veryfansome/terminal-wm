@@ -1,0 +1,164 @@
+CANDIDATE: arch = r23_slot_transport_occlusion_worldmodel
+AXES CHANGED: arch only. objective / optim / batcher / head are inherited unchanged
+(head = r21_counterfactual_history_guidance, which already contains the partner's head
+r18_transition_forwardmodel_consistency as its base and calls both its wrap and its aux_loss).
+
+1. THE MECHANISM
+
+The new object is a LOCATION-SLOT TRANSPORT memory, added to the r18 trunk as a fourth
+retrieval channel (_transport_reads in the impl).
+
+  - From the RAW frozen command embedding e_i (tok_emb at even positions, no positional
+    code, no context) a shared encoder g_i = gelu(W e_i) feeds three role heads
+    (src / dst / qry), each followed by the SAME final key map and L2 normalisation:
+        k_src(i), k_dst(i), k_qry(i) = unit( Wk gelu(A_role g_i) ).
+    Role-specific extractors, one shared key space. Two commands naming the same
+    directory are meant to land on the same key even when one is `mv X/f Y/` (dst role)
+    and the other is `ls Y` (qry role).
+
+  - Memory M is [B, key_d, 768]: a key-addressed store whose VALUES live directly in the
+    768-d observation/target space, so a read is already a prediction.
+
+  - Per command step i, in this order:
+      read   v_qry = k_qry(i)^T M            <- appended to the output BEFORE any write
+      read   v_src = k_src(i)^T M,  v_dst = k_dst(i)^T M
+      move   the value written into the DESTINATION slot is
+                 moved = v_src * (1 + gamma_i) + beta_i,
+             where (gamma_i, beta_i) come from a zero-initialised MLP of the command, so
+             at initialisation moved == v_src EXACTLY: pure pointer transport.
+             delta-rule correction at k_dst:  (moved - v_dst) * g_move(i)
+      clear  delta-rule correction at k_src:  -(v_src) * g_move(i) * g_clear(i)
+      bind   only on a step whose observation is present:
+                 (o_i - v_qry_post) * g_bind(i)  written at k_qry,
+             with v_qry_post obtained in closed form from v_qry and the two corrections
+             above (exact, avoids a second materialised memory).
+    All three corrections are applied in one bmm; M decays by a learned factor in
+    [0.95, 1.0] initialised at ~0.9976 (a filesystem is meant to persist).
+
+  - The transport read enters the existing retrieval softmax as a fourth peer
+    (r_view, read_path, prev_obs, tp_read) and additionally gets its own sigmoid-gated
+    direct addition to the command prediction (bias -2, matching the parent's direct_gate).
+
+Two smaller pieces come from the partner and from the archive, and they exist to make the
+transport channel trainable rather than as ends in themselves:
+
+  - TRAINING-TIME OBSERVATION OCCLUSION (partner: r22_observation_occlusion_denoising),
+    extended. The partner drops each observation i.i.d. with a ramped probability. I keep
+    that and add ramped CONTIGUOUS SPANS: with probability occ_span_p a row gets a run of
+    1..occ_span_max consecutive observations blanked, always starting at pair index >= 1.
+    That manufactures, inside training, the exact shape of the scored window - a prefix of
+    observed listings, then a run of commands with no output, then a command whose output
+    is the target. i.i.d. dropping at p=0.12 almost never produces a run of 3.
+  - IMAGINED WRITE on the parent's own latent-transition memory for occluded steps
+    (archive: r20_native_imagwrite_observer_worldmodel), four lines in _transition_reads.
+
+Eval forward consumes no RNG and is deterministic; occlusion is strictly under
+self.training.
+
+2. WHY THIS SHOULD MOVE comp_ca, AND WHAT THE PARENTS STRUCTURALLY CANNOT EXPRESS
+
+Read the scored layout off the frozen instrument in the inherited head
+(r21._detect_masked_endpoint): odd length, a command at m, its observation at m+1
+key-padded, a command at m+2, everything after padded, and earlier cmd/masked-obs pairs
+allowed because the detector takes the LAST such m. So the scored window is
+    observed prefix pairs  ->  a chain of commands with NO observation  ->  one read.
+
+Now look at what the parent does on that chain. In r18 every memory write is multiplied by
+    write_active = valid_cmd & valid_obs   (beta, and `active` in _transition_reads).
+On a masked-observation step that factor is 0. BOTH r18 memories - the chunked delta-rule
+file/path memory and the latent-transition memory - are therefore FROZEN for the entire
+mutation chain: their state at the read command is bit-for-bit their state at the end of
+the observed prefix. Nothing the moves did is in them. Only the transformer trunk sees the
+mv command tokens at all, and the trunk has no addressable store to put a moved identity
+into. That is a structural inability, not a tuning problem, and it is a sufficient
+explanation for a parent fitness at or below the analytic floor.
+
+The partner (r22 occlusion) removes the DISTRIBUTION SHIFT of that regime but not the
+inability: with the writes still gated by valid_obs, training under occlusion teaches the
+same frozen memory to cope, it does not give it a way to update.
+
+The transport channel is the first mechanism in this lineage whose write on a command-only
+step is (a) non-zero and (b) sourced from MEMORY rather than from the command. That is the
+whole difference. Concretely, with unit keys and a saturated move gate:
+
+    after `ls A` -> f :        M[k(A)] = emb(f)
+    after `mv A/f B/` :        M[k(B)] = M[k(A)] = emb(f),  M[k(A)] = 0
+    after `mv B/f C/` :        M[k(C)] = M[k(B)] = emb(f)
+    at    `ls C`      :        v_qry = M[k(C)] = emb(f)
+
+The value that arrives at C was never present in any command embedding; it was carried
+from slot to slot. Composition depth is unbounded and exact at initialisation (the value
+operator is the identity when tp_val_out is zero), so the channel is FUNCTIONAL at step 0
+rather than having to be discovered from behind a zero-init adapter, which is how the
+parent's tr_read channel is wired.
+
+This is also why it should survive the paired-difference metric rather than cancel.
+Swapping which two files take which moves leaves the queried NAME, the set of commands,
+and the identity of the first and last mover unchanged; it changes only which SOURCE SLOT
+each move reads. A channel keyed on the query name, or on move order, reads the same thing
+in both arms and contributes zero by construction. The transport read differs between the
+arms exactly because v_src differs, so its contribution to comp_ca is the part the metric
+is built to isolate.
+
+The inherited head compounds this. r21 forms (native - history-masked) at the read
+position and adds it back capped at 0.2 RMS. In the history-masked arm the prefix bindings
+never happen, so tp_read there is ~0 and the difference is essentially the transported
+content: the head amplifies precisely the transport signal. Under the parent that
+difference was drawn from a memory that had not moved since the prefix, which is a
+plausible reason r21 did not pay for the parent and may pay here - the standing rules
+explicitly allow retrying a trait in a changed context, and this is that changed context.
+
+Grounding for the key design, from inside the jail rather than from a run: the inherited
+head's aux mines "same-path" command triples purely by cosine similarity between raw
+command embeddings with a threshold of 0.60 (r18_transition_forwardmodel_consistency,
+_mine_triples). That mechanism is only sensible if path identity is recoverable from the
+frozen command embedding, which is exactly what the shared key encoder needs.
+
+3. WHAT I EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST CHECK
+
+The load-bearing assumption is key alignment: k_dst("mv A/f B/") must land near
+k_qry("ls B") and away from k_src("mv A/f B/"). If the frozen sentence embedding mixes the
+two path arguments too thoroughly for role-specific extractors over a shared key map to
+separate them, the transport writes land in the wrong slot and the channel becomes a
+random content injector.
+
+If I am wrong, the signature is: the retrieval softmax and tp_out_gate both collapse the
+transport channel toward zero (mix[...,3] and sigmoid(tp_out_gate) driven small), next-obs
+retrieval health is roughly at the parent's level, and comp_ca does not move off the
+parent's value in either direction - a null, not a crash.
+
+Cheapest observation that would show it, in order of cost:
+  (a) at the end of training, dump mean sigmoid(tp_out_gate) and mean mix[...,3] on the
+      scored windows. If both are < 0.05 the channel was switched off and nothing else
+      needs measuring.
+  (b) on the scored windows, take the last mutation command and the read command and
+      report cos(k_dst(c_m), k_qry(c_r)) against cos(k_src(c_m), k_qry(c_r)). If the two
+      are within noise of each other, the role separation failed and that is the fix to
+      make next, not more capacity.
+  (c) ablate to occlusion-only (set the three transport gate biases to -12 so g_move,
+      g_bind, g_out are ~0) and see whether comp_ca is unchanged; that isolates the
+      transport channel from the occlusion curriculum.
+I have measured none of these. No number in this document is measured; the whole case is
+from the algebra above and from the write-gating I read in the parent's source.
+
+4. THE RISK I SEE IN MY OWN DESIGN
+
+The single biggest one is the key-alignment assumption in section 3: the entire mechanism
+is downstream of it, and if it fails the candidate is a null with ~600k extra parameters
+burning steps out of a fixed budget.
+
+Second, span occlusion is a real intervention on the training distribution, not a free
+lunch. It removes supervision from the r18 channels on the spans it blanks (their writes
+are gated off exactly there) while the transport channel is still immature, so early
+training could get worse before it gets better, and the step budget is fixed. The ramp
+(nothing before step 200, full by 900) is the only protection and its schedule is a guess.
+
+Third, the clear step. `mv` empties the source, and I subtract v_src at k_src using the
+PRE-transport value. If the learned k_src and k_dst are not close to orthogonal, the clear
+partially erases what the move just wrote. The learned g_clear gate (bias -1) can shut it
+off, but until it does the transport is lossy.
+
+Fourth, a semantic mismatch I cannot rule out from inside the jail: the memory value is the
+observation embedding of a whole directory listing, not of a single file. Transport is
+exactly right on a one-file-per-location board and only approximately right otherwise; the
+learned affine value operator is the only slack I left for that.

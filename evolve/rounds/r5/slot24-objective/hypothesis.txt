@@ -1,0 +1,130 @@
+WHAT THE CROSSOVER IS
+
+The parent program's objective (r3_fwl_orthogonalized_ring_contrast) is a BATCH-level metric: every
+row's negatives are the other ~2000 rows of the minibatch, reweighted by a confusability ring and
+geometrically orthogonalized against the command embedding. The second program's distinctive
+mechanism is not its objective (r12 is a strict ancestor of the parent's objective — same ring, same
+focal listwise, same repulsion hinge, minus the orthogonalization and the duplicate quotient); its
+distinctive mechanism lives in its head, r2_dualaddress_move_transport, which mines — label-free,
+from the batch alone — steps whose observation exactly duplicates an EARLIER step's observation
+under a different command with at least one content-free step in between, and trains a
+WITHIN-SEQUENCE, PREFIX-RESTRICTED, multi-positive InfoNCE against the observations seen so far.
+
+This candidate keeps the parent's batch geometry verbatim and lifts the second program's mining rule
+and prefix-restricted discrimination OUT of the head and INTO the objective, where it supervises the
+model's actual scored prediction rather than a head-private memory read, and adds a route-depth
+weighting that neither program has. The arch is kept at the parent's r23, which already inherits the
+second program's r22 prefix-content cross-attention and already carries a dual-address transport
+memory natively — so taking the second program's head as well would instantiate a redundant second
+transport memory and a duplicate of the aux this candidate now expresses in the loss. Every other
+axis is the parent's.
+
+WHAT THE NEW TERM COMPUTES, AND HOW
+
+Everything the new term needs it derives from the three matrices the contract already hands it —
+pred, tgt and ctx["prev"] — with no side channel and no command parsing.
+
+1. SEGMENTATION. The harness flattens cmd rows in row-major (sequence, step) order and builds
+   prev = strict-causal shift of tgt, zero-filled at each sequence's first step. So within a
+   trajectory prev[r] is bit-identical to tgt[r-1], and at a trajectory boundary prev[r] is exactly
+   the zero vector. _segment_ids marks a boundary where prev[r] differs from tgt[r-1] beyond 1e-5 OR
+   prev[r] is all-zero, and cumsums. I checked this reconstruction against the real training sample:
+   rebuilding a 6-sequence batch from evolve/jail_data/train_sample.jsonl and running the rule
+   recovers the true sequence ids exactly. Failure is safe in both directions: a missed boundary only
+   adds cross-sequence negatives, a false boundary only shortens a prefix. With a non-identity target
+   module the equality prev[r] == tgt[r-1] breaks, every row becomes its own segment, and the term
+   switches itself off rather than misfiring; the genome pins target=identity.
+
+2. CONTENT IDENTITY BY EXACT TARGET EQUALITY. render_obs is "cwd=... exit=...\n" + output, so the
+   observation text of a read does NOT contain the path read. Reading the same file content from a
+   different location after a chain of moves therefore produces a bit-identical observation string
+   and, through the frozen encoder and the fixed standardization, a bit-identical target vector.
+   Inside a segment, exact equality classes of tgt ARE content identities. Confirmed on the sample:
+   in each trajectory the class-size profile is one class of 9-14 (every filesystem-mutating command
+   shares the empty-output observation) and everything else of size 1-3, with each size-2/3 class
+   being one content exposed and then re-read after its moves. The term uses a strict threshold
+   (1e-5 of the batch mean target distance, floored at 1e-6) — 100x tighter than the parent's
+   duplicate threshold, which exists to suppress false negatives and would pool distinct-but-similar
+   contents that here must stay distinguishable.
+
+3. MUTATION VS CONTENT, AND ROUTE DEPTH. In-segment class size >= 4 marks a mutating step, <= 3
+   marks a contentful step (9-14 vs 1-3 in the sample, so the threshold sits in a wide gap). A row is
+   an ANCHOR when it is contentful, its target repeats an earlier contentful row in the same segment,
+   and at least one mutating row lies strictly between them; its ROUTE DEPTH is the count of mutating
+   rows in that gap, computed as a difference of a global cumsum (valid because the earlier
+   occurrence is in the same segment). I re-implemented the exact tensor algebra of _prefix_route_term
+   in plain Python and checked it against a straightforward per-sequence ground truth on the sample:
+   the anchor set and every depth match exactly. Anchors are 8-11% of rows, mean prefix candidate set
+   11.6, depths spread over 1..12.
+
+4. THE LOSS. Each anchor is scored by a multi-positive listwise softmax of -d2/temp over the targets
+   of every contentful row at or before it in its own segment (positives = every candidate with a
+   numerically equal target, which always includes itself). Distances are plain precision-weighted
+   squared L2 on the RAW targets — the eval's own decision variable — not the orthogonalized
+   residuals term A uses, so that two occurrences of one content are literally the same point and the
+   positive class is exactly a content identity. The temperature is 0.15 of the mean anchor-to-
+   negative target distance, so the softmax sharpness is scale-free. Anchor mass is
+   1 + 3*(1 - exp(-depth/2)), normalized to a weighted mean. Total loss = parent's loss (unchanged,
+   term for term) + 2.0 * this.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+
+The measurement is a forced choice among the contents on one board, at a read whose answer depends on
+where a silent chain of moves put them. Two things about the parent's loss are wrong for that.
+
+First, mass. The rows that carry the capability — a content read back after it was moved — are ~10%
+of rows, and the parent's exact-duplicate quotient actively DOWN-WEIGHTS them: a carried read is by
+construction in a duplicate class with its own earlier exposure, so inv_class gives it 1/2 while a
+boring unique read gets 1/1. That mechanism is correct for its purpose (dedup across images) and
+backwards for this one. The new term restores those rows to essentially all of its mass and tilts
+further toward the deep ones, which is where the eligible slice lives (d3 and d4+).
+
+Second, and more important, WHICH negatives. The parent's negatives are drawn from the whole batch
+and reweighted by target-space proximity; nothing guarantees that the specific content a
+location-keyed predictor would wrongly return is among them. The prefix candidate set guarantees it
+structurally. Concretely, in a real training window: s1.dat is exposed with content A, s0.dat is
+exposed with content B, `mv s0.dat s1.dat` runs silently, and s1.dat is read. The prefix set at that
+read contains BOTH A and B. A predictor that keys on the location returns A; the listwise term
+charges it exactly for that, against the same board, under the same read command. That is the same
+contrast the score takes — and a model that answers by name rather than by routing is penalized
+per-anchor, every step, instead of being competed against whatever the batch happened to supply.
+
+I expect the effect on comp_ca to be through native_hit rising while swap_stayed does not, because
+nothing in the term rewards any function of the read location alone: for a location-keyed predictor
+the term's gradient is maximal, and such a predictor is exactly the one whose per-window difference
+is structurally zero.
+
+CHECKS AGAINST THE KNOWN TRAPS
+
+- Nothing resolved is put into the model's input. The term reads pred, tgt and prev, and only shapes
+  a loss; the model's tokens, the arch, the stream and the eval path are untouched.
+- The term never runs where the scored observation is withheld. It is computed inside loss() during
+  training only; at scoring time the loss is not called at all, so there is no mechanism that
+  switches off at the measured position. The one thing it consumes from ctx, prev, is used only to
+  cut the flat rows into trajectories during training.
+- Anti-collapse: the parent's untouched raw squared-error anchor is retained, and a constant
+  prediction gives every anchor an equal distance to every candidate, i.e. nll = log(|cand|/|pos|)
+  > 0, so a constant is not a minimizer of the new term either.
+- Causality of the candidate set: candidates are restricted to rows at or before the anchor in its
+  own segment, so the term only ever asks for a content the model has already been shown.
+- Cost: one extra [n_anchor, D] x [D, n] matmul (n_anchor is ~10% of n) plus a handful of [n,n]
+  boolean reductions, against a batch that already pays an [n,n] distance matrix and a 1024x1024
+  ridge solve. It should not threaten the step budget, though I could not run the harness from this
+  jail and have not measured wall-clock.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- If the class-size split does not separate on the full training root the way it does on the sample
+  (a trajectory with fewer than 4 mutating steps, or a content read 4+ times), rows get misclassified.
+  Both directions degrade to "fewer or trivially-easy anchors", not to a wrong training signal.
+- If the model can satisfy the prefix term with a positional proxy — e.g. "answer with the most
+  recently exposed content" — it would gain on the term without gaining routing. Such a proxy is
+  move-order-blind and so contributes zero to the score rather than inflating it, but it would also
+  mean the term bought nothing. The depth weighting is the defence: at depth>=2 the recency proxy is
+  wrong most of the time in the training data.
+- If a weight of 2.0 is too large, the general next-observation fit degrades enough that native_hit
+  falls faster than swap_stayed. This is the main tuning risk and it is a one-constant risk.
+- If the encoder does not in fact produce bit-identical embeddings for bit-identical observation text
+  (it is a frozen deterministic encoder run once per split and cached, so it should), the equality
+  classes fragment and the anchor set empties — the term then contributes nothing and the candidate
+  reduces to its parent.

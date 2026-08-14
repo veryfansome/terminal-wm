@@ -1,0 +1,128 @@
+CANDIDATE: arch r25_address_transport_memory, in the crossover genome
+  objective r22_exact_target_equivalence_quotient
+  arch      r25_address_transport_memory        (new)
+  optim     r18_spectral_capped_transition_readout
+  target    within_sequence_contrast_equalizer  (kept from the parent)
+  batcher   r6_sysblock_hardneg_curriculum {hard_frac_max 0.75, n_block_images 1, ramp_frac 0.3}
+  stream    baseline_interleave
+  head      r23_routed_content_alignment        (taken from the crossover partner)
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+Parent and partner share arch/objective/optim/batcher and differ in target and head. The parent
+contributes the within-sequence contrast equalizer, which amplifies exactly the target directions
+that vary INSIDE one trajectory — i.e. the directions that separate one file's content from
+another's on the same board, which is what the paired difference is computed over. The partner
+contributes r23_routed_content_alignment, which supervises the r22 prefix-content attention row at
+a read toward the earlier observation carrying the same content. The two are complementary, not
+alternatives: the equalizer reshapes what the main loss counts as an error, the head adds a second,
+direct gradient onto "which earlier observation is the content of this read". The new arch keeps
+r22's cross-attention surface (xq / xk / x_out / xattn_dim) intact and inherited, so the partner's
+head stays live rather than being disabled by _attn_surface_ok. The parent's transition-consistency
+head is the one thing dropped; the r18 transition operator it supervised is still present and still
+trained by the main loss.
+
+THE MECHANISM I ADDED
+A forward ADDRESS-TRANSPORT MEMORY, run once per sequence, left to right over command steps, on top
+of everything the parent already does.
+
+State: mem in R^{key_d x 768}, an associative store read as v = a^T mem for a unit address a.
+Per command step i, from the RAW 768-d command embedding only:
+  f_i      = GELU(W_in LN(cmd_i))                     shared feature, R^{176}
+  a_src_i  = unit( P_share f_i + P_src f_i )          source-role address, R^{64}
+  a_dst_i  = unit( P_share f_i + P_dst f_i )          destination-role address, R^{64}
+P_share/P_src/P_dst are three separate (key_d, 176) matrices, so both roles are read out of ONE
+shared address space plus a role-specific deviation; the destination address is also the READ
+address (a `cat P` and the `mv Q P` that put content at P both refer to P in "last path" position).
+Three scalar gates: g_move and g_erase from [f_i, h_cmd_i, cos(a_src,a_dst)], g_write from
+[h_cmd_i, h_obs_i, cos(a_src,a_dst)]; g_erase is additionally multiplied by (1 - cos) clamped to
+[0,1].
+
+Per step, with v_src = a_src^T mem and v_dst = a_dst^T mem taken BEFORE any update:
+  read_i  = v_dst
+  mem <- lam * mem
+         + a_dst (x) [ g_move (v_src - v_dst) + g_write (obs_i - v_dst - g_move (v_src - v_dst)) ]
+         + a_src (x) [ -g_erase v_src ]
+The first outer product is the mv: it makes a_dst^T mem equal v_src (overwriting whatever was at the
+destination) and the second removes v_src from a_src, so the content held at the source address is
+relocated to the destination address. The third term is a delta-rule write that makes
+a_dst^T mem equal obs_i, i.e. "this location currently holds this observed content".
+
+WHAT THIS COMPUTES THAT NEITHER PARENT COMPUTES
+Both programs retrieve content in ONE hop. r22's cross-attention takes h_cmd at the read, scores it
+against the prefix observation hidden states, and copies a convex combination of raw prefix
+observation embeddings. That answers "which earlier observation looks like the answer to this
+command"; it has no way to compose two or more move commands, because the object it attends over
+(prefix observations) contains no record of where content went — I checked the training sample and
+the observation of a `mv` step is the empty-output render `cwd=... exit=0\n`, numerically the SAME
+vector for every mv in the corpus, so the entire routing signal lives in the mv COMMAND text and
+nowhere in the mv observation. r18's memories do not transport either: the file/path delta-rule
+memories write value=obs at a single key per command, and _transition_reads reads a slot, applies a
+learned edit, and writes back to the SAME slot. No mechanism in either parent moves content from one
+address to a different address.
+
+The transport memory makes the composition of a chain a property of the state rather than of a
+retrieval-time search: after `cat X` writes content C at address(X), each subsequent `mv` moves C one
+address further, and the read at the final `cat P` is a single lookup at address(P), identical work
+at depth 1 and at depth 8. Nothing in my code parses a command, matches a path, or resolves a chain
+outside the model: the only inputs are the frozen command and observation embeddings, and every
+address, gate and decay is a learned function of them. If the learned addresses are wrong the channel
+returns the wrong content and is punished by the same loss as everything else.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+The score is native_hit minus swap_stayed on the same board, same destinations, same depth, with
+only the move commands re-encoded. A predictor that keys on the read location alone is identical in
+both arms and contributes exactly zero. The transport read is a function of the move commands: under
+the swapped chain the mv command embeddings differ, the source/destination addresses differ, and the
+content that ends up at the queried address is the partner's, so the two arms disagree exactly when
+the model actually carried identity. That is the quantity the objective asks for.
+
+Two further reasons to expect a real, not marginal, effect:
+(1) Depth transfer. The same three matrices are exercised by depth-1 windows (`cat Q`, `mv Q P`,
+`cat P`) and by depth-8 windows. Depth-1 examples, which are plentiful in ordinary training
+trajectories, directly supervise the cross-role tie a_src(mv Q P) = a_dst(cat Q) and the same-role
+tie a_dst(mv Q P) = a_dst(cat P). One-hop retrieval learned on depth-1 data cannot extend to depth 4;
+a transport rule learned on depth-1 data applies unchanged at depth 4.
+(2) Conditioning. The retrieved content reaches the loss through a chain of rank-one updates that is
+LINEAR in the stored observation vector, with unit-norm addresses and a decay near 1, so gradient
+reaches an early write with roughly constant magnitude regardless of how many moves intervene. A
+multi-hop attention chase multiplies several softmax distributions, and both the forward error and
+the gradient degrade with each hop.
+
+The readout is identity-scaled (0.1 I) rather than zero, so the address projections receive gradient
+from step 1 instead of waiting for a zero readout to leave the origin; the outer sigmoid gate is
+biased to -1, so the initial contribution to a prediction is about 0.027 * v_read. The three (64,176)
+address projections match the shapes the optim routes to Muon, which applies no weight decay and
+orthogonalizes the update — this matters, because the role separation is carried by the DIFFERENCE
+between P_src and P_dst and a decayed parameterization would pull the two roles together. The (768,
+768) readout is picked up by the spectral cap.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+- The decisive assumption is that the frozen mean-pooled embedding of `mv Q P` separates its first
+  path from its second path well enough for a linear role head to address them differently. If it
+  does not, a_src and a_dst collapse onto each other, (1 - cos) drives the erase to zero, the move
+  update (v_src - v_dst) is identically zero, and the channel degenerates to "the observation last
+  written at this address" — a one-hop lookup no better than what r22 already has. This is the same
+  bottleneck any address-based mechanism faces here, and I have not measured it.
+- If g_move learns to stay near zero (because most steps are not moves and the move gate is a cheap
+  thing to switch off), the channel is a plain content-addressed cache and adds nothing on depth-3+
+  windows. The gate is biased to 0.27 at init specifically so the cache behaviour is learned first
+  and transport has to earn its way up; that ordering could also stall there.
+- Address interference: with key_d=64 dense addresses and roughly ten distinct paths per window,
+  cross-talk between addresses leaks other files' contents into a read. The delta-rule form of the
+  write corrects for interference at write time, but not for interference created later by moves.
+- Cost: the module adds a second sequential loop over the ~31 command steps (the r18 transition
+  memory is the first), each step holding a (B, 64, 768) store in the autograd graph. I estimate this
+  at a few hundred megabytes of extra activation at batch 64 and a small fraction of a step's compute,
+  but I could not run it here, so this is an estimate and not a measurement.
+- Downside protection: every path of the new channel is behind a sigmoid gate multiplying an additive
+  contribution, so if the mechanism is useless the model can drive the gate down and recover the
+  parent's function; the failure mode is "no gain", not "broken".
+
+CAUSALITY
+read_i is taken from mem BEFORE step i's update, so it depends on obs_{<i} and cmd_{<=i} only. Step
+i's write gate reads h_obs_i, which affects mem only for steps > i. `stored` is the exclusive
+cumulative sum of the write gate. Nothing in the new channel is gated on the CURRENT observation
+being present, which matters because the scored position is a command whose own observation is
+withheld: at that position the channel behaves exactly as it does anywhere else, reading the store
+built from the prefix. Under the stream's leakage probe (corrupt obs_3, check preds at cmd 0..3),
+mem_2 is built from obs_0..obs_2 and the prediction at cmd 3 is unchanged.

@@ -1,0 +1,136 @@
+CANDIDATE: slot transport (arch: r21_slot_transport_worldmodel,
+                           head: r21_slot_transport_permutation_consistency)
+AXES CHANGED: arch, head.  Inherited unchanged: objective, optim, target, batcher, stream.
+
+
+1. THE MECHANISM — WHAT THIS CODE COMPUTES THAT THE PARENTS DO NOT
+
+Both parents address their content memory with ONE key per command: r18's
+`_transition_reads` computes p_i = unit(tr_path(x_cmd_i)), reads s_pre = p_i^T M, and writes
+the updated value back at THE SAME p_i.  The file-memory arm is the same shape: whatever key a
+command produces, the VALUE written there is that step's own observation `obs_tok[:, i, :]`.
+There is no operation in either parent that reads at one address and writes at a different one.
+
+The new arch adds a second recurrent register that does exactly that.  Per command it emits
+two unit addresses from the RAW command embedding, a = unit(tp_src(h)), b = unit(tp_dst(h))
+with h = gelu(tp_addr_in(z_cmd)), and four gates m (move), w (write), e (erase), eta (edit).
+With M the [key_d, D] memory it performs, in this order:
+
+    r_i = b^T M                                   <- emitted read (the prediction contribution)
+    c_i = a^T M                                   <- content presently at the source
+    M  += b (x) [ m ( (c_i + eta*(T(c_i,cmd_i) - c_i)) - r_i ) ]     rebind source onto dest
+    M  -= a (x) [ m * e * c_i ]                                       empty the source
+    M  += b (x) [ w (1-m) * (obs_i - b^T M) ]                         observation write
+    M  *= tp_decay
+
+T is r18's own shared transition operator (tr_in/tr_out on in_norm(cmd_proj(z)+type_emb(0))),
+i.e. the exact surface the inherited r18 forward-model aux supervises, now placed on the
+always-on forward path.  The read r_i is radially corrected toward the sqrt(D) observation
+shell (the partner's shell idea) and injected through a zero-init (D,D) readout, so the forward
+is BIT-IDENTICAL to r18 at initialisation (verified: max|pred_new - pred_r18| = 0.0, and every
+inherited parameter is bit-equal to a bare r18 built from the same seed, because the new modules
+are constructed with the global RNG state saved and restored around them).
+
+The head keeps the r18 forward-model-consistency aux verbatim and adds a term that supervises
+r_i directly.  A label-free miner selects "content reappearance" positions: obs_j nearly repeats
+an earlier obs in the SAME trajectory (match = exp(-min_d/0.35)), that match is UNIQUE by a
+nearest/second-nearest ratio test over the whole row (unique = 1 - exp(-(near2-near1)/0.25)),
+and the querying command is not the earlier command (novel = 1 - exp(-(1-cos)/0.02)).  On those
+positions the transport read must pick obs_j out of a candidate set made of the OTHER
+observations of the same trajectory plus the in-batch positives, in the eval's own squared-L2
+geometry, with near-duplicate candidates masked.  Every fourth step it adds a two-way
+interventional contrast: the same recurrence is re-run with the move gate forced to zero and the
+loss is softplus((d_native - d_nomove)/tau), which is zero only when the moves are what made the
+retrieval correct.
+
+2. WHY THIS SHOULD MOVE comp_ca
+
+The score is the paired difference between the pick under the real move chain and the pick under
+a chain where two files exchanged their moves.  Under a role swap the BOARD, the command
+multiset, the queried name, the touch pattern and the first/last mover are all unchanged; only
+which file ends up where changes.  So the only thing that survives the pairing is a quantity that
+carries a file's identity across hops.
+
+The parents cannot express that quantity.  Consider `cat A -> mv A B -> mv B C -> cat C`.  In
+r18 (and both r20 children) the `mv A B` step writes its OWN observation into its own slot.  The
+observation of a move is empty output plus cwd and exit code, so what enters memory at the move
+step is boilerplate, identical under a role swap.  The content of A is never routed anywhere; at
+`cat C` the memory can at best report "something happened near here".  That is disturbance, not
+content, and it cancels.  My recurrence composes: after `mv A B`, b(A->B)^T M = content(A); after
+`mv B C`, C holds content(A); at `cat C`, r = content(A) is emitted in the target's own space
+(the value stored IS the standardized observation embedding the metric ranks in).  Swap the two
+moves and a different embedding sits at C, so the prediction follows the content.  Depth costs
+nothing: each extra hop is one more rank-2 update.  The brief reports the earnable windows are
+d3 (n=60) and d4+ (n=29), i.e. exactly the regime where a single-hop mechanism has nothing left.
+
+Three secondary properties I claim from reading the code, not from a measurement:
+(a) addresses are computed from the RAW command embedding, so the same path gets the same
+    address wherever it appears; r18's tr_path keys off x_cmd, which carries
+    pos_scale * positional(i), so its "same location" key drifts with position.
+(b) the observation write is gated by (1-m).  A command the model reads as a move therefore does
+    NOT overwrite its destination with its own empty output.  This is what makes a SILENT move
+    non-destructive, and it is the one coupling that makes transport and reveal mutually
+    exclusive rather than additive.
+(c) the parents' imagination channels are, by their own source, reachable only on a stream with
+    a masked interior observation ("this override never runs on the scored path").  My channel
+    runs on every forward, fully observed or not, and needs no observation at the move step.
+
+3. WHAT I EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST CHECK
+
+The load-bearing empirical assumption is that a linear map of a frozen mean-pooled sentence
+embedding of `mv /p/a.txt /q/b.txt` can produce a source address that matches the address `cat
+/p/a.txt` produces and a destination address that matches `cat /q/b.txt`.  If mean pooling has
+destroyed argument ORDER, tp_src and tp_dst will collapse onto the same subspace, the register
+will rebind content onto the location it came from, and the mechanism is inert.
+
+If I am wrong I expect: comp_ca at or slightly below the parent (the channel is zero at init and
+can only be grown by gradient, so the failure mode is "no gain", not "collapse"); the learned
+move gate NOT separating move-verb steps from read-verb steps; and cos(tp_src(h), tp_dst(h))
+staying near 1.  The cheapest observation is the last one — after training, feed the eval command
+embeddings through gelu(tp_addr_in(.)) and print the mean cosine between the src and dst
+addresses, and the mean move gate split by verb.  Two numbers, no retraining.  A second cheap
+check: ablate by forcing move_scale=0 in `transport_reads` at eval; if comp_ca does not drop, the
+transport is not what is earning.
+
+On my synthetic cups board (24 rows, reveal / permute / query) the miner selected the query
+position and nothing else (18 of 24 rows, weight 0.995) and the learned move gate ordered
+correctly (move-steps 0.038 vs read-steps 0.013).  I am NOT presenting that as evidence of
+score: the board is 4 files and both r18 and r21 reach content-top1 1.000 on it, so it cannot
+rank anything.  It is a correctness observation about the miner and the gradient path only.
+
+4. THE RISKS I SEE IN MY OWN DESIGN
+
+Biggest: the address-extraction assumption in section 3.  Everything else is machinery around it.
+
+Second: cost.  Measured on CPU, B=64, 16 steps/row: r18+r18head 0.300 s/step, this candidate
+0.490 s/step, i.e. 1.63x, of which the arch recurrence is 1.47x and the head (miner plus the
+every-fourth-step counterfactual) is 0.16x.  The budget is a fixed number of STEPS, so this does
+not change what the run learns, but it does make the run 1.6x longer in wall clock.  I reduced it
+from 1.82x by fusing the three rank-1 updates into one baddbmm and hoisting the transition
+operator's gamma/beta out of the loop; I have not profiled it on GPU.
+
+Third: the aux carries weight 1.0 against a main loss of order 1, and it shares cmd_proj /
+in_norm / tr_in / tr_out with the trunk through the edit term.  That coupling is weak at init
+(the edit gate starts at sigmoid(-4) = 0.018) but it is not zero, and a strong aux distorting the
+shared transition operator would also degrade the inherited r18 term.  tp_weight is a parameter
+if the search wants to turn it down.
+
+Fourth: the interventional term's counterfactual (move_scale=0) also disables the erase.  A
+degenerate way to satisfy it is to make the no-move read stale rather than to make the native
+read correct.  I kept its weight at 0.10 and gave it a two-way-softmax form that is bounded below
+by 0 and equals log 2 when the two reads agree, so it cannot dominate; but it is the term I would
+drop first.
+
+Fifth: I removed the per-step learnable decay in favour of a fixed 0.999 applied uniformly to all
+rows.  That is exact only because collate pads as a suffix, so decaying a finished row's memory
+only touches reads at positions that are masked out.  A stream that padded in the middle would
+make this a (benign, small) approximation rather than an identity.
+
+VERIFIED BY RUNNING (in the jail, CPU): forward bit-identical to r18 at init; all inherited
+parameters bit-equal to a bare r18 at the same seed; stream.leakage_ok True at init and after
+200 steps of training; 200 harness-shaped training steps with the real optimizer, objective and
+batcher with no non-finite loss; finite forwards for window lengths 1,3,5,7,12,25 including odd
+lengths and a masked interior observation; flatten_predictions finite; head.leak_safe True;
+genome.validate True; Muon routes the two new (key_d,128) address projections and the spectral
+cap picks up the new (D,D) readout; +706K parameters (3.78M vs 3.07M).
+UNMEASURED: comp_ca itself, and any GPU timing.

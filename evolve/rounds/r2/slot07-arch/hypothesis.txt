@@ -1,0 +1,120 @@
+CANDIDATE: arch = r23_dual_address_transport_pointer (only the arch axis changed; the parent's
+objective / optim / batcher / head are carried over unchanged).
+
+WHAT THE DATA SAYS, AND WHY IT MOTIVATES THIS MECHANISM
+
+Read from evolve/jail_data/train_sample.jsonl, first sequence. A cups window looks like:
+
+  cat /tmp/w/cups/g53/f149.tmp            -> "USER_A6C2=e7186811\nCANARY=132ded...\n..."   (expose)
+  cat /tmp/w/cups/usr/share/misc/magic.txt-> "{ \"session\": ... }"                        (expose)
+  ... three more exposes ...
+  mv /tmp/w/cups/g53/f149.tmp /tmp/w/cups/usr/share/misc/magic.txt.1   -> output "" exit 0  (move)
+  mv /tmp/w/cups/g56/f485.bin /tmp/w/cups/etc/cron.d/backup.job.2      -> output "" exit 0  (move)
+  cat /tmp/w/cups/usr/share/misc/magic.txt.1 -> "USER_A6C2=e7186811\nCANARY=132ded...\n..." (read)
+
+Three facts follow that this design is built on, and each is checkable in that file.
+
+(1) A move step's OBSERVATION carries no information. Its output is the empty string, exit 0,
+cwd unchanged, so render_obs produces essentially the same text for every mv in the corpus. All
+of the routing information sits in the mv COMMAND string, which names the source path and the
+destination path inside one mean-pooled 768-d embedding.
+
+(2) The answer at a read step is a VERBATIM repeat of an earlier observation. The expose step
+and the later test step render to byte-identical observation text ("cwd=/ exit=0\n" + the same
+file body), so their frozen embeddings are the same vector. A mechanism that can identify WHICH
+earlier observation is the right one and copy it gets the target exactly, not approximately.
+
+(3) Both parents lack the operation the chain is made of. In r18/r22 the file memory writes
+value = obs_tok at the write key derived from the same command, so at a mv step it writes the
+empty-output observation at the destination — it stores nothing. The latent-transition memory
+(_transition_reads) has exactly ONE address per step (tr_path(x_cmd)): it reads at that address
+and writes back at that same address, so it can rewrite content in place but can never relocate
+content from one address to another. The baseline transformer has no addressing at all. Neither
+program computes "take what is at A and put it at B".
+
+WHAT THE CODE ADDS THAT NEITHER PARENT COMPUTES
+
+A dual-address transport store. Per command step i, the RAW 768-d command embedding (tok_emb at
+the command position — no trunk bottleneck, no observation) goes through one shared GELU layer
+addr_in and then two SEPARATE unit-normalized heads, addr_src and addr_dst, producing two
+different key_d-dim addresses a_src[i] and a_dst[i] from the same embedding. The recurrence in
+_transport_reads, over a store mem of shape [B, key_d, 768], is:
+
+  s_i    = a_src[i]^T mem                      (content currently held at the SOURCE address)
+  v_i    = g_move[i]*s_i + (1-g_move[i])*obs_i (transport the read content, or store this step's
+                                                observation)
+  mem   <- tp_decay*mem + a_dst[i] (beta_i (v_i - a_dst[i]^T mem))^T
+                        - a_src[i] (g_erase[i] g_move[i] s_i)^T
+
+applied as one batched rank-2 baddbmm. g_move is a sigmoid of the trunk state and the address
+hidden, so the network can learn "this command is a move" from the command text; when it fires,
+the value written at the DESTINATION address is the content read at the SOURCE address, and the
+source is erased. When it does not fire (a cat exposure), the value written is the step's own
+observation and no erase happens. The delta-rule form (write v_i minus what is already there,
+with unit keys) makes a write with beta_i near 1 an overwrite, so a two-hop chain A->B->C reads
+the content at B on the second move and re-lands it at C.
+
+Causality: s_i is read BEFORE the step-i write, so the prediction at command i depends only on
+observations 0..i-1; the addresses depend only on command embeddings; the gates additionally use
+h_out at command position 2i, which the r18 trunk computes under a causal mask.
+
+A pointer-copy readout on top. The retrieved value read[i] is used as the QUERY of a masked
+softmax over the strictly-earlier observation embeddings (keys ptr_k(obs_j), values the raw
+768-d obs_j, mask j < i and not padded). Its output copies one prefix observation verbatim.
+A learned alpha blends the copy with the raw retrieved value, and the blend enters the
+command-position prediction through a zero-init (D,D) readout under a sigmoid gate fed the RMS
+of the retrieved value, the RMS of the copy, and the peak attention mass.
+
+This is the crossover. From the parent it keeps, by inheritance and untouched, the whole r18
+path-state stack and r22's prefix-content cross-attention (queried by the trunk hidden state).
+From the second program — the plain baseline transformer — it takes the trunk shape: d=192 and
+an FFN of 4*d, the baseline's exact geometry, instead of r18's narrower d=176 / 2*d. The new
+part is neither: the parent's r22 channel retrieves a prefix observation using the TRUNK STATE
+as the query, so the trunk itself has to have already resolved the move chain; here the query is
+the output of an explicit two-address transport recurrence, so the trunk only has to learn the
+path-string-to-address maps and the move gate, and the chain is resolved by the recurrence.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca is native_hit minus swap_stayed on the same board, where the swap re-encodes only the
+move commands so that two contents exchange their move-position sets. Everything that keys on
+WHICH LOCATION is read is identical in both arms and cancels. A first-mover positional lookup
+cancels only in expectation. What does not cancel is carrying a specific content through the
+chain: under the swap, a_src of the first move now selects the partner's slot, so the store ends
+up holding the partner's content at the queried address and the pointer copies a different
+observation — native_hit high, swap_stayed low, difference positive per window. The parent's
+channels are, by construction, either location-keyed (its file/path memory writes the observation
+at a key derived from the same command) or position-keyed, which is what a near-zero comp_ca
+looks like.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- The separation of source from destination has to be learnable from ONE mean-pooled sentence
+  embedding of "mv A B". If the pooled encoder representation mixes the two path strings so
+  thoroughly that no shared-GELU-plus-linear-head pair can pull them into different address
+  directions, a_src and a_dst collapse to the same address, transport degenerates to r18's
+  in-place rewrite, and the mechanism contributes nothing. This is the single largest risk and I
+  cannot check it from the jail: it is a property of the frozen encoder, not of this code.
+- The store is keyed by learned addresses, not by exact strings, so near-parallel addresses for
+  distinct paths cause crosstalk; with five slots per window and key_d = 64 there is room, but
+  nothing forces the addresses apart.
+- The zero-init readout means the whole channel starts inert. If the gradient signal for it is
+  weaker than the signal for the already-trained r18 channels within the fixed step budget, it
+  may never leave zero, in which case the candidate reduces to the parent on a wider trunk and
+  the measured difference is trunk-shape noise.
+- The trunk change (d 176 -> 192, ffn 2x -> 4x) is a real confound: if it hurts generalization
+  to held-out images, it can mask a working transport channel. Stated as unmeasured — I cannot
+  run the harness from here.
+
+COST AND CONTRACT NOTES (unmeasured, reasoned from the code)
+
+build(**params) returns an nn.Module with the required forward(tok_emb, types, key_pad) ->
+(pred [B,L,768], h [B,L,d]) predicting at every position; the new channel touches only
+pred[:, 0::2] and leaves h untouched. Zero-init tp_out makes the forward bit-identical to the
+parent at initialization. The added loop is one pass of length n_cmd with one baddbmm per step
+over a [B, key_d, 768] store — the same shape and the same loop length the parent already pays
+in _transition_reads, so roughly a doubling of that term and nothing new asymptotically.
+addr_src and addr_dst are an identical-shape (key_d, addr_hidden) pair, which is the shape class
+the genome's optim routes to Muon under its sibling rule; tp_out is (D, D), which is the shape
+class its spectral cap projects. ptr_q / ptr_k are (ptr_dim, D) and fall outside both, staying
+on AdamW.

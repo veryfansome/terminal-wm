@@ -15,7 +15,10 @@ thing: which content the chain routes to the test location.
 WHY THIS IS HARD TO FAKE
   A name-keyed non-tracker predicts the exposure at the name index. That is identical under both
   arms (only mv embeddings change), so native_hit_i == swap_stayed_i EXACTLY, per window, and the
-  window contributes exactly zero. The cancellation is structural, not statistical.
+  window contributes exactly zero. The cancellation is structural, not statistical, for as
+  long as the read's own token is the same in both arms — true whenever the genome's
+  stream declares no code_cmds, and worth re-checking for one that does, since the swapped
+  arm is re-coded from the full swapped command list including the read.
   A chain-position non-tracker (first/last/deepest/eliminate) attends to mv tokens. Under the
   routed<->partner exchange it mimics a tracker on routed-marker windows and anti-mimics on the
   symmetric partner windows, so its EXPECTATION is zero — but only over an exchangeable
@@ -100,20 +103,49 @@ def _trace_arm(w, cap, native):
     return float(w["name"] == w["routed"])
 
 
+def arm_diff(w, s, arm):
+    """One window's contribution to an analytic arm's band value, in {-1, 0, +1} (fractional for
+    `deepest`). Positive means the shortcut names the routed content natively and stops naming it
+    under the role swap: the window is exactly where that shortcut earns. Strata are taken by
+    SIGN, not by rounding -- `deepest` splits its credit across tied movers, so its per-window
+    difference is fractional and round() would both lose those windows and split ties by
+    banker's rounding."""
+    routed = w["routed"]
+    if arm.startswith("trace_h"):
+        cap = int(arm[len("trace_h"):])
+        return _trace_arm(w, cap, True) - _trace_arm(w, cap, False)
+    return _arm_hit(_native_marks(w), arm, routed) - _arm_hit(s["alt_marks"], arm, routed)
+
+
+def shortcut_leaning(win_by_id, swap, W, per_window, arm):
+    """Where on the slice this candidate's score comes from, relative to one shortcut.
+
+    Splits the candidate's own per-window differential by what `arm` scores on that same
+    window. A mechanism that carries content should earn about equally in all three strata,
+    because the strata are a property of the chain, not of the content. A mechanism that IS the
+    shortcut earns only in the stratum where the shortcut earns.
+
+    This is a readout, never a gate and never subtracted: the strata are small and one run
+    cannot separate a leaning candidate from a lucky one. It exists because the per-window rows
+    are not persisted, so it cannot be recovered after the fact without re-running every job."""
+    def sign(x):
+        return 1 if x > 1e-9 else (-1 if x < -1e-9 else 0)
+
+    out = {}
+    for label, want in (("pays", 1), ("neutral", 0), ("costs", -1)):
+        ids = [i for i in W if sign(arm_diff(win_by_id[i], swap[i], arm)) == want]
+        out[label] = {"n": len(ids),
+                      "mean": (sum(per_window[i] for i in ids) / len(ids)) if ids else None}
+    return out
+
+
 def analytic_band(win_by_id, swap, W):
     """comp_ca as each analytic non-tracker would score it, on the identical frozen slice."""
     band = {}
     for arm in ANALYTIC_ARMS:
         tot = 0.0
         for i in W:
-            w, s = win_by_id[i], swap[i]
-            routed = w["routed"]
-            if arm.startswith("trace_h"):
-                cap = int(arm[len("trace_h"):])
-                tot += _trace_arm(w, cap, True) - _trace_arm(w, cap, False)
-            else:
-                tot += (_arm_hit(_native_marks(w), arm, routed)
-                        - _arm_hit(s["alt_marks"], arm, routed))
+            tot += arm_diff(win_by_id[i], swap[i], arm)
         band[arm] = tot / len(W)
     return band
 
@@ -181,7 +213,8 @@ def assert_slice_matches_table(knobs):
 
 
 def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
-                        seed=20260806, ceiling_table=None, swap_cache=None, knobs=None):
+                        seed=20260806, ceiling_table=None, swap_cache=None, knobs=None,
+                        stream=None):
     """comp_ca for ONE trained net on ONE (root, split). Returns unrounded per-seed values.
 
     The scored scalar is the raw differential. `analytic_band` travels with it as a reference —
@@ -192,9 +225,12 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
     their frozen-ceiling columns; comp_ca itself never reads a ceiling value arithmetically.
     """
     assert_slice_matches_table(knobs)
-    cap = CP.measure(net, ctx, target_mod, device, ceiling_table=ceiling_table)
+    if CP._code_fn(stream) is not None and swap_cache is None:
+        swap_cache = CP.build_swap_cache(ctx, percep_name, device, seed=seed)
+    tok, tok2 = CP.stream_coded_toks(ctx, swap_cache, stream)
+    cap = CP.measure(net, ctx, target_mod, device, ceiling_table=ceiling_table, tok=tok)
     alt = CP.alt_chain(net, ctx, target_mod, device, percep_name, seed=seed,
-                       ceiling_table=ceiling_table, cache=swap_cache)
+                       ceiling_table=ceiling_table, cache=swap_cache, tok2=tok2)
 
     native = {r["id"]: r for r in cap["rows"]}
     swap = {r["id"]: r for r in alt["rows"]}
@@ -276,11 +312,15 @@ def measure_trained_net(net, ctx, target_mod, device, percep_name, cells,
 
     win_by_id = {w["id"]: w for w in ctx["wins"]}
     band = analytic_band(win_by_id, swap, W)
+    per_window = {i: native[i]["wm"] - swap[i]["stayed"] for i in W}
+    leaning = {arm: shortcut_leaning(win_by_id, swap, W, per_window, arm)
+               for arm in ANALYTIC_ARMS if abs(band[arm]) > 1e-9}
     best_arm = max(band, key=lambda a: band[a])
 
     return {
         "comp_ca": comp_ca,
         "analytic_band": band,
+        "shortcut_leaning": leaning,
         "best_analytic_arm": best_arm,
         "n": len(W),
         "per_depth": per_depth,

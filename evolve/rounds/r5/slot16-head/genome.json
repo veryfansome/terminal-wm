@@ -1,0 +1,22 @@
+{
+  "chunks": {
+    "objective": {"impl": "r22_exact_target_equivalence_quotient", "params": {}},
+    "arch": {"impl": "r4_fingerprint_conditioned_composition", "params": {}},
+    "optim": {"impl": "r18_spectral_capped_transition_readout", "params": {}, "bs": 64},
+    "target": {"impl": "identity", "params": {}},
+    "batcher": {"impl": "r4_distinct_blocked_transport_sampler", "params": {
+      "chain_alpha": 1.0,
+      "hard_frac_max": 0.75,
+      "hop_cap": 6,
+      "n_block_images": 1,
+      "ramp_frac": 0.3,
+      "weight_cap": 4.0
+    }},
+    "stream": {"impl": "baseline_interleave", "params": {}},
+    "head": {"impl": "r5_closure_routing_memory", "params": {
+      "hops": 7,
+      "key_d": 64,
+      "pred_weight": 0.5
+    }}
+  }
+}

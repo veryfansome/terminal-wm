@@ -1,0 +1,62 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r6_capacity_ledger_transport",
+   "params": {
+    "d": 176,
+    "layers": 4,
+    "heads": 4,
+    "key_d": 64,
+    "addr_hidden": 192,
+    "gate_hidden": 96,
+    "tr_hidden": 192,
+    "tr_gscale": 0.5,
+    "ffn_mult": 2,
+    "dropout": 0.1,
+    "link_temp": 0.25,
+    "recency_init": -1.0,
+    "avail_eps": 0.0001,
+    "presence_scale": 0.5,
+    "presence_margin": 1.0,
+    "take_bias": 1.0,
+    "write_bias": 1.0,
+    "consume_bias": 0.0,
+    "read_gate_bias": -0.5,
+    "readout_init": 0.5,
+    "dst_init_noise": 0.02,
+    "tr_mix_bias": -2.0,
+    "tr_out_std": 0.01
+   }
+  },
+  "batcher": {
+   "impl": "r20_depthtilted_sysblock_curriculum",
+   "params": {
+    "depth_base": 1.0,
+    "depth_pow": 2.0,
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "head": {
+   "impl": "r4_chainlink_route_transport",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r22_exact_target_equivalence_quotient",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "within_sequence_contrast_equalizer",
+   "params": {}
+  }
+ }
+}

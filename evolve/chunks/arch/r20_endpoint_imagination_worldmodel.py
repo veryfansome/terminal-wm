@@ -455,8 +455,6 @@ class R20EndpointImaginationWorldModel(nn.Module):
         pred_cmd = pred_cmd + tr_contrib.to(dtype)
         pred_cmd = pred_cmd * (1.0 + g_sys) + b_sys
 
-        # Training and fitness streams are even-length with pairs both-valid or both-padded,
-        # so missing_pair is identically False and this override never runs on the scored path.
         if n_pair:
             missing_pair = valid_cmd[:, :n_pair] & ~valid_obs
             if bool(missing_pair.any()):

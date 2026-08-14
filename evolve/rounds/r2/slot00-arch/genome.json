@@ -1,0 +1,20 @@
+{
+  "chunks": {
+    "objective": {"impl": "r12_antiretrieval_ring_negatives"},
+    "arch": {
+      "impl": "r23_pointer_transport_memory",
+      "params": {
+        "tp_rms_cap": 1.0,
+        "tp_move_bias": -1.0,
+        "tp_write_bias": 1.0,
+        "tp_out_bias": -2.0
+      }
+    },
+    "optim": {"impl": "r18_spectral_capped_transition_readout"},
+    "batcher": {
+      "impl": "r6_sysblock_hardneg_curriculum",
+      "params": {"hard_frac_max": 0.75, "n_block_images": 1, "ramp_frac": 0.3}
+    },
+    "head": {"impl": "r18_transition_forwardmodel_consistency"}
+  }
+}

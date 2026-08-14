@@ -1,0 +1,88 @@
+AXES CHANGED: head only (r18_transition_forwardmodel_consistency -> r6_renamechain_transport_readout).
+Every other axis keeps the parent's impl and params verbatim. The mechanism needs no other axis:
+it introduces no parameters and does not touch the forward pass, the token stream or the target
+space; it only redirects where the parent's auxiliary gradient goes.
+
+WHAT THE PARENT DOES, AND THE DEFECT I AM TARGETING
+
+The parent mines, for each command k, the nearest EARLIER and nearest LATER command whose embedding
+is cosine-similar to it (same path), and requires the shared transition operator to satisfy
+f(obs_i, cmd_k) ~ obs_j. On this data a path-similar later command is very often another move in
+the same rename chain, and a move's observation is the BLANK render ("cwd=... exit=0\n" with empty
+output). The parent's change_floor filter does not remove those triples - it selects them, because a
+content observation and a blank observation are maximally different. So on exactly the chains the
+objective is about, the parent trains the transition operator to map a carried content to the blank
+observation of the next move. Whatever else it does, that supervision is anti-transport.
+
+I checked the mechanical premise against evolve/jail_data/train_sample.jsonl rather than assuming
+it: the training split contains the scored pattern verbatim. One ubuntu:latest trajectory exposes
+five contents with `cat`, then runs eight interleaved silent commands (six of them a single rename
+chain f643.tmp -> backup.job.2 -> f643.tmp.4 -> sshd_config.cfg.5 -> nginx.conf.6 -> nginx.conf.7 ->
+f643.tmp.8), then reads one location and returns the content the chain routed there. Move chains up
+to depth 6 occur; across 24 sampled trajectories there are 69 such (exposure, read-back) pairs,
+about 2.9 per sequence, half of them crossing three or more silent steps. Every one of the 69 is a
+genuine content transport (mv chains, or `cat A > B` copy-redirects, which are silent too).
+
+THE MECHANISM
+
+Supervise the arch's own latent-transition MEMORY READ at those read-back positions, end to end,
+instead of supervising the free-standing operator one step at a time.
+
+1. A transparent hook on net._transition_reads keeps the reads tensor the step's own forward already
+   produced (only when grad is enabled and the net is training; consumed and cleared by aux_loss).
+   No recomputation, gradient intact, forward untouched, and the eval path is bit-identical to the
+   parent's since nothing is stashed under no_grad / eval.
+2. Label-free mining from the batch alone: a step whose observation duplicates more than max_dup
+   others is a SILENT mutator (blank output), the rest are content steps. A pair (i, j), i < j, both
+   content, duplicate observations, NON-duplicate commands, with at least one silent step strictly
+   between, is a content that was silently re-addressed and read back at j. If a row has no silent
+   step, nothing is mined at all.
+3. At each such j the memory read s_pre is trained by a squared-L2 InfoNCE - the eval's own decision
+   variable - to pick the transported content out of the row's earlier content observations (the
+   other exposed contents are the negatives, which is exactly the discrimination the metric scores),
+   plus a cosine alignment term. Blank observations are never a target and never a candidate.
+4. Examples are weighted 1 + depth_gain * (silent steps crossed - 1), so the deep chains the
+   eligible windows are made of dominate the gradient instead of being outvoted by one-hop pairs.
+
+WHY THIS SHOULD MOVE comp_ca AND NOT A SHORTCUT
+
+In this arch the transition memory has ONE key per command, tr_path(x_cmd), used both to read and to
+write, so a content can only travel by key OVERLAP: `mv A B` reads at a key partly overlapping
+`cat A`'s and writes at a key partly overlapping `cat B`'s, and the shared operator f(s,cmd) =
+s*(1+gamma)+beta has to act as the cleanup that restores the attenuated read before it is written on.
+That balance - how much of the key mass sits on the source versus the destination, and how much gain
+f applies per hop - is a single trade-off across the whole chain, and no one-step target can state
+it: pin the key to the destination and the first hop reads nothing, pin it to the source and the
+last read finds nothing. Only a loss on the FINAL read after the whole chain can price both ends at
+once, which is what this aux is. The supervision is content identity verified by a duplicate
+observation, not position: nothing in it rewards keying on which location is being asked about
+(that cancels exactly, per window) or on where in the move order a content sits (that cancels only
+in expectation, and is the band the run reports beside the score).
+
+Reachability: no new parameters exist to be stranded. The gradient lands on tr_path, tr_mut_gate,
+tr_in/tr_out, logit_decay and the shared cmd_proj/in_norm - verified by a backward pass on a real
+r19 instance, all non-zero - and every one of them shapes tr_contrib, which is added to the
+prediction at command positions, including the final read position of the odd-length scored layout.
+
+WHAT I EXPECT TO SEE
+
+Native hit rate up on the deep (d4+) windows with swap-stayed flat or down, i.e. comp_ca above the
+parent's -0.0037, and the shortcut-leaning report no worse than the parent's. Health should be
+unchanged: the aux is a smoothstep ramp over 300 steps, is finite-guarded, returns a hard 0.0 when
+nothing is mined, and adds two [B,n,n] Gram matrices plus one small bmm per step - negligible beside
+the trunk, so the fixed step budget is unaffected. All performance claims here are UNMEASURED; I
+could not run the real harness from the jail. What I did verify mechanically: mining selects exactly
+the intended read-back positions and reports the right chain depth, returns nothing on rows with no
+transport, the stash is consumed once per step and is never populated at eval, odd-length forward
+still runs, and a 25-step mini-loop with the genome's real objective and optimizer stays finite.
+
+BIGGEST RISK
+
+If the frozen mean-pooled command embeddings do not let one linear key map carry enough overlap on
+both the source and the destination path of a move, no setting of the arch's parameters routes a
+content, and this aux will only push the read toward a soft average of the exposed contents - a
+small, possibly negative, drag on the main task with no compositional gain. The second risk is
+mining precision on real embeddings: the silent-step detector rests on blank observations being
+exact text duplicates (they are), but a false duplicate pair between two genuinely different
+observations would inject a wrong positive; the target is still a real observation the model must
+predict at that step, so the failure is dilution rather than corruption.

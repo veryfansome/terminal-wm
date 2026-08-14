@@ -1,0 +1,108 @@
+CANDIDATE: head = r5_chainhop_hindsight_transport   (only the head axis changes; arch / optim /
+objective / target / batcher / stream are the parent's, unchanged)
+
+WHAT THE TWO PROGRAMS EACH CONTRIBUTE
+
+Parent head (r2_dualaddress_move_transport): a dual-address delta-rule transport memory over the
+command stream — read at a source address, write a gated blend of that read and the step's
+observation at a destination address — supervised by an endpoint aux that mines, label-free from
+the batch alone, (exposure, re-read) pairs where a later observation duplicates an earlier one
+under a different command with content-free steps in between.
+
+Partner head (r18_transition_forwardmodel_consistency): the principle that a shared state-transition
+operator is trained not only by the end-to-end loss but by an explicit consistency requirement on
+mined triples — supervise the operator where it is applied, not only where its output is read.
+Partner arch (r22_observation_occlusion_denoising): the principle that the model must be able to
+predict from a prefix in which observations are missing, because that is the regime it is measured
+in.
+
+I keep the parent's transport memory and its label-free mining, and I take from the partner the
+two principles rather than its code: per-application supervision of the shared operator, and
+independence from the presence of an observation at the position being read.
+
+THREE THINGS THIS CODE COMPUTES THAT NEITHER PROGRAM COMPUTES
+
+1. A read at EVERY command position, including a trailing command with no following observation.
+   The parent's rollout is `n = L // 2` and it reads/injects only at `tok[:, 0::2][:, :n]`. For an
+   even-length token stream that is all command positions. For an ODD-length stream — a stream that
+   ends at a command whose observation is not there — `L // 2` is one short, so the LAST command
+   position gets no memory read and no injected contribution at all: the mechanism is switched off
+   exactly at a position whose observation is absent. My rollout uses n_cmd = (L + 1) // 2, zero-pads
+   the observation row to n_cmd, and marks the trailing step's write inactive (active = valid_cmd &
+   valid_obs, and valid_obs is False past the last observation), so the read exists at every command
+   while no write is invented from an observation that is not there. The read at position i is taken
+   from the memory strictly BEFORE position i's own write (`r_i = ks_i @ mem` precedes the baddbmm),
+   so the value injected at a position is bit-identical whether or not the stream is truncated after
+   that command, and identical whether or not that command's observation is present. If the scoring
+   instrument passes whole sequences, this changes nothing there and costs nothing; if it passes a
+   prefix ending at the scored command, this is the difference between the head contributing its
+   routed content at the scored position and contributing nothing.
+
+2. Per-hop hindsight supervision of the transport (the main new signal). The parent's aux is an
+   endpoint constraint: at the re-read step j, the memory read must retrieve the content exposed at
+   step i. Everything in between is credited only through the product of many soft address matches.
+   I add a multiple-instance term. From the same label-free mining I take the content-free steps k
+   with i < k < j (content-free = a step whose observation embedding sits in a large near-duplicate
+   cluster, which is what the render of a mutating command with empty output produces), and for each
+   such k I compute the value the store now holds AT THAT STEP'S OWN DESTINATION ADDRESS, exactly
+   `kd_k @ mem_after_k`, obtained in closed form as `cur_d + w_k - (kd_k . ks_k) * e_k` at no extra
+   matmul. Each such value is scored by the same squared-L2 InfoNCE over the observations seen so far,
+   giving a per-hop log-probability that step k's destination holds the exposed content; a detached
+   softmax over hops selects the best-scoring hops and only they are trained. This says: on the way
+   from the exposure to the re-read, there must EXIST a mutating step after which the exposed content
+   sits at that step's destination. Off-chain mutating steps (a different window's moves, interleaved
+   in the same trajectory — which the training data really does contain) score badly and are simply
+   not selected, so the term needs no knowledge of which moves belong to which chain. This is the
+   partner's forward-model-consistency idea moved from a hand-built operator call onto the transport
+   itself, in hindsight form: instead of asking f(obs_pre, cmd) to reproduce a future observation, it
+   asks the store to already hold the right content at the right address at each intermediate hop.
+   The measured quantity is "which content is at this location after the chain"; this term supervises
+   exactly that at every hop instead of only at the end.
+
+3. Role separation of the two addresses, and an erase at the source. cos(ks, kd) is driven toward 1
+   on contentful steps and below a margin on content-free steps, using the same duplicate-cluster
+   classification. A single-path command (`cat X`) should read and write one address, so its content
+   is found there later; a two-path command (`mv A B`, `cat A > B`) must not. Without this, nothing
+   stops the two extractors from collapsing onto one function of the whole command string, which
+   turns the transport into a per-command lookup and makes the memory contribute identically under
+   the native and the role-swapped chain — a per-window difference of zero. Alongside it, a move-gated
+   erase subtracts the read value at the source address (mem += kd^T w - ks^T e, one stacked baddbmm),
+   so a move relocates content instead of leaving a copy behind at the old path, which is what makes
+   a later read of a vacated path not return stale content.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+
+The score is native_hit minus swap_stayed on the same board with the same destinations and the same
+depth, differing only in which content each move command carries. Anything that keys on the location
+being read, or on the set of destinations, cancels. Only a mechanism that reads the actual move
+commands and routes a particular content through them can be positive. The transport memory is such a
+mechanism; the parent's version is trained only at the two ends of the chain and (if the instrument
+truncates) is silent at the scored position. Item 1 makes it speak where it is judged, item 2 gives
+every hop of the chain its own gradient instead of one endpoint gradient diffused through a product
+of soft matches, and item 3 removes the collapse under which the transport degenerates into a
+name lookup that cancels by construction.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- If the scoring instrument always passes even-length streams, item 1 buys nothing (it costs nothing
+  either) and the candidate rests on items 2 and 3.
+- The duplicate-cluster classification is the load-bearing assumption of items 2 and 3. It assumes a
+  mutating command's rendered observation is a near-duplicate of every other mutating command's in
+  the same trajectory (empty output, same cwd, same exit) and that a contentful step's is nearly
+  unique. That is what the training sample shows, but it is a property of the render, and dup_frac /
+  cmd_dup_frac / max_dup are thresholds relative to a per-row mean distance; a trajectory whose
+  contentful observations are themselves near-duplicates would mislabel steps, and then the role term
+  pushes the wrong way on the wrong steps.
+- The MIL term is a bootstrap: early in training the selected hop is whichever one happens to score
+  best, and if that selection is systematically wrong it reinforces a wrong address geometry rather
+  than a right one. It is ramped over 300 steps and weighted 0.6 against the endpoint term's 1.0 to
+  keep the endpoint constraint dominant, but it could still slow convergence inside the fixed step
+  budget instead of helping.
+- Both role targets assume src/dst extraction from ONE mean-pooled sentence embedding of the whole
+  command is possible at all. If the frozen encoder's pooled vector genuinely does not separate the
+  first path from the second, the separation term can only push the two keys apart arbitrarily, which
+  adds noise to the memory rather than structure — and then all three items are neutral to harmful.
+- I could not run anything: there is no torch in this jail, so every claim above is about what the
+  code computes, not about a measurement. Cost is the parent's plus one extra rank-1 term folded into
+  the same baddbmm and one [E2, H, n] score block per step; the memory footprint of the rollout is
+  the parent's (key_d unchanged at 48, one new memory tensor per step, not two).

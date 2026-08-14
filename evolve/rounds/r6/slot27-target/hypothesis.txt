@@ -1,0 +1,109 @@
+AXES CHANGED: target only (identity impl name swapped from zca_shrunk_target_whitening to
+confusable_pair_scatter_metric). objective / arch / optim / batcher / stream / head are the
+parent's impls and params verbatim. This is a targeted edit: one mechanism replaced, in the one
+axis my slot owns, so the measurement attributes cleanly.
+
+MECHANISM
+
+The parent re-metrizes the target space with the MARGINAL second moment of the next-observation
+targets, raised to a NEGATIVE power (ZCA whitening, p = 0.75). I replace the matrix it is built
+from and I flip the sign of the exponent. My forward map is built from the CONFUSABLE-PAIR
+SCATTER: each step I subsample <=256 of the batch's standardized targets, form all pairwise
+squared distances, discard any pair closer than 2% of the mean pairwise distance (the repeated
+identical observation - the same `uname`, the same empty output, the same listing seen again -
+which is a false pair and would only dilute the estimate), and take each row's 4 closest
+surviving partners. The second moment B of those difference vectors is an EMA buffer. Every 50
+steps after warmup, B is symmetrized, trace-normalized to unit mean diagonal, shrunk 5% toward
+the identity and eigendecomposed on CPU in float64. The forward map is the symmetric power
+B^(q/2), q = 1, with eigen-gains divided by their geometric mean and clamped to [0.4, 2.5]; the
+inverse map is the same eigenbasis with reciprocal gains, so the pair is an exact algebraic
+inverse rather than a numerical one (measured round-trip error 1.2e-7 in float64, 5.8e-7 through
+the float32 buffers). The whole map is finally rescaled so trace(F S F^T)/D = 1 under the running
+marginal second moment S, which keeps the transformed targets at unit average per-dimension
+variance and therefore leaves the objective's absolute distance constants (_TEMP, _MARGIN,
+_DELTA, the ring bandwidth) in the range they were tuned for.
+
+WHY A POSITIVE POWER, AND WHY THIS MATRIX
+
+The retrieval decision is flipped only by prediction error along the direction in which two
+candidate observations actually differ. With pred = z_true + e and d = z_foil - z_true, the foil
+wins exactly when <d,e> > ||d||^2/2, so the risk's derivative with respect to the error variance
+in direction j is proportional to s_j^2, the variance of candidate differences in that direction.
+Error is therefore worth buying down IN PROPORTION TO the candidate-difference variance, which
+means a metric weight w_j proportional to s_j^2, i.e. a forward gain f_j proportional to s_j: the
+POSITIVE square root of the candidate-difference scatter. B is a sample of exactly that scatter,
+because the nearest non-duplicate neighbour of an observation in this embedding space is another
+observation of the same shape - another `ls` listing, another `cat` of a similar file - which is
+what the same-verb foil pool is made of.
+
+This predicts the opposite tilt from the parent on one group of directions and the same tilt on
+another, which is why it is not a sign flip of the parent. Directions that every candidate in a
+window shares - the rendered `cwd=` prefix, the exit line, the verb's formatting signature - carry
+large MARGINAL variance but near-zero pair scatter, so the parent suppresses them (large marginal
+eigenvalue, negative power) and so do I (small pair eigenvalue, positive power). Directions of
+per-observation jitter carry small marginal variance and small pair scatter, so the parent
+AMPLIFIES them and I suppress them. Directions in which confusable listings genuinely differ from
+each other carry moderate marginal variance and the largest pair scatter, so the parent suppresses
+them relative to the jitter and I amplify them. My reading of why the parent's whitening earned
+anything over identity is that it broke the domination of the between-verb directions, not that
+inverse-marginal is the right metric; if that reading is right, the pair scatter breaks the same
+domination and additionally puts the emphasis where the differential is decided.
+
+WHY THIS SHOULD MOVE comp_ca SPECIFICALLY
+
+The transform cannot change the Bayes-optimal predictor - a target reparametrization that is
+exactly inverted is a no-op at infinite capacity. It acts entirely through CAPACITY ALLOCATION,
+and this arch has a hard bottleneck to allocate: 768-d embeddings are projected to d=192, and the
+readout must reconstruct 768 dimensions from that rank. Which 192-dimensional subspace the readout
+buys is decided by which directions dominate the loss. Under the identity target that subspace is
+the top principal subspace of the observation distribution, which is rendering format and verb
+identity - shared by every candidate in a cups window and therefore contributing exactly nothing
+to native_hit - swap_stayed. Under my map the readout's rank is bid for by the directions along
+which confusable observations differ, which is where a content's identity lives. The interaction
+with the parent's objective is intended: r12 computes its confusability ring from TARGET-TARGET
+distances, so in the new metric the ring's near/far band is measured in content-separating
+coordinates rather than format coordinates, and the ring should select genuinely confusable
+negatives more sharply.
+
+WHAT I EXPECT TO SEE (all unmeasured on the real harness - I cannot run it from the jail)
+
+comp_ca above the parent's +0.0037, driven by native_hit rising while swap_stayed does not: the
+mechanism carries no information about which command is being read and is one global matrix
+applied identically to every window, every step and both arms, so a location-keying predictor
+still cancels exactly per window and nothing here can manufacture a chain-position shortcut. I
+expect the absolute pick rate against the analytic ceiling to move in the same direction, since
+the mechanism is about resolving candidates rather than about the differential. If instead the
+parent's gain really did come from inverse-marginal weighting per se, this loses to it and the
+round learns that, which is the clean falsification.
+
+RISKS, HONESTLY
+
+(1) The dominant failure mode is that the nearest non-duplicate neighbour of an observation is not
+a different content but the SAME content rendered from a different cwd, so the top of B is the
+`cwd=` prefix direction and I amplify a location cue instead of a content cue. That would raise
+native_hit and swap_stayed together and leave the differential flat.
+(2) The dup filter is a relative threshold (2% of the mean pairwise distance); if the embedding
+geometry makes genuinely distinct observations sit inside that radius, real pairs are discarded
+and B narrows onto whatever is left.
+(3) The positive power is the opposite direction from the parent on the jitter directions, so if
+the parent's whitening was load-bearing for reasons other than the one I argue, this regresses.
+Bounded by construction: the gain clamp caps the map's condition number at ~6.2 and the 5%
+identity shrinkage floors the tail, so on power-law spectra with exponents 0.5 to 2.0 the gains
+stay inside [0.65, 2.5] and only 1-7% of directions hit a clamp - the transform can tilt the
+metric but cannot degenerate it.
+
+COST AND SAFETY
+
+Measured at real shapes on CPU: 3.8 ms per training step for the two EMA updates plus the
+pairwise-distance pass at [1920, 768], and 43 ms per rebuild every 50 steps, so under 5 ms per
+step amortized - negligible against a transformer step, and the fixed step budget is unaffected.
+Every rebuild is guarded: non-finite input never reaches a buffer, a failed eigendecomposition or
+a round-trip error above 1e-5 leaves the previous maps in place, and both maps are the identity
+until warmup. The module introduces NO learnable parameters (five buffers, zero parameters), so
+there is nothing that could sit outside the gradient path or off the scored branch; it does no
+sequence indexing at all - it sees only the flattened [n, 768] rows the harness masks out - so
+odd-length layouts and the absent final observation are structurally irrelevant to it. Verified by
+direct execution: exact inverse round trip, unit target variance, correct behaviour on
+duplicate-heavy batches, on an all-identical batch, on batches of 1/2/3/7/9/17 rows, on NaN input,
+in eval mode, under no_grad, on 3-D input, on a wrong trailing dimension, and through a
+state_dict round trip.

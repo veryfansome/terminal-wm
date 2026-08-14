@@ -1,0 +1,38 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r25_role_addressed_transport_store",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r20_depthtilted_sysblock_curriculum",
+   "params": {
+    "depth_base": 1.0,
+    "depth_pow": 2.0,
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r22_exact_target_equivalence_quotient",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "r6_gls_rotated_frame",
+   "params": {}
+  }
+ }
+}

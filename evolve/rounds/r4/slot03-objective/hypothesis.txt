@@ -1,0 +1,214 @@
+CANDIDATE: objective = r4_relocation_address_ring_quotient
+AXES CHANGED: objective only. arch / optim / target / batcher / stream / head are inherited from the parent unchanged.
+
+================================================================================
+1. WHAT THE DATA SAYS, AND WHY BOTH PARENTS LEAVE THE SCORED ROWS UNTRAINED
+================================================================================
+
+Read off evolve/jail_data/train_sample.jsonl (24 trajectories, 724 steps), not inferred:
+
+  a. A mutating command's observation is `cwd=<cwd> exit=0\n` with an EMPTY output. Every `mv`,
+     every `cat X > Y` / `cat X >> Y` renders to the same string. In the 724-step sample, one
+     observation class (`cwd=/ exit=0` + empty) holds 227 rows and a second (`cwd=/data exit=0`)
+     holds 35. The move steps therefore carry a target that is a constant vector shared by
+     hundreds of rows: there is no per-row information in what a move is trained to predict.
+
+  b. The read step that closes a chain (`role: cups_test`, `role: cvar_test`) has an observation
+     that is BYTE-IDENTICAL to the observation of the earlier step that exposed that content
+     (`cups_expose` / `cvar_expose`) in the same trajectory, while its command is a DIFFERENT
+     command, because the content now sits at a different path. In the sample this pattern holds
+     for all 24 cups_test rows and 37 cvar_test rows.
+
+  c. The decoy is lexical. In the sample window the routed content ends at
+     /tmp/w/cups/usr/share/misc/magic.txt.1 while the name-partner content sits at
+     /tmp/w/cups/usr/share/misc/magic.txt. The destination path is built to look like another
+     board member's path. A model that answers a read by matching the path it was asked about
+     against the paths it has seen returns the name-partner, which is exactly the analytic
+     non-tracker that comp_ca cancels to zero.
+
+Both parents form negatives from OBSERVATION geometry over the whole flattened batch (~1900 rows
+from 64 trajectories) and have no notion of a trajectory at all. Worse, both quotient exact
+duplicates into one multi-positive class and divide row mass by class size; the closing-read row
+is an exact duplicate of its own expose row, so it enters the loss at weight 1/2 and its decisive
+competitor -- the same board's name-partner content, one specific row out of ~1900 -- is treated
+as one negative among a thousand, its hardness decided by how far its observation happens to sit
+from the anchor's. The rows the eval actually scores are ~9% of the batch and are trained as if
+they were ordinary rows.
+
+================================================================================
+2. WHAT THE NEW MECHANISM COMPUTES THAT NEITHER PARENT COMPUTES
+================================================================================
+
+Two new quantities, both derived inside loss() from (pred, tgt, ctx) alone, both training-time
+only. Nothing is added to the model's input, at training time or at scoring time; the loss does
+not exist at scoring time.
+
+(A) RELOCATION ROWS -- a per-row boolean, found from the batch with no metadata.
+
+    Trajectory boundaries: ctx["prev"] is the strict-causal previous observation and the harness
+    builds it as cat([zeros, tgt[:, :-1]]), so it is EXACTLY the zero vector at, and only at, a
+    trajectory's first step (a standardized observation equals the zero vector only if it equals
+    the split mean). `_segments` turns `prev.abs().amax(1) == 0` into segment ids by cumsum, and
+    returns None (disabling every new term) unless the first row is a start and there are >= 2
+    segments.
+
+    Exact duplication: `_sketch_equal` projects onto a fixed 8-column cosine basis and computes
+    pairwise distances by DIRECT subtraction, never by the a^2+b^2-2ab expansion, so identical
+    rows give exactly 0.0 with no cancellation error and no dependence on whether the backend
+    runs matmuls in TF32. That is conjoined with a loose full-space distance check, because a
+    difference vector lying in the sketch's null space would fool the sketch alone (measured: a
+    constructed null-space difference fools the sketch 200/200 times and the conjunction 0/200).
+    Measured resolution of the pair: distinct vectors are kept distinct down to a relative
+    squared distance of ~5e-5 of the batch mean, which is already below the float32 floor of the
+    full-space matrix itself.
+
+    A row r is a RELOCATION ROW iff there is an earlier row e in the SAME segment with
+    tgt_e == tgt_r exactly and cmd_e != cmd_r exactly, and the target's batch-wide duplicate
+    class has at most _MAX_CLASS = 8 members. The class cap is what removes fact (a): the silent
+    no-output observation shared by every mutating command forms a class of hundreds and is
+    excluded, as are repeated system readouts. The command-inequality clause removes pure
+    repetition (the same `cat` issued twice), keeping only "same content, different address".
+
+    Measured on the sample, with the class cap at 4..12 the detector fires on 64 of 724 rows and
+    those rows are 37 cvar_test + 24 cups_test + 3 strays. It selects the chain-closing reads --
+    the training-split analogue of the scored position -- and essentially nothing else.
+
+(B) THE ADDRESS RING -- a negative distribution over a relocation row's own trajectory, ranked by
+    COMMAND similarity rather than observation similarity.
+
+    For each row, the candidate set is the other content-bearing rows of its own segment whose
+    target is in a different equivalence class. Over that set the loss puts a softmax on the
+    cosine similarity between the row's command embedding and each candidate's command embedding
+    (temperature _ADDR_TAU = 0.05). The candidate whose ADDRESS most resembles the address being
+    read carries the most negative mass; that is the name-partner of fact (c). Restricting
+    candidates to small duplicate classes matters here too: in the sample the single most
+    command-similar row is a `mv` step 6 times in 24 (its command literally contains the
+    destination path), and excluding the giant empty-observation class removes all 6, after
+    which 22 of 24 nearest candidates are a same-board `cups_expose` content.
+
+    This is a genuinely different hardness principle from anything in either parent. The parent
+    ring is exp(-d(t_i,t_j)/lambda): "which other OBSERVATION looks like this one". The address
+    ring is softmax(cos(c_i,c_j)/tau) inside one trajectory: "which other content would a model
+    that answers by NAME hand back here". Selection by address geometry appears in neither
+    program.
+
+The address ring then drives two terms, both in the EVAL'S OWN decision variable -- plain
+unweighted mean squared distance, which is what realenv._rank_stats ranks candidates by:
+
+    - a within-trajectory listwise softmax whose denominator is the row's own trajectory
+      (positives = its exact-duplicate class inside the segment, negatives = the candidate set
+      with log-importance log(1 + kappa * ring)), focal-weighted;
+    - a margin hinge softplus((d(pred_r, tgt_r) + margin - E_ring[d(pred_r, tgt_j)]) / tau),
+      i.e. the routed content must beat the address-ring-weighted competitor by a margin.
+
+Relocation rows are additionally boosted by (1 + 3 * reloc) in the batch-wide head's row weight,
+undoing the 1/class_size down-weighting that currently taxes exactly these rows.
+
+================================================================================
+3. WHAT THIS IS A CROSSOVER OF
+================================================================================
+
+On the objective axis the parent (r3_fwl_orthogonalized_ring_contrast) is a strict descendant of
+the partner's objective (r12_antiretrieval_ring_negatives), so "keep the best of each" is not a
+choice between them but a choice about GEOMETRY, and that is where they actually disagree.
+
+  Kept from the parent: the cross-fit detached ridge nuisance map from the causal command
+  embedding to the target, subtracted from the prediction and from every candidate before
+  distances are formed, so a batch-wide negative is hard exactly to the extent that its
+  observation difference is NOT explained by its command difference; the precision weighting; the
+  exact-target quotient with inverse-class mass; the focal listwise form; the scale-free
+  temperature/ring/margin fractions. Also kept: r23_dual_address_transport_pointer, whose
+  per-command source/destination address heads and transport-and-erase memory are precisely the
+  machinery the new terms supervise -- today those gates receive gradient only through a diffuse
+  batch-wide loss in which no row asks "did the right content arrive here".
+
+  Kept from the partner: r12's insistence that the ring and the repulsion hinge live in the raw
+  squared-L2 the eval decides in. The parent moved every geometry into the precision-weighted,
+  command-orthogonalized residual space and left only a scalar MSE anchor outside it. This
+  candidate runs the two geometries side by side: residual, orthogonalized space for choosing and
+  weighting batch-wide negatives, raw unweighted space for the decision the eval makes. The
+  partner's arch (r22_retrieval_composition_renderer) contributes its principle -- that retrieved
+  PREFIX CONTENTS should be made to compete with one another -- realized at the loss level as the
+  within-trajectory candidate set, rather than by swapping the arch lineage.
+
+================================================================================
+4. WHY THIS SHOULD MOVE comp_ca, NOT JUST THE ABSOLUTE PICK RATE
+================================================================================
+
+comp_ca = native_hit - swap_stayed per window. The swapped arm re-encodes the move commands so a
+different content is routed to the read location, holding the board, the destinations, the depth
+and the read command fixed. A model that keys on the read location predicts identically in both
+arms and scores exactly zero. The only way to earn a positive is for the model's answer at the
+read to be a function of which content the move chain actually carried there.
+
+The margin hinge is a direct penalty on the swapped-arm behaviour: it says the prediction at a
+relocation row must be closer to the content that actually arrived than to the content whose
+ADDRESS the read most resembles, by a margin, in the eval's own metric. Answering by name is the
+single behaviour it punishes. The within-trajectory listwise term makes the same demand against
+the whole board rather than one competitor, and the row boost buys the compositional rows roughly
+6x the gradient share they get today (3x boost against a 1/2 class-size discount). Because the
+supervision lives entirely in the loss, the model has to find the routing in its own inputs -- the
+move commands it read earlier in the sequence -- since nothing about the routing is ever placed in
+its input and no such term exists at scoring time.
+
+The size of the effect should be large rather than marginal because the reallocation is large:
+~9% of rows go from being treated as ordinary duplicated reads to carrying a dedicated, correctly
+shaped objective, and their decisive negative goes from being 1 of ~1900 undifferentiated
+in-batch negatives to carrying most of the negative mass.
+
+================================================================================
+5. WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+================================================================================
+
+  - If two distinct contents in one trajectory encode to embeddings closer than ~1e-6 of the
+    batch mean squared distance, they are pooled as one class and both the positives and the
+    address ring degrade. Measured on synthetic pairs the detector separates down to ~5e-5
+    relative, which is already at the full-space float32 floor, so this would require the encoder
+    to be genuinely blind to the difference -- in which case the eval cannot score the window
+    either.
+
+  - If the batcher draws the same trajectory more than four times in one batch, a canary's
+    duplicate class exceeds _MAX_CLASS = 8 and its rows silently drop out of the relocation set.
+    With 64 draws from the full split this is rare; the failure mode is a quiet loss of signal,
+    not a wrong signal.
+
+  - If the frozen sentence encoder's command embeddings do not rank the name-partner's command
+    above the other board members' commands, the address ring spreads its mass over the board
+    instead of concentrating on the decoy. The term then degenerates to a plain within-trajectory
+    N-way contrastive -- still aligned with the eval's forced-foil decision, but with less of the
+    anti-name-keying pressure that comp_ca specifically rewards. On raw string similarity the
+    name-partner is the top candidate in 8 of 24 sample windows and a same-board content in 22 of
+    24; the ring is soft precisely so the remaining mass is not wasted.
+
+  - If the compositional rows are so few that the extra terms mostly add variance, the boost and
+    the two lambdas (0.5 listwise, 0.25 hinge) could be net negative. They are deliberately
+    smaller than the batch-wide head's weight of 1.0.
+
+  - If a future stream reorders rows so that flattening is no longer trajectory-contiguous, or
+    makes ctx["prev"] nonzero at a trajectory's first step, `_segments` returns None and every
+    new term switches off, leaving a parent-equivalent loss. The genome pins baseline_interleave,
+    for which the harness builds prev as the strict-causal shift and the flatten is
+    sequence-major.
+
+  - Note on the scored position: the mechanism is NOT gated on an observation being present at
+    the row it acts on. It is a training-time-only selector over the training batch's targets; at
+    scoring time the withheld observation is exactly what the model must produce, and the loss
+    plays no part.
+
+================================================================================
+6. COST AND SAFETY
+================================================================================
+
+Anti-collapse: the untouched raw squared-error anchor is retained at weight 0.05. Measured on a
+1920-row synthetic batch, a constant zero prediction scores 5.01 and a constant mean prediction
+5.04 against 0.093 for a near-perfect prediction; gradients are finite.
+
+Cost: the added work is two 8-column sketch passes, one n x n command-cosine matmul and boolean
+mask algebra -- all the same order as matrices the parent already forms. Measured on CPU at
+n = 1920, the loss forward+backward is 0.105 s against the parent's 0.067 s. This is loss-side
+only and unmeasured as a share of a real training step on the GPU lane, where the transformer
+forward/backward dominates and these ops are bandwidth-trivial; it is stated as unmeasured
+because I cannot run the real harness.
+
+Fallbacks: ctx missing, cmd missing, prev missing, fewer than two segments, or zero relocation
+rows each return the parent-shaped loss without any new term. n < 2 returns the raw MSE.

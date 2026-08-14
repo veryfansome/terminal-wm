@@ -1,0 +1,138 @@
+CANDIDATE: batcher r5_matched_cmdreplicate_routeblocks
+           + target zca_shrunk_target_whitening (taken from the crossover partner)
+           carried over: objective r3_fwl_orthogonalized_ring_contrast, arch
+           r23_dual_address_transport_pointer, optim r18_spectral_capped_transition_readout,
+           stream r4_pathslot_dualaddress_code, head r18_transition_forwardmodel_consistency.
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+
+The two programs differ on five axes, and on two of them one side strictly contains the other,
+so "best of each" is decided by inspection rather than taste:
+
+  - objective: r3_fwl is r12 plus the FWL cross-fit command-orthogonalization, exact-duplicate
+    class pooling and batch-relative temperature/ring/margin scales. r12's ring negatives are
+    present inside r3_fwl. Keep r3_fwl.
+  - arch: r23 is a subclass of r22 (`class R23DualAddressTransportPointer(R22PrefixContentXAttention)`),
+    so the partner's prefix-content cross-attention is already running inside the parent's arch,
+    with the dual-address transport memory and the pointer-copy readout added on top. Keep r23.
+  - stream: both are dual-address path codings. r4 writes a dense 96-dim Rademacher code per
+    path into fixed slots, so two equal paths give bit-equal 96-dim subvectors and unequal paths
+    give near-orthogonal ones; that exact equality is what the r23 address heads consume. Keep r4.
+  - head: r2_dualaddress_move_transport builds a SECOND dual-address transport memory on top of
+    an arch that already owns one, and the partner runs it with pred_weight 0.0, so its aux only
+    shapes its own duplicate module. r18's head trains the arch's own transition operator. Keep r18.
+  - target: identity vs zca_shrunk_target_whitening. This is the one axis where the partner
+    contributes a mechanism the parent has nothing equivalent to, and it is taken (see below).
+
+WHAT THE NEW BATCHER COMPUTES THAT NEITHER PARENT COMPUTES
+
+Both programs run the same batcher. It composes hard blocks two ways: whole system images, and
+"read-collision neighbourhoods" built by JL-projecting the command embedding at each sequence's
+single deepest routed read and taking near-duplicate neighbours above a cosine threshold. The
+new batcher keeps that batcher's mv-reachability parse and its Boltzmann depth tilt, and
+replaces the embedding-neighbourhood block with a matched replicate group built on EXACT command
+strings across the whole trajectory, not on cosine similarity at one step:
+
+  1. `_index_split` walks every training sequence, parses its `mv SRC DST` edges, computes the
+     hop count of the deepest read reachable backwards through those edges (`_route_depth`, the
+     parent's algorithm, kept verbatim in effect), records the set of paths any mv touches, and
+     adds each distinct command string of that sequence to an inverted index
+     command-string -> [(sequence, first step, mv-touched flag)].
+  2. A command string becomes an ANCHOR only if it occurs in at least `min_occ` sequences AND in
+     no more than `max_rate` of the split AND at least `distinct_min` of the ordered pairs of the
+     observations recorded at that command are separated by more than `distinct_tau` times the
+     split's mean pairwise observation distance, all measured in one fixed Gaussian projection
+     (`_anchor_stats`, `_reference_scale`).
+  3. A block is `m` sequences drawn from one anchor's pool WITHOUT replacement under the depth
+     tilt, so the block is `m` DISTINCT sequences that all issue that exact command string.
+
+Three properties follow that no parent batcher has:
+
+  (a) The command tokens are bit-equal across the block. Under stream r4 the coded command token
+      is a pure function of the command string, so `m` rows of the loss carry an identical input
+      at the scored position type while carrying different targets. Their prediction can differ
+      only through the prefix.
+  (b) The targets are guaranteed different. The distinctness filter is what makes this true and
+      it is the reason the filter is on observations rather than on commands: it removes the
+      commands whose observation is constant (every `mv`, whose observation is a bare
+      `cwd=... exit=0` with empty output, and every `cat X >> ACC`), and at `distinct_min` 0.85
+      it also removes commands whose answer is a function of the IMAGE only (`ls -1 /` has one
+      answer per image, so its distinct-pair fraction is about 1 - sum p_img^2), which would put
+      pressure on system identity rather than content identity.
+  (c) `max_rate` makes the block a real concentration. A block of m sequences all containing a
+      command whose base rate is p supplies about C(m,2) same-command pairs where uniform
+      sampling of B rows supplies about C(Bp,2); at bs 64, m 24 and max_rate 0.05 the block is a
+      multiple-of-five gain, and anchors so common that blocking would add nothing are excluded
+      by construction rather than by tuning.
+
+Anchor mass is `distinct_pair_fraction * (1 + route_bonus * fraction of members where the
+anchor's own path is touched by an mv in that member)`, times the annealed Boltzmann tilt on the
+pool's mean route depth. On the real training sample the route-touched anchors are exactly the
+cups exposure reads (`cat /tmp/w/cups/etc/cron.d/backup.job`, route fraction 0.67;
+`cat /tmp/w/cups/var/spool/mail/root.msg`, 1.00), i.e. the contents that a chain of moves later
+relocates, so the replicate pressure lands on the arm the objective measures.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca is native_hit minus swap_stayed. A model that answers a read from the read command alone
+predicts identically in both arms and contributes exactly zero; only a model whose answer depends
+on what the prefix routed to that location can score. The training loss the parent uses already
+tries to force that: r3_fwl cross-fits a ridge map from the command embedding to the target on
+the opposite parity half of the batch and subtracts rho times the fitted value from the
+prediction and from every candidate, so a negative is hard exactly to the extent the target
+difference is NOT explained by the command difference. That orthogonalization is only identified
+if the batch contains variation in the target AT FIXED COMMAND. Under uniform or image-blocked
+sampling a given command string appears about once per batch, the 769-dimensional ridge basis can
+fit the per-row target nearly exactly, the residual it leaves is small and the negatives it
+manufactures are weak. The matched replicate block supplies precisely the missing design: with m
+rows sharing one command and differing only in what the prefix put there, the ridge is forced to
+the conditional mean of the target given the command, and the residual it leaves is the content
+identity itself. The listwise contrastive term is then run on residuals that no command-only
+predictor can reproduce. This is the classical matched design: match on the observable nuisance
+(the location being read) so the discrimination has to come from the channel of interest (which
+content is there).
+
+The partner's target module is taken for the same reason at the metric level. Two contents of the
+same file family differ only in a canary substring, so the observation embeddings differ in a
+low-variance direction of the target distribution, while the loss in raw observation space is
+dominated by the high-variance directions (which system, which verb, output length). ZCA
+whitening divides every direction of the target distribution by its own spread to the power p and
+reads back through the exact inverse, so the loss weighs the canary direction on a par with the
+bulk directions; the eval's decision variable stays squared L2 in the fixed observation space via
+`to_obs`. The batcher supplies the rows on which that direction is the ONLY thing that differs,
+and the whitened metric stops those rows' residual from being swamped. That pairing is the reason
+both changes are in one candidate rather than one of them alone.
+
+WHERE IT IS MEASURED
+
+The scored position is a read whose own observation is withheld. Nothing in this candidate runs
+at scoring time: the batcher is called only from `_train`, only with the training split, and it
+returns sequence indices. It never puts a resolved routing anywhere near the model's input — the
+mv parse chooses which SEQUENCES are trained on and with whom, and the model still has to learn
+the routing from the coded command stream. In particular the distinctness filter, the only part
+of the mechanism gated on observations being present, runs exclusively over cached training
+observations during setup and is never consulted at a scored position.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+  - If the eligible anchors on the real split are dominated by non-routed reads (the cvar
+    accumulate arm) rather than by the cups exposures, the replicate pressure trains content
+    identity in general but not identity carried through moves, and comp_ca may not move even if
+    the absolute pick rate does. The route bonus tilts against this but does not exclude them.
+  - If a command's base rate in the real split is well under 0.05 for almost every anchor, pools
+    may be smaller than the block size; the code then fills the remainder of the block uniformly,
+    so the mechanism degrades to a weaker version of itself instead of breaking, but the gain
+    shrinks.
+  - If reducing batch diversity matters more than the matched pairs are worth — 48 of 64 rows
+    come from at most two groups at full ramp — the generic contrastive signal weakens and the
+    net loses more than it gains. The uniform remainder and the anneal over the opening
+    `ramp_frac` of training bound this but do not remove it.
+  - If the ZCA map amplifies directions the frozen encoder fills with noise rather than with
+    canary identity, the whitened loss spends capacity on unpredictable directions and the
+    prediction degrades after the inverse map. The shrinkage toward the identity bounds the
+    amplification but does not guarantee the amplified directions are the informative ones.
+  - Setup cost: one pass over all command strings, plus one projection of at most
+    `max_anchors * occ_cap` cached observation rows in chunks of `chunk_rows`. This is bounded
+    work done once per (genome, seed) before step 1, but it is UNMEASURED here — there is no
+    torch in this jail and no run was made. Only the pure-Python index/parse path was exercised
+    against the real training sample; the tensor path is written to be correct by construction.

@@ -1,0 +1,127 @@
+CANDIDATE: arch = r25_role_addressed_transport_store
+CROSSOVER: parent r18_pathstate_latent_transition_worldmodel x partner r20_dualkey_contentgated_transition_worldmodel
+AXES CHANGED: arch (new impl), batcher (parent's r6_sysblock_hardneg_curriculum -> partner's r20_depthtilted_sysblock_curriculum).
+Objective, optim, target, stream and head are inherited unchanged from the parent.
+
+WHAT THE DATA SAYS, AND WHY BOTH PARENTS ARE STRUCTURALLY BLOCKED
+
+Checked against evolve/jail_data/train_sample.jsonl, not inferred from another impl. A cups window
+looks like: several `cat <path_i>` expose steps whose observation IS the content; then one or more
+`mv <src> <dst>` steps whose observation is EMPTY (the rendered observation is only
+"cwd=/ exit=0\n" — identical for every mv in the window, so the mv observation carries no
+information about what moved); then a `cat <final_loc>` test step whose observation is the answer.
+In the window I read, the test path was /tmp/w/cups/usr/share/misc/magic.txt.1 — a path CREATED by
+the mv. It was never catted before, so it has never been a key of any content-addressed memory in
+the window. Every retrieval channel that keys a store by "the command that read this location"
+(the parent's file memory, its path memory, its prev-obs channel) is empty at exactly the position
+that is scored. The only place the routing information exists is inside the mv command's own 768-d
+embedding, which mentions both the source and the destination path.
+
+Both programs I was given hold a memory whose slot is addressed by the CURRENT command and whose
+value is (a transition of) that command's own observation. The parent writes and reads one slot
+p(cmd) per step; the partner splits that into p_r(cmd) for the read and p_w(cmd) for the write.
+Neither ever moves a value from the address named by one argument of a command to the address
+named by a different argument of the same command: the partner's split key separates read from
+write for the SAME step's value, but the value it writes is still built from that step's own
+observation blended with what it just read, not gathered from a source address that a later
+command will name. So a chain of renames cannot compose in either model, and the content that
+ends up at the test path is not present anywhere in either model's state.
+
+WHAT I ADDED
+
+A role-addressed transport store, replacing the single-slot / split-slot transition memory while
+keeping every other part of the parent trunk.
+
+1. Addressing (new). One shared address trunk over the RAW command embedding:
+   base = addr_in(LayerNorm(cmd_raw)). Three roles are read out of that one trunk:
+   role r in {query, move-source, move-destination} gives
+   code_r = softmax( normalize_over_slots( addr_proj( gelu(base + role_bias[r]) *
+   sigmoid(role_gate[r]) ) ) / tau ), reshaped to addr_heads independent softmaxes over
+   addr_slots each. role_bias is a pre-activation shift and role_gate a diagonal gate, but the
+   OUTPUT projection addr_proj is shared by all three roles, which is what lets the address a
+   command produces as "destination" coincide with the address a later command produces as
+   "query". Addresses come only from the raw command embedding: no positional encoding and no
+   trunk hidden state enters an address, so content selection cannot key on where in the move
+   order a step sits.
+
+2. The store (new). mem [B, heads, slots, 768] holds values and mass [B, heads, slots] holds the
+   scalar write mass at the same addresses. A read at code c is
+   (c^T mem) / (c^T mass), i.e. a mass-normalized convex combination of the raw observation
+   embeddings written so far — the retrieved vector lives in the same space and at the same scale
+   as the prediction target. Heads are combined with weights den/(den+ref) renormalized, so a head
+   whose bucket is empty contributes nothing instead of contributing noise.
+
+3. The move (new, and the whole point). At step i, in this order: read at code_query (this is the
+   value the step emits), then read at code_source, pass that through the parent's SHARED latent
+   transition operator f(s,cmd)=s*(1+gamma)+beta, and write the result at code_DESTINATION. The
+   value deposited at the destination is whatever the source address currently holds, so a second
+   rename whose source is the first rename's destination gathers the transported value again.
+   Depth-3 and depth-4 chains compose by iterating one operator; nothing about the chain is
+   resolved in my code and handed to the model. I verified the recursion arithmetically outside
+   torch: with one-hot addresses, cat A -> mv A B -> mv B C -> mv C E -> cat E returns the content
+   of A to within the read epsilon.
+
+4. From the partner (kept). Its learned observation content-presence gate
+   a = sigmoid(scale*(||obs - proto||^2/D - margin) + mlp(obs_x, h_obs)), which is exactly the
+   detector this data needs because mv observations are contentless. It multiplies the store's
+   observation write (so an empty mv observation is not deposited as content at the mv's query
+   address), and, as in the partner, the file-memory write amount, the forgetting factor, the
+   system-summary salience and the previous-observation source. A second content gate on the
+   transport write is fed the retrieved source value's RMS and the source address's occupancy, so
+   a mv whose source address holds nothing does not scatter zeros into the destination.
+
+5. From the parent (kept). The whole r18 trunk, file/path delta-rule memories, FiLM view, system
+   summary, read_mix / fuse / direct paths, the shared transition operator and its
+   transition_from_emb entry point (so the inherited head aux still supervises the same operator),
+   and the injection point: the transport read enters the command-position prediction through the
+   inherited (D,D) tr_read under the inherited sigmoid gate. tr_read is re-initialised to
+   0.1 * Identity instead of zeros, so a correctly transported content already arrives as content
+   rather than having to be discovered from an exactly zero readout. 0.1 * Identity is far under
+   the optim's spectral cap of 4.0, so the co-designed cap still applies unchanged.
+
+Batcher: the partner's depth-tilted curriculum weights sequences by (1 + longest rename chain)^p.
+A mechanism whose only advantage is on chains of length >= 2 should be trained on batches that
+contain them, so this pairing is deliberate and not decoration.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+
+comp_ca is native_hit minus swap_stayed on the same board. Under the role swap, the board, the
+destinations, the depth and every non-move command are identical; only the move commands are
+re-encoded. My store's output at the test position is selected purely by an address computed from
+the test command's embedding, and what sits at that address is whatever the chain of gather/scatter
+operations put there — which is different content in the two arms. A predictor that keys on the
+name being read predicts the same thing in both arms and scores exactly zero. A predictor that
+keys on move-order position cannot be built out of my addresses, because no address sees position.
+So the channel this candidate adds contributes to comp_ca only when the transported identity is
+actually right, which is the quantity the search is supposed to be buying.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- The dominant risk is address alignment. addr_dst("mv A B") must land on the same soft bucket as
+  addr_query("cat B"), out of one mean-pooled sentence embedding, using only a role bias and a
+  diagonal gate before a shared projection. If the pooled embedding does not separate "the second
+  path argument" from "the first", the three roles collapse and the store degenerates into the
+  parent's single-address memory (no worse, but no better).
+- Near-duplicate destinations. Destinations in this data are formed as <another exposed path>.<k>,
+  so addr_query("cat .../magic.txt") and addr_dst("mv ... .../magic.txt.1") are textually almost
+  identical. Multi-head softmax hashing degrades to a blend rather than to a wrong answer under
+  collision (the target still holds the largest share of the read), and blends are survivable for
+  a nearest-content decision, but heavy collision would flatten the advantage.
+- Gate discovery. move / write / content gates all start mid-range; if the model never learns that
+  mv-shaped commands are the transport case, the transport write stays off and the channel is
+  inert.
+- Cost. The store runs one python-level loop over command steps with two small bmm reads and one
+  baddbmm write per step, over a mem of heads*slots = 64 rows — the same row count and one fewer
+  big intermediate per step than the parent's transition loop it replaces, so the step budget
+  should not move much. I could not run the real harness from here; this is a static estimate,
+  not a measurement.
+
+CAUSALITY
+
+At step i the store is read before anything from step i is written, and the only observation-
+derived quantities written at step i are that step's own observation and presence gate. A
+command-position prediction therefore depends on observations strictly earlier than itself, which
+is what the no-leakage guard checks. Nothing in the read path is gated on an observation being
+present: at the scored position, whose observation is withheld, the query read still runs against
+the memory built from the earlier steps. The presence gate touches only writes, so switching it
+off at the scored step costs nothing there.

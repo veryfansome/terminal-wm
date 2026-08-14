@@ -1,0 +1,44 @@
+{
+  "chunks": {
+    "arch": {
+      "impl": "r22_observation_occlusion_denoising",
+      "params": {}
+    },
+    "batcher": {
+      "impl": "r6_sysblock_hardneg_curriculum",
+      "params": {
+        "hard_frac_max": 0.75,
+        "n_block_images": 1,
+        "ramp_frac": 0.3
+      }
+    },
+    "head": {
+      "impl": "r18_transition_forwardmodel_consistency",
+      "params": {}
+    },
+    "objective": {
+      "impl": "r12_antiretrieval_ring_negatives",
+      "params": {}
+    },
+    "optim": {
+      "impl": "r6_gradmetric_address_whitening",
+      "bs": 64,
+      "params": {
+        "whiten_rho": 0.02,
+        "whiten_ema": 0.98,
+        "whiten_shrink": 0.05,
+        "whiten_min_obs": 25,
+        "whiten_release_start": 0.55,
+        "whiten_release_end": 0.85
+      }
+    },
+    "stream": {
+      "impl": "baseline_interleave",
+      "params": {}
+    },
+    "target": {
+      "impl": "identity",
+      "params": {}
+    }
+  }
+}

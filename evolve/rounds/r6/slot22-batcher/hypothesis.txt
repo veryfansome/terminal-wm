@@ -1,0 +1,88 @@
+AXES CHANGED: batcher only (r6_sysblock_hardneg_curriculum -> r6_matchedrisk_ringband_blocks).
+Everything else — arch r5_dualaddress_transport_closure, optim r4_twotimescale_router_polyak_tail,
+objective r12_antiretrieval_ring_negatives, stream r5_dualrole_address_mention_code, head
+r5_rawaddress_dualpre_consistency, target identity — is the parent's, verbatim, with the parent's
+params. The mechanism is a change to which sequences co-occur in a batch; it needs no other axis
+to change, and changing one would confound the reading. The parent's blocked-fraction schedule
+(hard_frac_max 0.75, ramp_frac 0.3) is deliberately kept identical so the only thing that differs
+is the CONTENT of the blocked part.
+
+CROSSOVER. The partner contributes baseline_uniform: an unbiased iid draw over the whole training
+distribution, no setup, no distribution shift. The parent contributes the skeleton: a batch is a
+base part plus deliberately composed blocks, and the blocked fraction ramps in from zero. I keep
+the partner's exact uniform draw (torch.randint over [0, n)) as the base part and as the whole
+batch at step 1, and I replace the parent's block source — a system image — with a matched risk
+set. Image blocking is dropped as the primary source because it does not buy what it was meant to
+buy: in the training trajectories the cups board's canonical destination paths (etc/ssh/
+sshd_config.cfg, etc/cron.d/backup.job, usr/local/etc/app.ini, g#/f#.dat ...) and the six content
+templates (sh script, ini unit, json session, log line, csv table, USER/CANARY env) are shared
+across every image, so same-system membership is a weak proxy for a confusable negative while
+costing the batch its cross-system coverage. It is retained only as a fallback when no matched set
+can be built.
+
+MECHANISM, from outside the domain: the matched case-control design and its conditional
+likelihood. In a matched case-control study each case is paired with controls that share the
+confounders, and the conditional likelihood is taken WITHIN the matched set; every variable the
+set was matched on is constant inside the set and therefore drops out of the likelihood exactly,
+so only the un-matched factor can explain who is the case. The training objective here is already
+a conditional likelihood: r12 is a listwise log-softmax over in-batch targets, and the batcher
+chooses the risk set. So I match the risk set on precisely the covariates that cancel in comp_ca
+and leave un-matched precisely the factor comp_ca is about.
+
+Construction, from command strings alone (no encoder-specific text parsing, no eval contact):
+1. Each sequence is reduced to its deepest mv-routed read — a 'cat P' walked backwards through the
+   mv edges that wrote P earlier in the same trajectory — giving a hop count and the read path.
+2. Its stratum key is (hop count capped at 4, canonical read path). Canonical = strip trailing
+   numeric copy-suffixes repeatedly, then collapse digit runs to '#'. Checked against
+   evolve/jail_data/train_sample.jsonl: this maps sshd_config.cfg.8 and sshd_config.cfg.4 to one
+   key and g72/f654.dat.3 to g#/f#.dat, and the resulting shape vocabulary is about ten shapes
+   shared across all eight images, so strata are large in a full split (16 distinct keys already
+   appear across the 24 sampled trajectories).
+3. Within a stratum, a centre's neighbours are ranked by the OBJECTIVE'S OWN confusability ring
+   evaluated between the two read ANSWERS: ring(tt) = exp(-tt/lam) * (1 - exp(-tt/delta)) on
+   standardized z_obs, tt = squared L2 / 768, delta = 0.05 and lam = 0.5 * mean off-diagonal tt,
+   which is exactly how r12 sets its own lam, estimated once from a random sample of step targets.
+   Distances are taken under a variance-preserving Gaussian projection (R = randn(d, pd)/sqrt(pd),
+   so E||Rx||^2 = ||x||^2). Neighbours are kept only above a fixed fraction of the ring's analytic
+   peak at t* = delta*log(1 + lam/delta). Verified numerically: that band gives ~0 weight to
+   near-identical answers (tt -> 0) and to far answers (tt ~ 3*lam), and full weight in between.
+4. A block is the centre plus a WITHOUT-REPLACEMENT draw of its matched neighbours, so the slots
+   hold distinct sequences instead of repeats of one; repeats would be killed by the loss's own
+   duplicate mask and waste the slot.
+5. Block strata are selected off a fixed depth wheel (1, 2, 3, 4+, 3, 4+), so two thirds of the
+   blocked slots go to hop counts three and above. This is not a tunable tilt: the eval slice is
+   d3 and d4+ only, while in the sampled trajectories only about half the sequences reach hop
+   count three, so the wheel is an allocation to the region the objective is measured in.
+
+WHY THIS SHOULD MOVE comp_ca. Inside one matched set the read location, its path shape and the hop
+count are constant, and the routed answers sit in the ring's pass-band — same content family,
+different instance. The log-softmax over that set therefore cannot be lowered by any function of
+the location being read, of the path's surface form, or of how many moves happened: those are
+identical for every member and cancel out of the conditional likelihood. The only remaining
+discriminator is which content the chain actually carried to that location, which is exactly the
+quantity that survives the native/role-swapped difference. Location keying is the failure mode
+that scores a structural zero on comp_ca, and this is the first batcher in this lineage that makes
+location keying arithmetically useless as a way to reduce the loss. Chain-position keying is not
+directly attacked here, but the wheel spreads blocked slots across hop counts rather than
+concentrating them, so no single move-order depth dominates the gradient.
+
+WHAT I EXPECT TO SEE. Native hit rate up on the deep windows relative to the parent, with the
+swapped-arm 'held' rate moving less, so the paired difference widens; the effect should be larger
+on d4+ than on d3. Measured on the real harness, comp_ca above the parent's +0.8127. All
+performance claims here are UNMEASURED — I cannot run the harness from the jail. What I did
+measure, in the jail, on a synthetic fit of 2400 sequences built from the real trajectories: setup
+0.07 s, 4000 next_batch calls in 0.10 s, every batch exactly bs indices in range, identical across
+two constructions with the same seed, fit never mutated, global torch RNG untouched, and the
+fallback and degenerate paths (no mv anywhere, one image only, n = 1, bs = 1, hard_frac_max = 0,
+total_steps = 1, empty cmds) all return well-formed batches.
+
+BIGGEST RISK. The blocked part is drawn only from sequences that have a routed read, so at the end
+of the ramp three quarters of the batch is cups/cvar-shaped and the plain cat/ls filler survives
+only in the uniform base part. If the frozen-embedding regression needs that filler to stay
+well-conditioned, the general prediction quality could fall far enough to drag the deep windows
+down with it, and comp_ca would land below the parent even though the negatives are better chosen.
+The parent's image blocks did not have this property, because an image group contains every kind
+of step. A secondary risk is that the matched sets are too hard: if two same-template canaries are
+close enough that the ring's own duplicate mask would have suppressed them anyway, the extra
+pressure is spent on a distinction the frozen encoder does not resolve, and the blocked slots do
+nothing but reduce effective batch diversity.

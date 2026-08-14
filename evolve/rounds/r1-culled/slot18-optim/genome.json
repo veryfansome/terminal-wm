@@ -1,0 +1,10 @@
+{
+  "chunks": {
+    "objective": {"impl": "r12_antiretrieval_ring_negatives", "params": {}},
+    "arch": {"impl": "r22_dualkey_transport_worldmodel", "params": {}},
+    "optim": {"impl": "r22_isometry_banded_gain", "params": {}, "bs": 64},
+    "batcher": {"impl": "r6_sysblock_hardneg_curriculum",
+                "params": {"hard_frac_max": 0.75, "n_block_images": 1, "ramp_frac": 0.3}},
+    "head": {"impl": "r22_silenthop_rollout_transport", "params": {}}
+  }
+}

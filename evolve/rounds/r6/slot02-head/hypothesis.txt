@@ -1,0 +1,129 @@
+MECHANISM: a backward content resolver whose depth is unbounded because the recursion is
+solved in closed form, and whose keys are invalidated by later moves.
+
+Axes changed: head (new impl) and optim (taken from the crossover partner). arch, objective,
+batcher, stream, target are the parent's, verbatim.
+
+--- the head
+
+Every command position i gets, from its raw 768-d command embedding alone, a SOURCE address
+s_i (the location the command reads from: the first path argument) and a DESTINATION address
+d_i (the location it writes to: the second path argument), through one shared GELU trunk and
+two unit-normalised heads. A learned RELAY gate m_i in [0, 0.98], fed by the command features
+and its paired observation, says whether the step merely relays content (a mutation whose
+output is empty) or exposes it.
+
+That single gate carries two meanings that must agree, and in this design they are literally
+the same number:
+
+  end-location key      key_j = unit( m_j * d_j + (1 - m_j) * s_j )
+  value at that key     v_j   = m_j * R_j + (1 - m_j) * obs_j
+
+A relay's content ends up where it was written and came from where it was read; an exposure's
+content sits where it was read and IS its observation. R_i, the content at the location step i
+reads from, is then
+
+  R_i = sum_{j < i} att[i,j] * v_j,   att[i,j] = softmax_j( <s_i, key_j>/T + log occ_j
+                                                            - g*(i-j-1) - w*away[i,j] )
+
+with a null column so an unmatched query retrieves nothing. Substituting v gives a linear
+fixed point in R:
+
+  (I - att @ diag(m)) R = att @ diag(1 - m) obs
+
+att is strictly lower triangular by causal masking, so att@diag(m) is nilpotent, the matrix is
+unit lower triangular, and ONE triangular solve returns the exact sum of all path products of
+every length. This is the algebraic-path / Kleene-star form used for closed semirings, and the
+same move implicit layers (DEQ) make when they solve a fixed point instead of unrolling it. It
+is the concrete import from outside this problem's literature: resolution depth is not a
+hyperparameter here, whereas a fixed-hop chase caps at its hop count and a sequential memory
+scan pays O(n) serial steps.
+
+The second import is write-invalidate cache coherence. A name that answered before must stop
+answering once something moved that content away, so the score for key_j at query time i is
+discounted by
+
+  away[i,j] = max_{j < k < i} m_k * sigmoid( rho * (<s_k, key_j> - c) )
+
+the strongest later RELAY whose source address is that same key. This is computed as a cummax
+over k of an [n,n] similarity, shifted by one, so it costs one extra n x n tensor. Without it
+the resolver is a name lookup that returns whatever was ever at a path; with it, a location
+that has been emptied falls through to the null column.
+
+Everything the query needs comes from the command embedding, never from an observation, so the
+final command of the scored odd-length window [cmd_0, obs_0, ..., cmd_r] — whose observation is
+the answer and is absent — issues a full query. Verified on odd L = 3, 5 and 23: the resolver
+returns a finite, nonzero contribution at the last command position.
+
+Train-time aux, label-free from the batch alone:
+  (1) relay calibration — binary cross-entropy of m_j against "step j's observation falls in an
+      oversized duplicate cluster", i.e. the empty-output mutations. This is the load-bearing
+      gate; the recursion only means what it claims if m is calibrated, and this term fires on
+      every batch, independent of mining.
+  (2) on mined reads (an observation that duplicates an earlier one with at least one such
+      contentless step in between), a listwise ranking of R_t, and separately of the
+      head-augmented prediction at t, against the contentful observations seen so far, scored
+      in the eval's own per-dimension squared-L2 decision variable.
+
+--- why this should move comp_ca
+
+comp_ca is a paired difference between the native chain and a chain in which two contents swap
+their move positions over the same board. A predictor keyed on the location being read cancels
+exactly. What does not cancel is machinery that composes a particular content's identity
+through the moves, and this head composes it multiplicatively: the answer for a depth-k window
+is the product of k attention weights along one resolved path, so a wrong hop anywhere collapses
+the term. Role-swapping the chain re-encodes the move commands, which changes s and d at the
+swapped positions, which changes which path the solve traverses, so the two arms genuinely
+diverge instead of returning the same content under a different name. The erasure term is the
+part that most directly separates tracking from lookup, because a swapped chain leaves the same
+set of names alive while changing which of them still holds what.
+
+--- why optim has to move with it
+
+The head's (D,D) readout is initialised to exactly zero so the wrapped net is (up to the small
+direct path below) the unwrapped net at build time. The parent's optim treats such a parameter
+like any other; the partner's r5_persistent_gradient_mixture_channel_opener splits parameters
+that are exactly zero when the optimizer is built into their own groups with weight decay off
+and a cosine-decaying learning-rate multiplier over the opening fraction of the run, which is
+precisely a mechanism for opening a cold injection channel onto a module that has meanwhile
+been trained by its own aux. It also keeps the spectral-norm cap on (D,D) matrices that the
+parent's optim provides (the readout is capped), and its AdEMAMix two-timescale mixture favours
+the gradient components that persist over hundreds of steps — which is what the addressing
+projections, driven only by a slowly-sharpening attention, look like. Its Muon branch routes
+identical-shape (key_d x hidden) addressing pairs, and the head's addr_src / addr_dst are
+exactly such a pair.
+
+To keep every parameter reachable from the prediction on the very first step rather than only
+after the readout leaves zero, the resolved content also enters through a small per-dimension
+direct scale initialised at 0.02 under the same sigmoid gate (initial contribution about 0.002
+of the content per dimension, i.e. negligible against a standardised target, but not zero).
+Checked: with it, every parameter of the head has a nonzero gradient on step 1 of a mock run;
+without it, twelve of them did not.
+
+--- what I expect to see, and the risks
+
+Expected: on windows of depth 3 and 4+ the native arm should pick the routed content more often
+than the role-swapped arm does, and the gap should widen with depth rather than flatten, since
+the closed form does not degrade past a hop budget. I expect the relay gate to converge to a
+near-binary split between mv/append steps and cat/ls steps. None of this is measured — I cannot
+run the harness from the jail, and this project has seen miniature probes invert rank in both
+directions, so I state no number.
+
+Biggest risk: the relay-gate label is a proxy. Steps whose output happens to be empty for other
+reasons (ls of an empty directory, a failed command) are labelled relays, so they inject
+spurious edges into the pointer graph. The occupancy gate and the null column can suppress them,
+but if they cannot, the resolver averages over a polluted graph and R degenerates toward the
+mean observation. Second risk: the arch (r23) already runs a forward dual-address transport, so
+the head duplicates addressing capacity in the opposite direction; if the trunk's own transport
+already saturates the gate on the prediction, the head's contribution may be gated to nothing.
+Third: the optim swap alone changes training dynamics (lr 3e-4 with an alpha=4 slow-momentum
+mixture, versus 5e-4 plain AdamW+Muon) and could account for a move in either direction
+independently of the head.
+
+Verified by construction, on a mock net: odd- and even-length inputs; key_pad=None and padded
+rows; the triangular solve agrees with the Neumann series to 1e-7; R is a sub-convex combination
+of the observations so it cannot blow up; att is strictly lower triangular with row mass <= 1; a
+hand-built depth-3 chain (expose at A, mv A->B, mv B->C, read C) resolves to the exposed content
+exactly; three forward+backward steps at B=64, L=64 cost 0.16 s on CPU against 0.02 s for the
+mock alone, so the added cost is dominated by the one (D,D) readout and is small next to the
+trunk.

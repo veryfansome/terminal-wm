@@ -1,0 +1,173 @@
+CANDIDATE: arch = r23_transport_bound_memory   (only axis changed; objective / optim /
+target / batcher / stream / head inherited unchanged from both parents, which share them)
+
+
+1. MECHANISM — what the code computes that neither parent does
+
+Both parents address their recurrent memory with ONE address per step. r18/r20 compute
+p_i = unit(tr_path(x_cmd_i)) and then read AND write at that single slot; r22 keeps that
+loop verbatim and only changes what the training stream looks like. A single address per
+command can express "the state at this location changed", never "the content that was at
+location A is now at location B".
+
+This candidate replaces `_transition_reads` with a TWO-ADDRESS transport memory over the
+same [B, key_d, D] matrix M. From the RAW 768-d command embedding (not the 176-d trunk
+projection, so path lexical detail survives) a shared body extracts two ordered role slots
+with an explicit order-breaking residual,
+
+    u  = gelu(addr_in(c_raw))
+    z1 = addr_src(u)                       (primary / source path)
+    z2 = addr_dst([u, z1])                 (secondary / destination path)
+
+and all three roles are mapped to the address sphere through ONE shared projection P0:
+
+    a_s = unit(P0 (R00 z1 + R01 z2))       R = role_mix,  init I
+    a_d = unit(P0 (R10 z1 + R11 z2))
+    a_q = unit(P0 (q0 z1 + q1 z2))         (q0,q1) init (1,0)
+
+The shared P0 is the load-bearing part: it forces "the destination of `mv A X`" and "the
+location read by `cat X`" to be the SAME point of the address sphere whenever the two
+commands name the same path, because both are P0 applied to the same path code. Three
+independent key matrices (what a naive src/dst extension would use) would have to learn
+that agreement from scratch; here it is structural.
+
+The step recurrence, with one bmm to read and one bmm to write (so the loop costs no more
+than the parent's — measured at cost parity below):
+
+    [s, d, r] = A_i M_{i-1}                 A_i = stack(a_s, a_d, a_q)      <- the only read
+    v         = (1-alpha) s + alpha f(s, cmd_i)     f = the SHARED r18 transition operator
+    corr_d    = g_mv (v - lam d)                    delta-rule write of v at the destination
+    corr_s    = -g_er (lam s)                       erase at the source
+    o         = lam r + <a_d,a_q> corr_d + <a_s,a_q> corr_s      (exact post-transport read)
+    corr_q    = g_obs (obs_i - o)                   delta-rule write of the observation
+    M_i       = lam M_{i-1} + A_i^T [corr_s, corr_d, corr_q]
+
+r (from M_{i-1}, strictly before any step-i write) is the prediction-side read; it replaces
+the r18 transition read everywhere it was used and additionally enters `target_read` behind
+its own sigmoid gate. `tr_read`, the inherited zero-init (D,D) readout, is re-initialised to
+0.25*I so the retrieved content reaches the prediction at usable scale from step 1 instead
+of waiting for a 590k-parameter map to grow out of zero.
+
+Because the transport write is driven by the COMMAND alone and needs no observation, the
+memory forwards content through steps whose observation is empty or masked. That is the
+parent r20's imagination write, generalised from an eval-only branch that "is identically
+dead on even-length fully-observed streams" into the default update rule. Its partner's
+contribution is the training regime that makes that path in-distribution: run-structured
+observation occlusion (per row, ramped probability of a CONTIGUOUS run of up to 3 obs
+tokens zeroed + key-padded, plus light i.i.d. dropout, never all of a row), which is a
+closer match to the scored windows than the partner's i.i.d. version because the thing
+being simulated is a RUN of silent moves, not one isolated gap.
+
+Verified by direct algebra on the implementation (monkeypatched one-hot addresses, no
+training): observe content c at P0, then mv P0->P1, then mv P1->P2, then read P2 returns c
+at cosine 1.0000 and scale 1.0000 -- the transported value is re-written exactly at each
+hop, so multi-hop carry suffers NO decay attenuation. Under a chain where the two moves'
+sources are exchanged, the same final read returns cosine -0.06 to c. That is exactly the
+paired difference the score integrates.
+
+
+2. WHY THIS SHOULD MOVE THIS SCORE
+
+The score is a paired difference between the native chain and a chain in which two files
+exchanged their moves. Both chains have the same board, the same final read command, the
+same set of destinations and the same first/last mover; the ONLY difference is which source
+content each destination receives. So the difference is nonzero only for a model that has,
+somewhere, an operation of the form "value currently at address(src) -> address(dst)".
+
+Neither parent has one. In r18/r20 the value written at the mv step goes to
+p(mv A X) -- the address of the mv command itself -- and the content of A lives near
+p(cat A); there is no path in the computation graph along which A's observation vector can
+reach the slot that `cat X` later queries. The r20 imagination write and the r22 occlusion
+regime both change WHEN the single-slot update fires, not WHICH slot it moves content
+between, so both are (by construction) in the null space of this metric except through
+whatever the trunk's attention manages incidentally. My parent scores -0.0112 -- below the
+plain transformer's +0.0037 -- which is consistent with the r18 memory adding a
+disturbance-marking channel that costs prediction quality and earns no compositional credit.
+
+The transport memory earns on exactly the quantity the metric integrates: the retrieved
+vector at the final read IS the earlier observation vector that displayed the moved file's
+content, which is the nearest candidate in the retrieval decision variable. Depth is free:
+the brief's deep windows are d3 (n=60) and d4+ (n=29), and the recurrence carries content
+across arbitrarily many hops with unit gain.
+
+The two inherited mechanisms are kept because each makes the other live, which is the
+crossover: occlusion alone teaches the r18 memory to SKIP a hop with no observation
+(active = valid_cmd & valid_obs is False, so nothing is written at all); imagination-write
+alone forwards through such a hop but is never exercised in training and is dead on the
+fully-observed fitness streams. Composed here, occlusion creates the obs-free steps and the
+command-driven transport forwards through them, with the main loss supervising a LATER
+read -- i.e. gradient that pays specifically for carrying identity across a silent hop.
+This also matches the real data: `mv` writes nothing to stdout, so its observation is very
+nearly the same constant vector at every mv step, which is an occluded observation in all
+but name.
+
+The shared transition operator f is retained as an optional edit on the transported value
+(alpha init sigmoid(-2)=0.12, i.e. near-pure transport, the right prior for `mv`), so the
+inherited head aux (r18_transition_forwardmodel_consistency), which supervises f through
+`transition_from_emb`, still trains something this arch uses. When a_d collapses onto a_s
+the update degenerates to exactly the r18 in-place content edit, so the parent's mechanism
+remains inside the hypothesis class rather than being discarded.
+
+
+3. WHAT I EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST OBSERVATION
+
+The single load-bearing empirical assumption is that a mean-pooled frozen sentence embedding
+of "mv <src> <dst>" retains enough ORDER information for z1 and z2 to separate the two paths.
+If mean pooling has washed the two path strings into an exchange-symmetric mixture, then
+a_s and a_d are two projections of the same bag and the transport moves the wrong content
+about half the time -- and a role swap of two files, which is precisely an exchange of the
+two sources, becomes invisible.
+
+If I am wrong this way, the failure is loud and specific: comp_ca lands near zero rather
+than negative (the mechanism cancels, it does not anti-correlate), while ordinary next-obs
+retrieval health stays at or slightly above the parent's, because the memory is still a
+competent obs-keyed associative store even with a scrambled destination role. Cheapest
+observation: on the fitness split, take the trained net, compute a_s / a_d / a_q for the
+mv and read commands of the deep windows, and measure cos(a_d(mv A X), a_q(cat X)) against
+cos(a_d(mv A X), a_q(cat A)). If the two are indistinguishable, the role slots never
+separated and no amount of downstream tuning will help. That probe needs one forward pass
+over the eval sequences and no training. A second, even cheaper check: read out role_mix
+and query_mix after training -- if they have stayed at their identity/(1,0) init while
+comp_ca is flat, the address pathway got no useful gradient at all.
+
+Secondary falsifier: if the gain is really coming from the occlusion curriculum rather than
+from transport, then setting occ_run_p = occ_iid_p = 0 (one param change, no code change)
+should leave comp_ca essentially unchanged. If instead comp_ca collapses to the parent's
+level with occlusion off, the transport addresses were only being trained by the occluded
+steps, which is informative but means the mechanism is far more fragile than claimed.
+
+
+4. THE RISK I SEE IN MY OWN DESIGN
+
+Beyond the order-information risk above, the one that worries me most is a training-dynamics
+risk, not an expressivity one: the transport write is gated by g_mv (sigmoid, init 0.18) on
+EVERY command, not just on moves. Early in training the addresses are effectively random
+projections, so every step performs a partly random rank-2 shuffle of a memory that the
+same loss is simultaneously trying to use as a content store. The delta rule is
+self-correcting (the observation write at a_q always re-anchors that slot to the true
+observation), and the gate can be driven to zero, but there is a real basin in which the
+optimiser kills g_mv to stop the noise and never rediscovers transport -- in which case this
+degenerates into an ordinary obs-keyed associative memory and scores like a slightly
+different r18. I biased against that basin (mv_bias -1.5, erase gated below mv, edit bias
+-2, decay init 0.995, gate weights scaled 0.1 so the gate starts nearly command-independent),
+but I have NOT measured whether g_mv survives training -- that number is unmeasured, and
+watching sigmoid(tcm_op_gates.bias[0]) plus the spread of g_mv across mv vs non-mv commands
+is the diagnostic.
+
+Smaller risks, stated plainly: (a) the source-erase and destination-write corrections are
+computed against the pre-write memory and are not mutually orthogonalised, so when a_s and
+a_d are not orthogonal the two writes interfere -- an approximation, exact only in the
+orthogonal case, which is the common case for distinct paths but not guaranteed;
+(b) re-initialising tr_read to 0.25*I is a real change to the inherited stack's init and
+injects a ~12% additive perturbation into the prediction from step 1, which could destabilise
+an optim that was tuned around a zero-init readout; (c) tr_path and tr_mut_gate become dead
+parameters (confirmed: zero gradient) since the r18 single-slot loop is gone -- harmless but
+untidy; (d) run occlusion removes evidence the loss still asks the model to predict, so if
+occ_run_p is too high it is simply label noise on those steps.
+
+MEASURED (implementation facts, not fitness): forward+backward at B=64, n=16 on MPS is
+210.7 ms/step versus the parent's 212.9 ms/step -- cost parity, because the transition MLP
+is hoisted out of the recurrence and the three writes are fused into a single rank-3 update,
+so the loop is 2 bmms/step exactly like the parent's. stream.leakage_ok returns True.
+Ragged, length-1 and L=0 batches are finite. NOT MEASURED: anything about fitness, comp_ca,
+or the real data root -- there is no harness here to run.

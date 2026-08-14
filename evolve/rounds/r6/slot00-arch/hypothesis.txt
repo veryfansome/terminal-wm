@@ -1,0 +1,118 @@
+AXES CHANGED: arch only (r4_complement_address_transport -> r6_stickbreak_role_link_closure).
+Every other axis keeps the parent's impl and params verbatim. The mechanism is entirely internal
+to the arch's readout branch: it changes no token, no target, no split, no loss, so nothing about
+the other six axes has to move with it, and holding them fixed is what makes the comparison
+against the parent a clean one-mechanism test.
+
+WHAT THE PARENT DOES AND WHY I THINK IT CANNOT TRACK CONTENT
+
+The parent scores -0.0075, which is the unmodified baseline: its complement-address transport
+pointer is contributing nothing that survives the role swap. Two structural reasons, both fixable
+inside the arch:
+
+1. It has ONE address map. A command's address code is a single linear image of its raw embedding,
+   and the destination it writes is defined as the component of that same code ORTHOGONAL to
+   whichever slot the step happened to read. So the address a step writes to is a function of the
+   step's read, not of the command's second argument. In a chain "cat A -> C; mv A X; mv X Y;
+   cat Y", the place `cat Y` looks for and the place `mv X Y` deposited are two different
+   constructions with no shared code, so they can only be made to coincide by luck.
+
+2. It selects with a softmax over occupied slots. Softmax normalizes, so every read spreads mass
+   over all earlier slots and each additional hop multiplies the dilution. At depth 3-4 (the
+   eligible slice is 60 windows at d3 and 29 at d4+) nothing survives the chain, and it has no way
+   at all to represent "a later command already took the content away from here".
+
+THE MECHANISM I ADD
+
+A stick-breaking role-link closure, replacing the slot bank and its 33-iteration Python loop.
+
+(a) Role-typed addressing through ONE shared filler encoder. From u_i = LayerNorm(cmd_raw_i) I read
+    a source role r_src = W_src u and a destination role r_dst = r_src + sigmoid(m_i) * W_move u,
+    where m_i is a scalar "this command relocates" logit. Both roles go through the SAME nonlinear
+    encoder Phi (Linear -> GELU -> Linear, unit-normalized) to give addresses a_src, a_dst. The
+    tying is the point: a one-argument command has dst = src + a small gated offset, so `cat X`
+    both reads X and leaves the content at X, while `mv A B` opens its offset and separates the
+    two. Because a_src and a_dst are images of one shared Phi, the place a read queries and the
+    place an earlier move deposited are addresses in a single code by construction rather than by
+    coincidence. W_move is initialized at 0.25 scale so the model starts near "the destination is
+    where the command points" -- the right prior for the exposure steps -- and learns the
+    relocation offset from there.
+
+(b) Stick-breaking selection instead of softmax (translated from stick-breaking / geometric
+    attention, Tan et al. 2024, where A_ij = beta_ij * prod_{j<k<i} (1 - beta_ik) replaces the
+    softmax and yields recency-ordered, non-competitive selection). Here
+
+        sel_ij = temp * <a_src_i, a_dst_j> + keybias_j + b        (j wrote to where i reads)
+        shd_ij = temp * <a_src_i, a_src_j> + m_j + b_shd          (j took content away from there)
+        w_ij   = sigmoid(sel_ij) * prod_{k=j+1}^{i-1} (1 - sigmoid(sel_ik)) * (1 - sigmoid(shd_ik))
+
+    computed in closed form as logsigmoid(sel) + rowtotal - cumsum over -softplus(sel) - softplus(shd),
+    two cumulative sums, O(n^2), no loop. This gives exactly the semantics the task needs: the MOST
+    RECENT writer to the queried location wins, mass is not shared with non-matching commands, the
+    leftover stick is a free null option when nothing matches, and a later command that relocated
+    the content out of that location cancels the older link. Reusing the same relocation logit m_j
+    in shd is deliberate -- a command only empties its source if it is a relocating command.
+
+(c) Exact multi-hop composition by one triangular solve. Content is defined by the strictly
+    lower-triangular recursion register_j = own_j * obs_j + (1 - own_j) * sum_k w_jk register_k,
+    solved by unit-triangular forward substitution, and the readout at command i is
+    sum_{j<i} w_ij register_j. own_j is a learned gate on (trunk state at cmd j, trunk state at
+    obs j) -- an exposure whose observation carries content owns it, a `mv` whose observation is
+    empty owns nothing and passes through. Depth is unbounded in a single pass and the gradient
+    runs the whole chain; nothing is truncated or detached.
+
+(d) The retrieved content enters the command-position prediction through an IDENTITY-initialized
+    (D,D) map times a small learned gain (0.05) and a sigmoid gate. Identity rather than zero
+    because the correct operation for this task is a pure copy -- the moved file's `cat` output is
+    byte-identical to the exposure's, so the target embedding is the same vector -- so the branch
+    starts already doing the right kind of thing at small amplitude, and every new parameter gets
+    gradient from step one instead of waiting for a zero readout to lift off.
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN THE NON-TRACKER BAND
+
+comp_ca is native_hit minus swap_stayed on the same board. Under the role swap the read location
+is unchanged, so anything keyed on the location being read predicts identically and cancels to
+exactly zero. What does not cancel is following the chain: after the swap, the links out of the
+read location trace back to the partner's exposure, so a mechanism that actually chases pointers
+flips its answer and scores, while a mechanism that keys on chain position only cancels in
+expectation. This design has no first-mover preference to lean on -- stick-breaking is recency-
+ordered, so if anything its prior is the opposite -- and the quantity it injects at the read is a
+retrieved observation vector, not a position code.
+
+WHAT I EXPECT TO SEE (all unmeasured -- nothing here was run under the real harness)
+
+- comp_ca above the parent's -0.0075, with the gain concentrated in the d4+ half of the eligible
+  slice, because that is where the parent's softmax dilution and missing take-away term bite
+  hardest and where an exact triangular solve differs most from a diluted one.
+- native_hit up with swap_stayed flat or down, rather than both moving together.
+- private.shortcut_leaning no worse than the parent's; if comp_ca rises mainly through
+  swap_stayed collapsing while native_hit is flat, that is the signature that the branch found a
+  chain-position cue instead of a content pointer and the result should be discounted.
+
+FALSIFIERS
+
+- If the run comes back at the parent's number with the ptr gate saturated shut, the identity-init
+  readout was still too small an amplitude to bootstrap inside the step budget.
+- If comp_ca is unchanged but training loss improved, the branch learned to copy the PREVIOUS
+  observation (w concentrating on j = i-1, which is the stick-breaking init) and never separated
+  the source and destination roles; the diagnostic is that the learned link_bias stays near its
+  -1.0 init and sigmoid(move_gate) stays flat across commands.
+- If it is worse than the parent, the shadow term is over-firing and cancelling links it should
+  keep, which would show as retrieved mass (sum_j w_ij) collapsing toward zero at deep reads.
+
+VERIFIED MECHANICALLY IN THE JAIL (shape/causality/gradient only, not fitness)
+
+Built the module and ran it against the jail's own harness pieces. Odd and even L, padded rows,
+L in {1,2,3,7,12,33} all give finite [B,L,768] predictions. The stream's own leakage probe returns
+True and corrupting obs_3 leaves the predictions at cmd_0..cmd_3 bit-unchanged while cmd_4 moves,
+so the branch is causal AND live. Backward from the prediction at the FINAL command of an
+odd-length sequence -- the scored read position -- gives a nonzero gradient to every one of the 24
+parameters the mechanism introduces, so nothing is stranded behind a dead branch or a zero readout.
+Four end-to-end steps with the genome's real objective, head and optim run finite and the loss
+falls. The identity-init ptr_out has sigma = 1.0, well under the optim's spectral cap of 4, so the
+cap never touches it. A hand-set address test confirms the closure expresses the chain it is
+designed for: on "cat A -> C0; cat B -> C1; mv A X; mv X Y; cat Y", the read at `cat Y` resolves
+two hops back to 0.80 * C0 versus 0.11 * C1, and a later `cat A` -- reading a location whose
+content was moved away -- has its link to the original exposure driven to exactly zero by the
+shadow term. Forward+backward at B=16, L=33 costs about 0.12 s per step on CPU with no Python
+loop, against the parent's 33-iteration sequential slot bank, so the step budget is not at risk.

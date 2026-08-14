@@ -1,0 +1,164 @@
+CANDIDATE: head = erasing_dualaddress_transport_batchhard
+CROSSOVER: parent arch (r19_obspresent_imagination_worldmodel) x partner batcher
+(r2_routedepth_tilt_readcollision_blocks), joined by a new head that both parents lacked.
+Axes changed: head (new impl), batcher (taken from the partner). Objective, arch, optim, target,
+stream unchanged from the parent.
+
+
+WHAT THE DATA ACTUALLY IS (checked in evolve/jail_data/train_sample.jsonl, 24 trajectories,
+724 steps)
+
+Only three command forms occur: `cat P` (365), `mv A B` (172), `ls ...` (106), plus `cat A > B`
+(30) and `cat A >> B` (51). Every content-routing command has the routed-from path as its FIRST
+path argument and the routed-to path as its SECOND, uniformly across mv, > and >>. Every
+routing command's observation is contentless: its rendered text is exactly "cwd=<cwd> exit=0\n",
+and across the whole sample only two distinct such strings exist ("cwd=/ exit=0" 227 times,
+"cwd=/data exit=0" 35 times). So 262 of 724 observations are one of two constant embeddings, and
+the observation of a move carries no information about what moved.
+
+
+WHAT NEITHER PARENT COMPUTES
+
+Both programs address memory with ONE key per command. In r19 the transition path reads at
+p_i = unit(tr_path(x_cmd_i)) and writes at the SAME p_i; in the file/path memories the write key
+k(c_i) and the value obs_i both come from the same step. There is no operation anywhere in either
+program that takes the value currently stored at one address and puts it at a DIFFERENT address.
+Worse, the value a routing step writes is its own observation, which the paragraph above shows is
+a content-free constant. So after `mv A B` neither program has moved anything: the slot that
+`cat B` will later read has been written with the silent-observation vector, and the slot for A
+still holds A's old content. Any apparent depth has to come from the trunk transformer
+re-deriving the answer by attention, not from a state that says where the content now is.
+
+This head adds the missing operation. For every command slot i it builds two addresses from the
+command embedding alone:
+
+    f_i  = gelu(arg_trunk(c_i))
+    u_i  = gelu(src_ext(f_i))
+    ka_i = unit(path_key(u_i))                     source address
+    kb_i = unit(path_key(u_i + dst_shift(f_i)))    destination address
+
+with dst_shift zero-initialised, so kb_i == ka_i exactly at initialisation and the destination
+address is the source address displaced by a learned, command-conditioned shift IN THE SAME key
+space. That shared encoder is what lets `cat B`'s source address coincide with `mv A B`'s
+destination address; the zero-init makes the two roles start identical and separate only under
+gradient, instead of being two independently initialised extractors.
+
+Memory M in R^{key_d x 768} is then run causally. At slot i, both addresses are read first, in a
+single bmm:
+
+    s_i = ka_i^T M        (content at the source)
+    d_i = kb_i^T M        (content at the destination)
+
+and only afterwards is M updated by two simultaneous rank-one delta rules:
+
+    M <- M + kb_i (x) g_move_i (s_i - d_i)
+           + ka_i (x) [ rho_i (o_i - s_i) - (1 - rho_i) g_erase_i s_i ]
+
+The first term is TRANSPORT: the destination moves toward the value read at the source, so
+`mv A B` deposits at key(B) the content that key(A) held, not the silent observation. The second
+term is RECORD-OR-ERASE: rho_i pulls the source toward this step's observation (so `cat P` stores
+P's content at key(P)), and the ERASURE term (1-rho)*g_erase*s pushes the source toward zero, so
+a location that has been moved away from stops returning what it used to hold. Erasure is the
+part that makes a chain compose rather than accumulate, and it is what a role-swapped chain
+punishes: without it, a read at the final location returns a superposition of everything that
+ever passed through, which is nearly identical under both arms. All four gates (move, erase,
+record, readout) are sigmoids of f_i, i.e. of the command embedding only; because mv erases and
+`cat A > B` copies, the erase gate is learned rather than fixed, which is exactly the distinction
+the data contains.
+
+The observation enters ONLY as the write value, through
+rho_i = g_rec_i * sigmoid(info_gate(gelu(obs_ctx(o_i)))) * [obs slot present and not imagined].
+Two consequences the measurement depends on: (1) the constant silent observation can be gated out
+of the store by info_gate, and (2) at the scored slot -- the command whose own observation is
+withheld -- the read s_i has already been taken before any write at that slot, and every gate on
+the read path is command-only, so the mechanism is fully live exactly where it is judged. The
+read is injected into the arch's prediction at EVERY command slot, i = 0 .. (L+1)//2 - 1,
+including the final one when the token stream has no trailing observation:
+
+    pred[:, 0:2m:2, :] += g_out_i * (s_i * out_scale)
+
+out_scale is a zero-initialised per-dimension parameter, so the wrapped net is bit-identical to
+the unwrapped net at initialisation and the main loss opens the gate only if the read helps.
+(For contrast, the archived r2_dualaddress_move_transport iterates n = L//2 slots and adds its
+contribution to cmd_view[:, :n]; on an odd-length stream that is every command EXCEPT the scored
+one. This head indexes (L+1)//2 and adds to slot m-1 too.)
+
+Causality is preserved for the harness leakage probe: the read at slot i uses M built from slots
+< i only, so corrupting obs_3 cannot change the prediction at command slots 0..3.
+
+
+TRAIN-TIME AUX (label-free; no command strings are parsed anywhere, at train or eval)
+
+1. Batch-hard transport triplet. From the batch tensors only: pairwise squared observation
+distances give, per sequence, a duplicate relation dup_o at 5% of that sequence's mean pairwise
+distance; a slot whose duplicate count exceeds max_dup=3 is a "mutation" slot (this is exactly
+the constant silent observation, which recurs ~11 times in a 32-step trajectory), everything else
+is "contentful". A slot j is mined when its observation duplicates an earlier contentful slot i's
+observation under a NON-duplicate command, with at least one mutation slot strictly between i and
+j -- i.e. the same content resurfacing at a different location after something silent happened.
+For those j the memory read s_j is trained by
+
+    L_j = relu( margin + ||s_j - o_j||^2/D - softmin_k ||s_j - o_k||^2/D )
+
+where k ranges over earlier contentful observations that are NOT duplicates of o_j, softmin is
+-tau * logsumexp(-d/tau), and margin and tau are fractions (0.25, 0.10) of that sequence's mean
+pairwise distance so the loss is scale-free. This is batch-hard triplet mining: the loss is
+dominated by the single nearest STALE content, which is precisely the answer a model gives when
+it tracks locations but not what is in them. A small squared-error anchor (0.05) keeps the read
+in observation space. It is applied to the memory read, not to the final prediction, so the store
+learns to hold the routed content even while out_scale is still near zero.
+
+2. The parent head's forward-model consistency is kept: same-path (pre, mutating-cmd, future-read)
+triples mined by command cosine, requiring net.transition_from_emb(obs_pre, cmd) to reconstruct
+the later observation under a change-weighted cosine + MSE. It is disabled by a flag captured at
+wrap time on archs that expose no transition operator. Both aux terms share one smoothstep ramp
+over 300 steps.
+
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN THE NON-TRACKER BAND
+
+comp_ca is native_hit minus swap_stayed on the same board, same destinations, same depth, with
+only the move commands re-encoded. A predictor that keys on the read command cancels exactly. A
+predictor that keys on move-order position cancels only in expectation. The quantity that does
+not cancel is a state whose value at the read address differs between the two arms -- and the two
+arms differ precisely in WHICH content each move picks up. This head's memory is the only place
+in the stack where the value written at a destination is a function of the value read at a
+source: swapping which contents the moves route changes s_i at every move, hence changes what is
+deposited at kb_i, hence changes the read at the scored slot. Nothing in the design can be
+satisfied by a location-only or an order-only rule.
+
+Nothing is precomputed and handed to the model. There is no command parsing in the head; the
+addresses are learned linear maps of the frozen command embedding, the gates are learned, and the
+aux only selects which slots to supervise, using observation-duplication statistics computed from
+the batch tensors themselves.
+
+
+WHY THE PARTNER'S BATCHER
+
+r2_routedepth_tilt_readcollision_blocks scores each training sequence by the number of mv hops
+between a `cat` and the file the content started in, and tilts batch composition toward deep
+routes and toward read-collision neighbourhoods. That is the exact population the transport
+memory needs: sequences with few or no chained moves yield no mined triples and no gradient for
+dst_shift or the erase gate. The parent's r6_sysblock_hardneg_curriculum concentrates on system
+images instead, which does nothing for chain depth.
+
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL (unmeasured -- no harness run was possible from the
+jail)
+
+- If the frozen mean-pooled command embedding does not linearly separate the first path argument
+  from the second, ka and kb cannot address distinct locations. dst_shift then collapses toward
+  zero, the transport term (s - d) vanishes, and the head degenerates into a single-address
+  record/erase store roughly as expressive as r19's existing transition path. No gain, small loss
+  from the extra parameters and the aux pulling on the trunk.
+- If the record gate cannot suppress the constant silent observation, every routing step
+  overwrites its source key with that constant and the store is poisoned; erasure would then be
+  actively harmful because it also clears real content.
+- If key_d = 32 is too small, the ~8-10 distinct paths in a window collide in address space and
+  reads return superpositions. Raising key_d is the obvious retry; it costs retained-activation
+  memory linearly (the loop keeps one [B, key_d, 768] state per slot).
+- If out_scale stays near zero because the trunk already fits the training distribution without
+  the read, the mechanism is inert at eval and the score reduces to the parent's minus whatever
+  the aux gradient cost the trunk.
+- If the duplicate threshold mis-tags (e.g. a trajectory where two different files genuinely hold
+  identical bytes), the triplet loss trains the read toward the wrong content on those slots.

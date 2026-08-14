@@ -1,0 +1,140 @@
+CANDIDATE: target = r1_unitdet_rotated_precision_innovation
+CROSSOVER: parent (all-baseline: mse / baseline_transformer / baseline_adamw / identity /
+baseline_uniform / baseline_interleave / baseline_passthrough) x partner (r12 objective /
+r19 arch / r18 optim / r6 batcher / r18 head).
+AXES CHANGED vs parent: target (new impl), objective, arch, optim, batcher, head.
+AXES UNCHANGED vs parent: stream (baseline_interleave, which the partner also uses).
+
+
+1. THE MECHANISM (what the code computes that neither parent does)
+
+make_target(z_obs, z_prev) = s * B( z_obs - g(z_prev) ), and to_obs is its exact algebraic
+inverse z = B^-1(pred / s) + g(z_prev). Three pieces, all learned jointly with the net:
+
+  B  is a butterfly product of 10 layers, each a fixed coordinate permutation (drawn once from a
+     private generator seeded 20260809) followed by 384 learned 2x2 Givens rotations. It is
+     orthogonal by construction to floating point, not by penalty, and its inverse is the same
+     circuit run backwards with negated angles.
+  s  = exp(v - mean(v)) with v = 0.47*tanh(u/0.47), u a free 768-vector. By construction
+     sum(log s) = 0 EXACTLY (verified: |sum log s| < 1e-5 before and after 400 optimizer steps)
+     and every s_d lies in [exp(-0.94), exp(0.94)] = [0.39, 2.56].
+  g  is a 768->96->768 GELU MLP of the PREVIOUS observation only, with a zero-initialised output
+     layer, so g == 0 at initialisation and z_prev never leaks anything the model cannot already
+     see (z_prev is token 2(t-1)+1, strictly before command position 2t in the interleaved stream).
+
+The algebraic consequence, which I checked numerically to 3.5e-7 relative: for any prediction,
+  pred - make_target(z_obs, z_prev)  ==  s * B( to_obs(pred, z_prev) - z_obs ).
+So the training loss is evaluated on a linear image of the OBS-SPACE error with a metric
+M = B^T diag(s^2) B whose determinant is exactly 1. The target axis is therefore a learned
+unit-determinant Mahalanobis metric on next-observation error, plus a per-example recentring of
+that error's origin by the part of the observation predictable from the previous observation.
+At initialisation angles are zero, so B is a pure permutation and s = 1: the map is an isometry
+and the objective is the partner's objective up to a relabelling of coordinates (verified: the
+init target is a permutation of z_obs).
+
+Neither parent can express this. The parent's `identity` target fixes the metric to the isotropic
+one; the partner's stack inherits the same fixed metric, and its only per-direction adaptivity is
+r12's detached diagonal precision w, which is defined in the frozen encoder's standard coordinate
+basis. That basis is arbitrary: apply_stats already standardises every coordinate to unit
+variance, so a diagonal reweighting cannot up- or down-weight a PRINCIPAL direction of the
+embedding at all. My target supplies the missing rotation; r12's diagonal precision then acts in
+a learned basis, and the composite obs-space weight becomes B^T diag(s^2 * w) B.
+
+
+2. WHY THIS SHOULD MOVE comp_ca (carrying file identity across hops)
+
+(a) Trace vs log-volume. Isotropic MSE minimises the TRACE of the residual covariance. Trace is
+    dominated by the few high-energy directions of a mean-pooled shell observation: cwd string,
+    exit line, prompt/format boilerplate, the system's dialect. A model can drive trace loss down
+    while being at chance on the low-energy directions that encode WHICH file's bytes are on
+    screen. With sum(log s) = 0 the optimiser cannot lower the loss by shrinking a direction
+    without inflating another: minimising sum_d s_d^2 e_d^2 subject to prod_d s_d = 1 has its
+    optimum at s_d proportional to 1/e_d and the attained value is D * (prod_d e_d^2)^(1/D). The
+    effective objective handed to the network is therefore (up to the soft bound) the GEOMETRIC
+    mean of per-direction squared error in a learned orthogonal basis - equivalently the log-volume
+    / Gaussian differential entropy of the residual rather than its energy. Entropy-minimising
+    prediction refuses to write off a direction no matter how little energy it carries, which is
+    exactly the regime where file identity lives. (Information-theoretic lens: minimise residual
+    channel entropy, not residual power.)
+
+(b) Discriminant scaling under a contrastive objective, gated by the partner's batcher. Under
+    r12 the same unit-determinant metric is applied to the TARGET-TARGET distances that build the
+    confusability ring and to the in-batch negative logits. A unit-determinant metric that lowers
+    a contrastive loss must inflate directions where in-batch targets differ from each other
+    relative to directions where the predictor's error lives - an LDA-like between-over-within
+    scaling under a volume constraint. Which directions those are is decided by WHAT IS IN THE
+    BATCH. This is the crossover interlock: the partner's r6 batcher with n_block_images=1 and
+    hard_frac_max=0.75 makes three quarters of each late batch come from a SINGLE image, so
+    "between-target variance" is measured between steps of the same system, where the boilerplate
+    directions are shared and the surviving variance is content. Without r6 the metric would
+    happily spend its budget separating systems, which the paired native-vs-swap contrast cancels
+    to zero. Neither parent alone couples these two axes.
+
+(c) Innovation targets. g(z_prev) removes the component of the observation that a "nothing
+    changed" reader already knows. Because the map is exactly invertible and g depends only on
+    z_prev, this changes NO obs-space error for a fixed prediction (translations do not change
+    distances), so I am not claiming it lowers MSE. What it does change is (i) what r12's
+    negatives are: dist2(i,j) is now measured between (zhat_i - g(prev_i)) and (z_j - g(prev_j)),
+    so two observations from different points of the same trajectory are compared after each is
+    centred by its own prior, which strips the shared prompt/cwd context out of the negative
+    geometry and leaves the content residual; and (ii) what the arch's readout has to emit: the
+    r19 arch has an explicit prev_obs mix path, so "copy the previous observation" is a cheap
+    local optimum under the identity target; under this target the copy solution emits
+    s*B(z_prev - g(z_prev)), which is not the answer for any step where content actually arrived.
+
+The parent's contribution I deliberately keep: the whole thing is anchored in the fixed
+observation space. The map is initialised AT the identity-isometry, the inverse is exact rather
+than approximate, and r12's _ANCHOR * plain-MSE term keeps a direct obs-space regression pressure
+alive inside the contrastive loss.
+
+
+3. WHAT I EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST OBSERVATION
+
+If the mechanism is inert, the learned scales stay near isotropic and the angles near zero: the
+cheapest check is to log max(s)/min(s) and mean(|angle|) at the end of training. s pinned at 1.0
+(ratio < 1.05) and angles < 0.02 means the loss found no use for the metric and comp_ca should sit
+on top of the partner's number; that would falsify the whole story with one scalar.
+
+If the mechanism is actively harmful I expect a specific, distinguishable signature: next-obs
+retrieval health (top1_sameverb / mrr) DROPS relative to the same genome with target=identity
+while the training loss looks fine. That is the geometric-mean failure mode - the model bought
+relative accuracy in low-energy directions at the cost of arithmetic accuracy, and the eval's
+decision variable is the isotropic mean over dims, not my metric. Comparing top1_sameverb between
+this candidate and the identical genome with target=identity is the one-run diagnostic and it
+separates "metric did nothing" from "metric did the wrong thing".
+
+A third failure I can see from the code alone: if s drifts to its bound on most coordinates
+(|v| pegged near 0.47 everywhere) the map has become a fixed anisotropic rescale rather than an
+adaptive one, and the tanh soft-bound rather than the data is setting the emphasis.
+
+
+4. THE BIGGEST RISK IN MY OWN DESIGN
+
+The eval ranks candidates by an ISOTROPIC squared-L2 mean over dimensions in obs space, and I am
+deliberately training under a non-isotropic metric. Unit determinant guarantees I cannot make the
+prediction globally worse by shrinking, but it does NOT guarantee the arithmetic-mean error stays
+put: reallocating precision toward low-energy directions can raise total obs-space MSE, and if the
+directions the metric picks are not the content directions (for instance if the r6 image blocking
+does not in fact make in-batch between-target variance content-dominated on this data root) I pay
+that cost for nothing. The bound |log s_d| <= 0.94 caps the damage at a factor of 2.56^2 ~= 6.6 in
+per-direction weight, which is why I chose a soft bound rather than an unconstrained log-det, but
+this is a genuine trade and it is UNMEASURED - I could not run the real harness from the jail.
+
+Secondary risks I can name but consider smaller: (i) g is trained by the same gradient and adapts
+to whatever the network fails to predict as a function of z_prev, so a strong g could absorb real
+signal into a module that the eval then adds back unconditionally - the zero-init output layer and
+the 1e-4 penalty on its weights keep it small early but do not bound it late; (ii) the metric
+inflates typical target-space distances by up to max(s^2) = 2.56, which interacts with r12's fixed
+_TEMP=0.25 and _MARGIN=0.5 constants (measured inflation on random data was 1.36x, so the logit
+scale shifts modestly rather than saturating); (iii) cost, which I did measure - 20 forward+backward
+passes of make_target on [4096,768] take 1.7s on CPU, and the real batch is roughly 640 rows, so
+the target adds order 10ms per step against an r19 arch that already runs a python loop over
+command positions. It should not threaten the step budget, but that is a CPU measurement, not a
+harness one.
+
+Correctness properties I verified by running the module (not extrapolated): global RNG state is
+byte-identical across make(D); the inverse reconstructs z_obs to 1.4e-6 max abs error in float32
+and 2.2e-15 in float64, before and after the parameters are perturbed and after 400 optimizer
+steps; sum(log s) = 0 to 5e-6; the Mahalanobis identity in section 1 holds to 3.5e-7 relative; a
+constant prediction gives a large loss; and none of the module's parameter shapes collide with the
+r18 optim's key_d-row Muon routing or its (768,768) spectral-cap routing.

@@ -1,0 +1,305 @@
+{
+ "seed": "r4",
+ "slots": [
+  {
+   "slot": 0,
+   "parent": "r3-06-within-sequence-contrast",
+   "parent_fitness": 0.0,
+   "operator": "cross",
+   "cross_with": "r3-01-depthtilted-sysblock-curriculum",
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-09-routed-content-alignment",
+    "g0-02-causal-variance-film"
+   ],
+   "seed": "r4:0",
+   "axis": "arch"
+  },
+  {
+   "slot": 1,
+   "parent": "g0-12-obs-occlusion-denoising",
+   "parent_fitness": 0.029963,
+   "operator": "cross",
+   "cross_with": "r3-08-cuebalanced-routing-blocks",
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "g0-16-retrieval-composition",
+    "g0-13-obspresent-imagination"
+   ],
+   "seed": "r4:1",
+   "axis": "batcher"
+  },
+  {
+   "slot": 2,
+   "parent": "g0-05-dualpre-transition",
+   "parent_fitness": 0.0,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r3-05-srcdst-hashslot-coding",
+    "r3-01-depthtilted-sysblock-curriculum"
+   ],
+   "seed": "r4:2",
+   "axis": "head"
+  },
+  {
+   "slot": 3,
+   "parent": "r3-03-fwl-orthogonalized-ring",
+   "parent_fitness": 0.007491,
+   "operator": "cross",
+   "cross_with": "r3-02-occupancy-routed-copy",
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-00-pointer-transport-memory",
+    "g0-08-exact-target-equivalence"
+   ],
+   "seed": "r4:3",
+   "axis": "objective"
+  },
+  {
+   "slot": 4,
+   "parent": "r3-01-depthtilted-sysblock-curriculum",
+   "parent_fitness": 0.018727,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-00-pointer-transport-memory",
+    "r2-06-shrunk-zca-content"
+   ],
+   "seed": "r4:4",
+   "axis": "optim"
+  },
+  {
+   "slot": 5,
+   "parent": "g0-00-baseline",
+   "parent_fitness": 0.003745,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r3-02-occupancy-routed-copy",
+    "r3-01-depthtilted-sysblock-curriculum"
+   ],
+   "seed": "r4:5",
+   "axis": "stream"
+  },
+  {
+   "slot": 6,
+   "parent": "r3-09-rename-registry-occupancy",
+   "parent_fitness": 0.003745,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r3-01-depthtilted-sysblock-curriculum",
+    "r2-08-routedepth-tilt-readcollision"
+   ],
+   "seed": "r4:6",
+   "axis": "target"
+  },
+  {
+   "slot": 7,
+   "parent": "r3-02-occupancy-routed-copy",
+   "parent_fitness": -0.007491,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r3-01-depthtilted-sysblock-curriculum",
+    "g0-13-obspresent-imagination"
+   ],
+   "seed": "r4:7",
+   "axis": "arch"
+  },
+  {
+   "slot": 8,
+   "parent": "r3-05-srcdst-hashslot-coding",
+   "parent_fitness": -0.003745,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-08-routedepth-tilt-readcollision",
+    "g0-02-causal-variance-film"
+   ],
+   "seed": "r4:8",
+   "axis": "batcher"
+  },
+  {
+   "slot": 9,
+   "parent": "r3-06-within-sequence-contrast",
+   "parent_fitness": 0.0,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-06-shrunk-zca-content",
+    "g0-02-causal-variance-film"
+   ],
+   "seed": "r4:9",
+   "axis": "head"
+  },
+  {
+   "slot": 10,
+   "parent": "g0-16-retrieval-composition",
+   "parent_fitness": 0.029963,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-03-routed-recall-namedecoy",
+    "r3-05-srcdst-hashslot-coding"
+   ],
+   "seed": "r4:10",
+   "axis": "objective"
+  },
+  {
+   "slot": 11,
+   "parent": "r3-09-rename-registry-occupancy",
+   "parent_fitness": 0.003745,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r3-02-occupancy-routed-copy",
+    "r3-06-within-sequence-contrast"
+   ],
+   "seed": "r4:11",
+   "axis": "optim"
+  },
+  {
+   "slot": 12,
+   "parent": "r2-08-routedepth-tilt-readcollision",
+   "parent_fitness": 0.018727,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "g0-15-prefix-content-xattention",
+    "g0-16-retrieval-composition"
+   ],
+   "seed": "r4:12",
+   "axis": "stream"
+  },
+  {
+   "slot": 13,
+   "parent": "r3-05-srcdst-hashslot-coding",
+   "parent_fitness": -0.003745,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-01-routed-collision-depth",
+    "r3-03-fwl-orthogonalized-ring"
+   ],
+   "seed": "r4:13",
+   "axis": "target"
+  },
+  {
+   "slot": 14,
+   "parent": "r2-02-dualaddress-move-transport",
+   "parent_fitness": 0.044944,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "g0-12-obs-occlusion-denoising",
+    "r3-01-depthtilted-sysblock-curriculum",
+    "g0-13-obspresent-imagination"
+   ],
+   "seed": "r4:14",
+   "axis": "arch"
+  },
+  {
+   "slot": 15,
+   "parent": "g0-16-retrieval-composition",
+   "parent_fitness": 0.029963,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "g0-05-dualpre-transition",
+    "r3-03-fwl-orthogonalized-ring"
+   ],
+   "seed": "r4:15",
+   "axis": "batcher"
+  },
+  {
+   "slot": 16,
+   "parent": "g0-13-obspresent-imagination",
+   "parent_fitness": 0.003745,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r3-06-within-sequence-contrast",
+    "r3-01-depthtilted-sysblock-curriculum"
+   ],
+   "seed": "r4:16",
+   "axis": "head"
+  },
+  {
+   "slot": 17,
+   "parent": "r2-07-dual-address-transport",
+   "parent_fitness": 0.05618,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-02-dualaddress-move-transport",
+    "g0-12-obs-occlusion-denoising",
+    "g0-02-causal-variance-film",
+    "r3-03-fwl-orthogonalized-ring"
+   ],
+   "seed": "r4:17",
+   "axis": "objective"
+  },
+  {
+   "slot": 18,
+   "parent": "r3-00-reference-closure-transport",
+   "parent_fitness": -0.003745,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r3-05-srcdst-hashslot-coding",
+    "g0-08-exact-target-equivalence"
+   ],
+   "seed": "r4:18",
+   "axis": "optim"
+  },
+  {
+   "slot": 19,
+   "parent": "g0-05-dualpre-transition",
+   "parent_fitness": 0.0,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r3-05-srcdst-hashslot-coding",
+    "r2-09-routed-content-alignment"
+   ],
+   "seed": "r4:19",
+   "axis": "stream"
+  }
+ ]
+}

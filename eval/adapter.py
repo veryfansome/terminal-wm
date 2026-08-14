@@ -21,6 +21,7 @@ import traceback
 import torch
 
 from cloud import build_context as BC
+from eval import guard_reach as GR, guard_stream as SG
 from evolve import cdh_probe as CDH, cups_ca as CA, cups_probe as CP, genome as G, harness as H
 from realenv import seq_worldmodel as M
 
@@ -118,14 +119,22 @@ def main(argv):
     except Exception as e:
         return fail(results_dir, "genome_invalid", f"{type(e).__name__}: {e}")
 
-    # The scoring instrument reads predictions at strided positions of a fixed [cmd,obs,...]
-    # layout; any other layout would be scored on a sequence the net never trained on, and no
-    # guard can see that.
-    if getattr(stream, "CUPS_LAYOUT", None) != "interleave2":
-        return fail(results_dir, "stream_layout_unsupported",
-                    "the scoring instrument pins a strided [cmd,obs,...] layout; this stream "
-                    "declares a different one, so the measurement would not correspond to the "
-                    "trained net")
+    try:
+        ok, why = SG.stream_scoreable(stream, device)
+    except Exception as e:
+        return fail(results_dir, "candidate_raised_in_gate",
+                    f"this genome's stream raised while being checked: {type(e).__name__}: {e}")
+    if not ok:
+        return fail(results_dir, "stream_layout_unsupported", why)
+
+    try:
+        ok, why = GR.reachable(genome_path)
+    except Exception as e:
+        return fail(results_dir, "candidate_raised_in_gate",
+                    f"building or exercising this genome raised before training: "
+                    f"{type(e).__name__}: {e}\n{traceback.format_exc()[-2000:]}")
+    if not ok:
+        return fail(results_dir, "unreachable_mechanism", why)
 
     if not head.leak_safe(head, head_p):
         return fail(results_dir, "head_leak_fail",
@@ -135,14 +144,16 @@ def main(argv):
         cpath = _env("TWM_CONTEXT")
         if cpath:
             blob = torch.load(cpath, map_location="cpu", weights_only=False, mmap=True)
-            built = (blob["root"], blob["eye"], blob["split"],
+            built = (blob.get("schema", 1), blob["root"], blob["eye"], blob["split"],
                      blob.get("train_root", blob["root"]),
                      blob.get("frame_root", blob["root"]))
-            here = (root, eye, split, train_root, frame_root)
+            here = (BC.CONTEXT_SCHEMA, root, eye, split, train_root, frame_root)
             if built != here:
                 raise RuntimeError(
-                    f"context {cpath} was built for {built} but this run is {here} — a context "
-                    f"from another frame would silently score in that frame")
+                    f"PREFLIGHT FAILED: context {cpath} was built for {built} but this run is "
+                    f"{here} — a context from another frame, or from before the swapped chain was "
+                    f"retained, would silently score in that frame. Delete it and rebuild "
+                    f"(cloud/build_context.py refuses to overwrite an existing blob).")
             train_full, ctx, swap_cache = blob["train_full"], blob["ctx"], blob["swap"]
             cdh_ctx = blob.get("cdh")
         else:
@@ -164,6 +175,14 @@ def main(argv):
         raise RuntimeError(f"pack-lane setup failed (environment, not candidate): {e}") from e
 
     try:
+        ok, why = SG.stream_matches_context(stream, ctx, device)
+    except Exception as e:
+        return fail(results_dir, "candidate_raised_in_gate",
+                    f"this genome's stream raised on real sequences: {type(e).__name__}: {e}")
+    if not ok:
+        return fail(results_dir, "stream_coding_mismatch", why)
+
+    try:
         fit, _ = M.split_train_dev(train_full, seed=seed)
         net, ok = H._train(gen, fit, device, loss_fn, seed, steps, target_mod, stream,
                            head, head_p)
@@ -178,7 +197,8 @@ def main(argv):
         tm = getattr(net, "target_module", None)
         tmod = copy.deepcopy(tm).cpu() if tm is not None else target_mod
         ca = CA.measure_trained_net(net, ctx, tmod, device, eye, cells,
-                                    ceiling_table=cells, swap_cache=swap_cache, knobs=knobs)
+                                    ceiling_table=cells, swap_cache=swap_cache, knobs=knobs,
+                                    stream=stream)
 
         flat = stream.flatten_predictions(net, H._strip_target_only(ctx["seqs"]), device)
         pred_obs = tmod.to_obs(flat["pred"], flat["prev"]) if tmod is not None else flat["pred"]
@@ -200,18 +220,19 @@ def main(argv):
                     f"collapsed or constant, so the differential is not measuring tracking")
 
     pd = ca["per_depth"]
+    # Numbers only, and terse: the engine joins one of these per seed into a single
+    # text_feedback that a brief truncates at 600 characters, so three verbose copies lose the
+    # tail mid-word. The structural caveat about what does and does not cancel is prose that is
+    # identical every run, so it lives once in jail_notes instead of three times here. No arm is
+    # named: a redacted brief keeps the NAME and drops the number, which hands an inventor a
+    # pointer to a shortcut with nothing attached to it.
     feedback = (
-        f"comp_ca {ca['comp_ca']:+.4f} over n={ca['n']} deep earnable windows "
-        f"(for reference, the strongest analytic non-tracker on the same windows, "
-        f"{ca['best_analytic_arm']}, sits at "
-        f"{ca['analytic_band'][ca['best_analytic_arm']]:+.4f}) "
-        f"(d2 n={pd['d2']['n']}, d3 n={pd['d3']['n']}, d4+ n={pd['d4plus']['n']}); "
-        f"native picks {ca['native_wm']:.3f} vs chance {g['chance']:.3f}; "
-        f"under role-swap the same pick is held {ca['swap_stayed']:.3f} and follows the swapped "
-        f"content {ca['swap_follow']:.3f}. Next-obs retrieval health "
-        f"{health['top1_sameverb']:.3f}."
-        + (f" Command-history routing on the other capability pack, reported not scored: "
-           f"{cdh['nav']['nav_differential_unmasked_matched']:+.3f}." if cdh else ""))
+        f"comp_ca {ca['comp_ca']:+.4f} n={ca['n']} (d3 {pd['d3']['n']}, d4+ {pd['d4plus']['n']}); "
+        f"native {ca['native_wm']:.3f} vs chance {g['chance']:.3f}; "
+        f"swapped: held {ca['swap_stayed']:.3f}, follows {ca['swap_follow']:.3f}; "
+        f"health {health['top1_sameverb']:.3f}"
+        + (f"; cd-pack {cdh['nav']['nav_differential_unmasked_matched']:+.3f} (not scored)"
+           if cdh else "") + ".")
 
     write(results_dir, {
         "combined_score": ca["comp_ca"],
@@ -235,6 +256,7 @@ def main(argv):
         # let the last seed silently overwrite the others.
         "private": {f"seed{seed}": {
             "guards": g,
+            "shortcut_leaning": ca["shortcut_leaning"],
             "slice": ca["slice"],
             "comp_ca_alt_only": ca["comp_ca_alt_only"],
             "role_swap_seed": ca["role_swap_seed"],

@@ -1,0 +1,115 @@
+CANDIDATE: batcher = r5_readaddr_collision_blocks_depth_strata
+AXES CHANGED: batcher only. Everything else is the parent genome verbatim.
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+
+From the parent (r25_routing_depth_systematic_curriculum): the idea that the COMMAND TEXT of a
+trajectory is a routing graph you can parse before training, and the Madow systematic
+probability-proportional-to-size draw over a depth-sorted, randomly tie-broken frame, which makes
+the batch's depth composition hit its target with near-zero step-to-step variance instead of the
+multinomial jitter an iid draw gives. Both survive here: `_systematic` is that draw, and every
+part of the batch is filled through it.
+
+From the crossover partner (r6_sysblock_hardneg_curriculum): the block idea — a ramped share of the
+batch drawn from ONE system image, so the in-batch negative pool is same-system rather than a
+spread over eight unrelated filesystems. That survives here as the `n_sys` tier, drawn exactly the
+partner's way (multinomial over image pools by size, then fill).
+
+The child is not the union of the two; the new tier sits between them and is the point of the
+candidate.
+
+WHAT IS NEW, MECHANICALLY
+
+1. The parse targets a different quantity. The parent scores a sequence by the longest chain
+ANYWHERE in its command text. I checked that against the ground truth in
+evolve/jail_data/train_sample.jsonl: each trajectory carries exactly one deep routed read, and its
+own meta records the depth of the content that read actually returns. The parent's max-over-board
+number and that depth disagree badly on real sequences (one sample: max chain 6, depth of the
+supervised read 2), because the deepest chain in a trajectory usually belongs to a content that is
+never read. `_deepest_routed_read` instead walks BACKWARDS from every `cat P` through the mv/cp and
+redirection writes that landed on P earlier in the same trajectory, and returns the hop count of
+the deepest read, the address that read names, and the path that content started at. On the 24
+verbatim training sequences in this jail that hop count equals the recorded depth of the supervised
+read on 23; the single disagreement is a redirection chain that is genuinely 2 hops deep and is not
+the cups read. So the depth this batcher tilts on is the depth of the tracking problem the
+sequence actually supervises.
+
+2. Read-address collision blocks. A sequence whose deepest routed read is at least `deep_min` hops
+is keyed by that read's address with the trailing move index stripped
+(/tmp/w/cups/usr/share/misc/magic.txt.8 -> /tmp/w/cups/usr/share/misc/magic.txt). A ramped
+`addr_share` of the batch is filled from a few of those keys. Every row inside such a key poses a
+near-identical read command — same directory, same base name, only the final move index differs —
+with a DIFFERENT answer, because the boards are different trajectories. Neither parent composes
+this: the parent's image block puts same-system sequences together, but their test reads name
+different files, so the command still predicts the answer inside the block.
+
+3. Origin-family balance inside a block. Each keyed sequence also carries a CROSSED flag: true when
+the name family of the path the content started at differs from the name family of the address it
+is read from. In the training sample that flag reproduces the generator's own routed-vs-name index
+comparison exactly wherever a cups read is the deepest read. A key's slots are split between its
+crossed and its aligned members at `cross_frac`, so inside a block the read address carries no
+information about whether the answer is the content that originally lived under that name.
+
+4. Explicit two-stratum allocation on hop count for the unblocked remainder: the share of the batch
+whose supervised read is at least `deep_min` hops ramps from the corpus rate to `deep_frac_max`,
+rather than being left to a power tilt whose realised composition depends on the corpus depth
+histogram. The power tilt is kept INSIDE each stratum so 6 hops still outranks 3.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+
+The scored quantity is native_hit minus swap_stayed: it is positive only for a model whose answer
+CHANGES when the same board is re-chained so a different content lands at the read location. Two
+strategies score exactly zero by construction — answering from the read address, and answering from
+the name family of the address — and both are cheap for the model to learn under the current
+training distribution, because the objective's in-batch negatives almost never contain two rows
+that share a read address and disagree about the answer. In a uniform or image-blocked batch, the
+command at a routed-read row is very nearly a unique key for its target, so minimising the listwise
+contrastive loss does not require the trajectory at all. The collision tier removes that: within a
+key, the command is constant to within one digit and the targets differ, so any predictor that is a
+function of the command alone puts the same point on several rows with different labels and pays
+for every one of them; the only remaining way to lower the loss on those rows is to read the move
+chain. The crossed/aligned balance removes the second zero-scoring strategy the same way. The
+corrected depth parse then concentrates that pressure on the depth band the metric is eligible on
+(3 hops and deeper), which the parent's max-over-board score does not reliably do.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- If the training split's routed reads land on mostly unique addresses, address pools stay below
+  `min_block`, the collision tier is empty and the candidate degrades to the partner's image
+  blocking plus a corrected depth stratification — a small change, likely inside the noise. The
+  sample says roughly two thirds of deep routed reads land in a small recurring pool of core file
+  names shared across images, which is where the pools come from; if the real split is dominated by
+  the per-sequence random f####.ext names instead, this fails.
+- If a key's pool is small, the block repeats a few sequences. Exact duplicate rows are harmless
+  here (the objective's ring gives near-identical targets ~0 negative weight) but they consume
+  slots, so a corpus with pools of 2-3 buys little.
+- If the model's failure is not shortcut-taking but capacity — if it already ignores the command
+  and simply cannot carry identity through 4 hops — then removing the shortcut changes nothing and
+  may cost the general fit that the shallow and non-routing rows were providing.
+- If `deep_frac_max` starves the model of the shallow and non-routing supervision it needs to
+  ground observation prediction at all, the trunk gets worse everywhere and the differential falls.
+
+WHAT THIS DELIBERATELY DOES NOT DO
+
+Nothing parsed here reaches the model. The parse produces three per-sequence facts — a hop count, a
+read address string, a boolean — and all three are consumed by the sampler to choose INDICES. No
+tensor handed to collate, the loss or the head depends on them, and the batcher is never called at
+scoring time. It also reads no observation, no exit code and no target: `_deepest_routed_read`
+takes only `s["cmds"]`, so there is nothing in this mechanism that could switch off at the scored
+position, where the observation is withheld.
+
+I did not run this against the real harness — there is no torch in the jail. What I did check: the
+parse against the recorded ground truth on all 24 verbatim training sequences, and the sampler
+itself under a stand-in tensor library for exact batch length, index bounds, determinism given the
+seed, seed sensitivity, and the degenerate corpora (one sequence, one image, no mv/redirection at
+all, empty command lists). No performance claim is measured.
+
+ON THE OTHER AXES
+
+I kept the parent's arch, head, objective, optim, target and stream unchanged. The partner's
+distinguishing pieces are on arch and head, and neither is checkable from inside this jail — the
+partner's trunk and the parent's trunk are different families, and the parent's arch builds on a
+base module that is not present here, so I cannot tell whether the parent's head aux is even active
+against it. Swapping a trunk blind is a coin flip large enough to swamp the batcher effect in both
+directions, so the crossover is carried on the axis where I could verify both parents' mechanisms
+against the data.

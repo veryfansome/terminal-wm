@@ -1,0 +1,154 @@
+CANDIDATE: objective = r2_routed_recall_namedecoy (crossover of the parent's
+r12_antiretrieval_ring_negatives with the partner's plain mse). Only the objective axis changed;
+arch / optim / batcher / head / target / stream are the parent's, verbatim.
+
+================================================================================
+1. THE FACT ABOUT THE DATA THIS IS BUILT ON
+================================================================================
+
+I read evolve/jail_data/train_sample.jsonl (24 trajectories, 724 steps) and counted, not guessed.
+The observation a step carries is render_obs(step) = "cwd=<cwd> exit=<exit>\n<truncated output>"
+(realenv/seq_worldmodel.py). Two consequences that neither parent uses:
+
+(a) THE ROUTED READ HAS A BIT-IDENTICAL TARGET TO ITS EXPOSE. A cups window does
+        cat /tmp/w/cups/g53/f149.tmp            (role cups_expose, slot 4)
+        ... four more exposes ...
+        mv /tmp/w/cups/g53/f149.tmp /tmp/w/cups/usr/share/misc/magic.txt.1
+        cat /tmp/w/cups/usr/share/misc/magic.txt.1   (role cups_test)
+    The test step's output text is byte-identical to the expose step's output text, cwd and exit
+    are the same, so render_obs is the same string and the frozen encoder gives the SAME target
+    embedding. Same for the cvar arm (cvar_expose -> cvar_test through a redirect). So the rows
+    the compositional metric reads are exactly the rows whose target is a DUPLICATE of an earlier
+    row's target in the same trajectory.
+
+(b) DUPLICATE-GROUP SIZE SEPARATES CONTENT FROM PLUMBING, WITH A GAP. Pooling all 724 steps and
+    counting how many rows share each rendered observation gives group sizes
+        {1: 266, 2: 144, 3: 30, 4: 4} ... then {18, 35, 227}.
+    The three big classes are the empty-output observations ("cwd=/ exit=0\n" from every mv and
+    every redirect, 227 rows = 31% of the corpus) and repeated `cd`/`ls` anchors. Content
+    duplicates are groups of 2 or 3, because every canary in the corpus is a fresh random hex
+    string. A threshold of group_size <= 4 separates the two populations with a 4-to-18 gap.
+    Rows in small groups that duplicate an earlier row: 95 of 724 = 13.1%, and their roles are
+    cvar_test 51, cups_test 24, cwd_anchor 8, cvar_expose 5, cups_ctx 4, read 3. That is the
+    compositional slice, recovered from the targets alone with no metadata.
+
+(c) SOME SMALL-GROUP DUPLICATES ARE NOT ROUTED CONTENT. `cat /tmp/w/cvar/g0/s1.dat` issued twice
+    is a duplicate pair whose two commands are the SAME STRING. Re-emitting an observation you
+    have already seen under the same command is retrieve-by-command, the shortcut, not routing.
+    The routed pairs are exactly the duplicate pairs whose two commands DIFFER: the content is at
+    a new path because something moved it there.
+
+(d) THE DECOY IS BUILT INTO THE PATH. The mv destination is an existing exposed path plus a
+    numeric suffix: `/tmp/w/cups/usr/share/misc/magic.txt.1` when slot 1 was exposed at
+    `/tmp/w/cups/usr/share/misc/magic.txt`. The read command at the test step is therefore
+    lexically nearest to the expose command of the WRONG content, and the correct answer is the
+    content whose own expose command looks nothing like the read. Name similarity actively points
+    at the wrong candidate.
+
+================================================================================
+2. WHAT THE CODE COMPUTES THAT NEITHER PARENT COMPUTES
+================================================================================
+
+The module sets WANTS_CTX = True and receives ctx["cmd"], the standardized command embedding per
+row (baseline_interleave.extract_cmd_input = batch["tok"][:, 0::2]). Row order is load-bearing and
+is guaranteed: harness.py takes pred/tgt as cmd_pred[m] with m = cmd_mask [B, maxn], so boolean
+masking returns rows in row-major order, i.e. each trajectory's steps contiguous and in step order.
+
+Everything below is detached; only pred flows gradient.
+
+  ROUTED-RECALL DETECTION (new). T[i,j] = ||tgt_i - tgt_j||^2 / D. dup = T < eps_dup with
+  eps_dup = 0.005 * 2 * mean(tgt^2), i.e. ~0.5% of the mean pairwise target distance -- bit-equal
+  targets sit at ~1e-7, the closest genuinely-distinct pair is orders of magnitude further.
+  group(i) = dup[i].sum(). small(i) = group(i) <= 4, which is fact (b) in code and removes the
+  blank-observation cluster. partner(i,j) = dup & i!=j & small_i & small_j & in-band.
+  moved(i) = has_partner(i) * clamp((1 - min_j cos(cmd_i, cmd_j)) / 0.02, 0, 1). An identical
+  command string gives cosine exactly 1 so moved = 0 -- that is fact (c) in code: literal repeats
+  get nothing, content that arrived under a different command gets 1.
+
+  WHAT moved() IS USED FOR. (i) a second regression term mse_routed = mean of the per-row MSE over
+  moved rows, weight 0.5, which on a 13%-routed batch multiplies the regression pressure on the
+  routed reads by ~4.8x; (ii) a row weight 1 + 3*moved on the listwise and hinge terms.
+
+  BOARD-BAND NEGATIVES (new). The listwise softmax for anchor i draws its negatives only from rows
+  within +/-32 positions in the flattened order -- the same trajectory, i.e. the other CONTENTS ON
+  THE SAME BOARD -- excluding i's duplicate class and excluding big-group (blank) rows. Measured
+  span between a duplicate and its partner in the sample: median 5 rows, max 16, and the longest
+  trajectory is 32 steps, so a 32-row radius covers a whole board. The parent draws negatives from
+  the whole batch by target-target proximity; those are mostly other systems' observations, which
+  are trivially separable and give near-zero gradient. The eval's forced-foil candidate set IS the
+  set of contents exposed on this board, so the band makes the training discrimination the same
+  discrimination the metric scores.
+
+  NAME-DECOY NEGATIVE WEIGHTING (new, and the inverse of the parent's ring). The parent weights
+  negatives by TARGET-target proximity and gives near-zero weight to near-identical targets, which
+  in this corpus deletes precisely the routed pair (fact (a)) as a presumed false negative. This
+  module instead treats the duplicate class as the positive class and weights the negatives by
+  COMMAND-embedding cosine to the anchor's command: a = (1 + kappa*n_neg*softmax(cos/tau)) /
+  (1 + kappa), added as log(a) to the logits, kappa = 4, tau = 0.05. The hardest negative becomes
+  the candidate whose own read command most resembles this one's -- fact (d), the name decoy. The
+  hinge term is the same idea made hard: softplus((d_true + 0.5 - d_decoy)/0.25) against the single
+  most command-similar in-band candidate, in the eval's own squared-L2 decision variable.
+
+  KEPT FROM THE PARENT: the per-dimension precision weighting of the distance space, the focal
+  (1-p)^gamma reweighting of the listwise NLL, and the margin-hinge form.
+  KEPT FROM THE PARTNER: plain unweighted MSE to the standardized target at full weight 1.0 as the
+  backbone (the parent had demoted it to an 0.05 anchor). The eval's decision variable is raw
+  squared L2, so the regression to the actual embedding is not a formality.
+
+  total = mse + 0.5*mse_routed + 1.0*listwise + 0.2*hinge.
+
+================================================================================
+3. WHY THIS SHOULD MOVE comp_ca
+================================================================================
+
+comp_ca is native_hit - swap_stayed. A predictor that keys on the read command's own name
+predicts identically in both arms and contributes structurally zero; a predictor that keys on move
+position cancels only in expectation. The only thing that survives both arms is having carried a
+particular content's identity through the chain.
+
+Under plain MSE, 31% of the gradient goes to rows whose target is the constant empty observation
+and only ~13% to the routed reads, all at equal per-row weight. This module reallocates: on a
+synthetic batch shaped like the real corpus (8 trajectories x 30 steps, five confusable contents
+per board, a routed read whose command is 0.85-cosine to the wrong expose's command) the routed
+rows carry 72% of the squared-gradient mass against 6.7% under MSE, and blank rows fall to 0.7%.
+More directly: filling the routed row with the name-decoy content instead of the routed content
+costs +0.0081 under MSE and +0.355 under this objective, a ~44x larger penalty for making exactly
+the mistake the role-swap arm is designed to expose. Those are properties of the loss surface
+measured on synthetic data, not a prediction about the score; I have not run the harness and make
+no claim about the number.
+
+The two parents both sit at the -0.0075 floor. The parent's mechanism is a batch-global contrastive
+whose negatives are chosen by target similarity and whose duplicate mask deletes the routed pair;
+the partner's is uniform regression. Neither puts any extra weight on the rows where content
+identity has to be carried, and neither penalizes the name shortcut. This is the first design in
+the pair that names the compositional rows and the decoy explicitly, from the targets and commands
+alone.
+
+================================================================================
+4. WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+================================================================================
+
+- The bottleneck is representational, not allocational. If the arch simply cannot bind a content to
+  a location across a 3-4 move chain, then concentrating 5x the gradient on the reads that require
+  it changes nothing, and the loss just spends capacity worse. This is the most likely failure.
+- Group-size <= 4 mis-fires on the real training split. The gap in the sample is 4 vs 18, but the
+  gate is computed inside a +/-32 band, not globally. If a batch region happened to contain fewer
+  than five blank observations in a 65-row window, a blank pair with two different commands would
+  be flagged as routed and would be upweighted to predict the constant empty observation. I
+  measured 8-15 blank rows per 30-step trajectory, so the band should always contain well over
+  four; if the real split has trajectories with almost no mv/redirect steps this breaks.
+- Row contiguity. The band assumes flattened rows are per-trajectory contiguous in step order.
+  That is what harness.py + baseline_interleave.collate do today, and the genome pins
+  stream = baseline_interleave. Under a different stream layout the band would degrade into an
+  arbitrary in-batch negative set (the parent's regime), not into an error.
+- Command cosine does not separate. moved() assumes identical command text gives cosine 1 and any
+  other command gives < 0.98 in standardized embedding space. If standardized command embeddings
+  for e.g. `.../g3/s1.dat` and `.../g3/out.dat` come back above 0.98, those cvar rows silently lose
+  their boost -- the cups rows, whose paths differ completely, would still fire. This degrades the
+  effect rather than corrupting it.
+- Overweighting hurts the rest. mse_routed and the row weight take capacity away from the ~87% of
+  rows that are ordinary next-observation prediction. If the model needs that breadth to build the
+  latent state the routed reads are read out of, rho = 3 / w_rmse = 0.5 may be too aggressive.
+- Cost. The band is computed in 256-row chunks against a 320-row candidate window, so the cost is
+  O(n * 320 * D) rather than O(n^2 * D): 3 forward+backward passes at n = 1920 rows take 0.12 s on
+  CPU here, well under the parent's two full n x n x D matmuls. Speed is not the risk.

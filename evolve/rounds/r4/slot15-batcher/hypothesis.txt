@@ -1,0 +1,129 @@
+WHAT I MEASURED IN THE DATA FIRST (evolve/jail_data/train_sample.jsonl, 24 sequences, 724 steps)
+
+262 of 724 steps (36.2%) produce an EMPTY observation: every `mv SRC DST` and every
+`cat SRC > DST` / `cat SRC >> DST` returns exit 0 with no output. render_obs turns such a step
+into exactly one of two strings, "cwd=/ exit=0\n" or "cwd=/data exit=0\n" (cwd takes only those
+two values in the whole sample). Identical text through the frozen encoder is an identical
+embedding, so after standardization 36% of all training rows carry one of two IDENTICAL target
+vectors. Both parents train on this with r12_antiretrieval_ring_negatives, whose listwise term is
+a row-vs-row softmax over in-batch targets. For a row inside a clique of k identical targets the
+best attainable p_true is 1/k, so its NLL floor is log k, and the focal factor (1 - p_true)^GAMMA
+is ~1 for exactly those rows: the loss term that cannot be reduced is also the one that gets the
+largest weight. With bs=64 sequences of ~30 steps the batch has ~1900 rows, ~700 of them in that
+clique, so a majority of the listwise loss is an irreducible constant whose gradient asks the
+model to separate vectors that are equal. That is the single largest thing I found wrong in the
+inherited stack, and it is invisible from the impl sources alone.
+
+I also parsed the move chains from the command strings alone. Contents are exposed by `cat P`,
+transported by `mv SRC DST` and by `cat SRC > DST` / `cat SRC >> DST`, and read back by a later
+`cat P`. Across the sample there are 59 reads of a transported content; their hop counts are
+1:36, 2:11, 3:4, 4:5, 5:2, 6:1. Summing the SQUARE of the hop count per sequence gives a
+per-sequence transport mass ranging 4..36 (mean 12.5), i.e. a ~9x spread between the sequences
+that carry deep-chain supervision and the ones that carry almost none.
+
+WHAT I CHANGED
+
+1. objective -> r4_dupclass_ring_negatives (new).
+   The listwise term is recomputed over EQUIVALENCE CLASSES of coincident targets instead of over
+   rows. In the no_grad block I form `coincident = (tt < 1e-3) | eye` on the same precision-weighted
+   target-target distance matrix `tt` the parent already builds, subtract `log_mult` (the column's
+   class size) from every column's logit, zero `log_a` inside a class, and take each row's numerator
+   as a log-sum-exp over its own class (`log_num`) rather than the diagonal alone. A clique of k
+   identical targets therefore contributes the mass of ONE point to the denominator and is fully
+   attainable as a positive, so its NLL goes to ~0 instead of log k, and the focal factor stops
+   up-weighting it. Everything else -- precision weighting, the confusability ring `a`, the gated
+   repulsion hinge, the anchor MSE -- is byte-for-byte the parent's. When every target in the batch
+   is distinct, `coincident` reduces to `eye`, `mult` is all ones, `log_mult` is 0, `log_a` is
+   unchanged, and `log_num` is the diagonal logit: the loss is then term-by-term the parent's loss.
+   The threshold is deliberately 1e-3 on tt (squared L2 over 768 standardized dims): float32
+   cancellation error for a genuinely identical pair lands near 1e-7, while two DIFFERENT canary
+   contents in the same file template are orders of magnitude further apart. The failure mode I am
+   guarding against is collapsing genuine foils into one class, which would destroy the very
+   discrimination the score measures; 1e-3 buys ~4 orders of magnitude of margin against it.
+   Neither parent computes any class structure over targets; both treat two identical targets as a
+   positive/negative pair.
+
+2. batcher -> r4_distinct_blocked_transport_sampler (new, my assigned axis).
+   Two things neither parent's batcher does.
+   (a) NO DUPLICATE SEQUENCES IN A BATCH. r6_sysblock_hardneg_curriculum draws its hard fraction
+   with `pool[torch.randint(...)]` -- with n_block_images=1 and hard_frac_max=0.75 that is 48 draws
+   WITH replacement from a single image's pool, so a batch routinely contains the same sequence
+   several times. Every repeat is ~30 more exactly-identical target rows, i.e. the batcher itself
+   manufactures the clique problem described above, and it spends batch slots on negatives that
+   carry no new information. Here the blocked part and the global part are both drawn WITHOUT
+   replacement (Efraimidis-Spirakis weighted-reservoir keys `log(u)/w`, top-k), and the indices
+   already taken by the blocked part are set to -inf before the global part is drawn, so all bs
+   indices of a batch are distinct whenever len(fit) > bs.
+   (b) TRANSPORT-MASS IMPORTANCE. `_transport_mass` replays the location->hop-count map from the
+   command strings only (mv and redirect move the count, a two-token `cat` of a path with a
+   positive count scores that read) and sums the SQUARE of the capped hop count. The sampling
+   weight is (mass / split-mean) clamped to [1/4, 4], raised to the power chain_alpha * ramp, so
+   the sampler is exactly uniform-without-replacement at step 1 and reaches the full tilt at
+   ramp_frac * total_steps -- the same ramp the parent uses for its blocking fraction, which is
+   kept unchanged (n_block_images=1, hard_frac_max=0.75, ramp_frac=0.3).
+   Note on what this is NOT: nothing about the resolved chain enters the model's input. The parse
+   only chooses WHICH SEQUENCES go in a batch; the tokens the model sees are the untouched
+   cmd/obs embeddings of those sequences, and the parse is never run at scoring time.
+
+3. arch -> r4_fingerprint_conditioned_composition (new; this is the crossover).
+   The parent contributes the zero-init RMS-capped nonlinear COMPOSITION RENDERER over the
+   retrieved-content channels (r22_retrieval_composition_renderer); the partner contributes the
+   CAUSAL SECOND-ORDER FINGERPRINT -- the shrunk diagonal variance of strictly earlier raw
+   observations, order-free and mean-free -- and its bias-free low-rank bounded FiLM
+   (r22_causal_variance_fingerprint_film). They are coupled, not stacked: `code` is computed once
+   in the subclass forward, then (i) injected into the renderer's HIDDEN layer by replacing
+   `self.comp_in` with `_FingerprintConditionedProjection`, which adds a zero-initialized
+   `code_proj(code)` to the renderer's pre-activation, and (ii) used, unchanged from the partner,
+   to drive the capped multiplicative/additive FiLM on the command predictions. So the composition
+   of retrieved prefix contents is conditioned on which system it is happening in, which is a term
+   neither parent has: the parent's renderer sees only trunk state, retrieval context and the
+   salience-pooled system summary, and the partner's fingerprint never touches the renderer because
+   the partner has no renderer. Both new decoders (`code_proj`, `variance_out`) are zero-initialized,
+   so at init the fused forward is exactly the parent's function, and with empty history the
+   fingerprint is structurally the shrinkage prior.
+   Live at the scored position: the fingerprint is built from observations STRICTLY EARLIER than
+   each command (the cumsums are shifted by one and padded), so at the scored command -- whose own
+   observation is withheld -- it is fully populated from the prefix rather than switched off, and
+   PAD positions are excluded via `valid`.
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN THE ABSOLUTE HIT RATE
+
+comp_ca is native_hit minus swap_stayed on the same board with the same read token, so anything
+that only rescales or recalibrates predictions uniformly cancels. What does not cancel is capacity
+spent on discriminating WHICH exposed content the chain routed to the read location. (1) and (2)
+both buy that capacity back rather than adding a new shortcut: (1) removes a majority of the
+listwise loss that is provably irreducible and, worse, focal-up-weighted, leaving the contrastive
+budget on the rows whose targets actually differ -- which are the content reads; (2) stops the
+batcher from re-manufacturing that same clique and tilts sampling toward the sequences carrying
+deep-chain reads, which is where the eligible slice (d3 and d4+) lives. (3) makes the renderer's
+composition system-conditional, which matters because scoring is on IMAGES never trained on: a
+composition rule fitted to the training systems' observation manifold has to be re-pointed at an
+unseen one, and the fingerprint is the only per-system descriptor available at the scored position.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- If the coincident-target clique is NOT actually big in the real training root (e.g. the root's
+  cwd varies much more than in the sample, so the empty-output observations are not identical),
+  change (1) reduces to the parent's loss and buys nothing. It cannot hurt in that case, but it
+  cannot help either.
+- If the irreducible clique loss was acting as an implicit regularizer -- a constant gradient that
+  kept the head from collapsing onto content directions -- removing it could overfit the training
+  images and lower transfer. I judge this unlikely because the anchor MSE still supervises the
+  empty-observation target, but it is the honest risk of (1).
+- If 1e-3 on tt is too loose for this encoder -- i.e. if two different canary contents in the same
+  file template really do land within 1e-3 of each other after standardization -- then genuine
+  foils get collapsed into one class and comp_ca should fall hard. This is the sharpest single
+  assumption in the proposal and it is a property of the frozen embeddings, which I cannot measure
+  from inside the jail.
+- If len(fit) is not comfortably larger than bs, the without-replacement draw degenerates (the code
+  falls back to the with-replacement uniform stream when len(fit) <= bs) and (2a) buys nothing.
+- If the deep-chain sequences are a small, low-variance minority of the split, the transport-mass
+  tilt is a ~9x reweighting of something that barely varies between sequences, and (2b) is noise.
+  On the sample the spread is 4..36, which is enough to matter, but the sample is 24 sequences.
+- If the composition renderer is already saturated or its gate stays closed, the extra conditioning
+  term in (3) never activates and the arch reduces to the partner's post-hoc FiLM on the parent's
+  renderer -- a plain stack, which is the weaker of the two things I claim.
+- Speed: (2) costs one torch.rand(len(fit)) and two topk per step on CPU, and (3) adds three
+  cumsums over the observation tokens plus two small matmuls per forward. Both are unmeasured here
+  (no torch in the jail); I expect them to be negligible against the transformer forward, but that
+  expectation is not measured.

@@ -1,0 +1,37 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r3_fwl_orthogonalized_ring_contrast",
+   "params": {}
+  },
+  "arch": {
+   "impl": "r23_dual_address_transport_pointer",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {},
+   "bs": 64
+  },
+  "target": {
+   "impl": "neighbor_contrast_shaped_target",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency",
+   "params": {}
+  }
+ }
+}

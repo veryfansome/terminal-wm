@@ -1,0 +1,109 @@
+CANDIDATE: neighbor_contrast_shaped_target (axis: target). Only the target axis is changed; the
+rest of the genome is the parent's, unchanged.
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+The two programs differ on the target axis exactly as identity vs ridge_zca_whitened_obs. The map
+I propose contains both as parameter settings of one family: the forward map is
+
+    F  =  Cov_contrast^(q/2) . Cov_total^(-a/2)          (defaults q = 1.0, a = 0.5)
+    F^-1 = Cov_total^(a/2) . Cov_contrast^(-q/2)
+
+so q = a = 0 is the parent's identity, and q = 0, a > 0 is a ridge-shrunk symmetric whitening of
+the target space -- the partner's mechanism. The new term is Cov_contrast, which neither program
+computes. From the rest of the partner's genome I deliberately keep nothing, and the reason is
+mechanical, not stylistic: r3_rename_registry_occupancy_routing adds its registry read into the
+model's PREDICTION through a per-dimension (diagonal, zero-init) scale while its aux loss trains
+that read toward the RAW observation token. A diagonal scale cannot absorb a rotation, so that
+head and any non-diagonal target map pull the same tensor in two different bases. The parent's
+head and arch have no such coupling (r23's pointer injection is a full learnable (D,D) readout,
+which can absorb any fixed linear map), and the parent's objective is exactly equivariant to a
+linear target map: its FWL nuisance is a kernel-ridge solve that is linear in the target, so
+crossfit(basis, T F^T) = crossfit(basis, T) F^T, and every one of its scales is a fraction of the
+batch's own mean pair distance. Composing my map with the parent's objective therefore changes
+the geometry it contrasts in without changing anything else about it.
+
+WHAT Cov_contrast IS, MECHANICALLY
+Inside make_target, under no_grad, with no trainable parameters:
+  - Rows arriving in one call are the cmd-position rows of one batch, grouped by sequence in
+    order. A sequence's first row is the one whose z_prev is exactly the zero vector (the harness
+    builds z_prev as a strict-causal shift with a zero first column), so cumsum over those flags
+    recovers a segment id per row without reading any command, path or step index.
+  - Within a segment I form all pairwise squared distances, drop pairs closer than dup_frac times
+    the mean within-segment pair distance (this is what removes the exact repeats: every mv /
+    redirect step in this data renders to the same "cwd=... exit=0" observation, and a file is
+    frequently cat'ed twice), take each row's nearest surviving neighbour, and keep only the rows
+    in the closer half of that nearest-neighbour distribution.
+  - Cov_contrast is the running second moment of those kept differences (z_i - z_nn(i)).
+Cov_total is the running covariance of the same target rows.
+
+WHY THIS SHOULD MOVE comp_ca AND NOT SOMETHING ELSE
+The scored quantity is an N-way forced-foil pick: after a silent chain of moves, is the model's
+predicted next observation closer to the content the chain actually routed to the read location
+than to the other contents exposed in the same window. Whether that pick is right depends ONLY on
+the projection of the prediction error onto the differences between the co-window candidates. Let
+pred = true + e and let D = true - foil. The pick is correct iff 2 e.D + |D|^2 > 0. Decompose in a
+basis where the candidate-difference second moment has eigenvalues b_i: the risk is governed by
+sum_i b_i e_i^2, and an error component along a direction where all candidates agree (b_i = 0)
+adds the SAME amount to every candidate's distance and cancels out of the comparison entirely.
+So the accuracy the model should spend its capacity on is weighted by b_i -- and b_i is exactly
+what Cov_contrast estimates, because the co-window exposed contents are within-sequence rows that
+are each other's nearest non-duplicate neighbours. Training under F makes the loss a Mahalanobis
+form whose per-direction weight is F^T F, i.e. approximately b^q s^(-a); with q = 1 that is the
+weighting the argument above asks for, softened by a = 0.5 of the partner's whitening because the
+model's achievable error in a direction also grows with that direction's own spread.
+
+In the raw space the parent trains in, that weighting is badly wrong for this measurement: a
+mean-pooled sentence embedding of a config file is dominated by "this is a config file", and the
+canary that distinguishes one exposed content from its neighbour is a small, near-orthogonal
+perturbation. Every unit of MSE the model spends getting the shared style right is invisible to
+comp_ca. Concretely for the arch in this genome (r23 transports a content vector to a destination
+address and then copies one raw prefix observation into the prediction), the gradient that says
+"you copied the WRONG prefix observation" lives entirely in the difference directions this map
+amplifies, and the gradient that says "you got the average file-shape right" lives in the
+directions it damps.
+
+WHY IT IS NOT THE PRIOR within_sequence_contrast_equalizer
+That mechanism reweights inside a rank-32 subspace obtained by orthogonal iteration on the TOTAL
+second moment, i.e. inside the 32 highest-energy directions -- which is where the shared style
+lives and where the content differences are least likely to lie -- and it measures within-sequence
+deviation from the sequence MEAN, which is dominated by ls-vs-cat-vs-empty structural contrast
+rather than content-vs-content contrast. This map is full rank and is estimated from
+nearest-neighbour PAIR DIFFERENCES, in which the common mode cancels by construction.
+
+WHERE IT IS MEASURED, AND THE SWITCHED-OFF-AT-SCORING TRAP
+Nothing in the applied map is conditioned on an observation being present. make_target is called
+only during training. to_obs multiplies by a frozen buffer and adds a frozen center; it reads
+neither z_prev nor any observation, so it behaves identically at the scored position whose own
+observation is withheld. No resolved routing enters the model's input: the model's inputs are the
+same tokens the parent gets, and the only thing that changes is the basis its training loss
+measures error in.
+
+CORRECTNESS OF THE INVERSE
+Each factor is built from one eigendecomposition (float64, CPU) as V diag(g) V^T and
+V diag(1/g) V^T from the SAME eigenpairs, so F F^-1 = C W W^-1 C^-1 = I algebraically; the global
+scale is applied to F and its reciprocal to F^-1. Gains are log-centred (each factor is volume
+preserving) and clamped to a factor of 3 either way, with shrinkage 0.05 toward the identity and
+an eigenvalue floor, so the stored matrices are well conditioned and the float32 round trip is far
+below the model's own error. The map is the identity until call 300, is rebuilt every 150 calls
+with both exponents ramped linearly to full over 900 calls, and is frozen at call 1500, so the
+majority of training happens against a fixed target geometry. Cost: one [n,768]x[768,768] matmul
+per step, an [n,n] distance matrix on at most 640 rows every second step until the freeze, and
+about nine pairs of 768x768 float64 eigendecompositions in total. All of this is unmeasured -- I
+cannot run the harness from here -- but it is bounded by construction.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+1. If the nearest non-duplicate within-sequence neighbour is usually NOT another exposed content
+   (e.g. it is an ls listing or a short error), Cov_contrast estimates the wrong difference
+   subspace and the reweighting is noise. The closer-half filter is the defence; it is a
+   heuristic, not a guarantee.
+2. If the frozen encoder's low-energy directions are numerical junk rather than content, the
+   a = 0.5 whitening factor amplifies junk. The shrinkage, the eigenvalue floor and the 3x gain
+   cap bound how far, but do not eliminate it.
+3. The parent objective recomputes a per-dimension precision weight (clamped to [0.25, 4]) in
+   whatever space the target arrives in, so it partially re-flattens the DIAGONAL of my
+   reweighting each batch. It cannot undo the rotation, but it does mean the realised weighting is
+   milder than F^T F alone.
+4. If comp_ca is in fact limited by the model never forming a routing computation at all -- rather
+   than by forming one and then losing the read in a badly weighted metric -- then reshaping the
+   metric changes the loss surface without changing what the model represents, and the number
+   moves by noise.

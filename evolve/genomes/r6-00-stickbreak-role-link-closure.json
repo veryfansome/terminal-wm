@@ -1,0 +1,46 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r6_stickbreak_role_link_closure",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r5_depth_stratified_epoch_reshuffle_blocks",
+   "params": {
+    "ans_max_sim": 0.995,
+    "base_frac": 0.25,
+    "block_frac_max": 0.5,
+    "bucket_cap": 32,
+    "depth_beta": 1.2,
+    "depth_cap": 4,
+    "group_size": 4,
+    "max_filter_buckets": 1200,
+    "max_repeat": 20.0,
+    "min_stratum": 16,
+    "proj_dim": 128,
+    "ramp_frac": 0.3,
+    "sim_thresh": 0.6
+   }
+  },
+  "head": {
+   "impl": "r3_occupancy_routed_copy_transport",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r22_exact_target_equivalence_quotient",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

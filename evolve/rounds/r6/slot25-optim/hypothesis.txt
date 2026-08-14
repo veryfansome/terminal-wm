@@ -1,0 +1,105 @@
+AXES CHANGED: optim only (impl r18_spectral_capped_transition_readout -> r6_dualtimescale_slow_momentum_routing).
+All six other axes keep the parent's impl and params verbatim, and the LR-shape hyperparameters
+(warmup_frac 0.04, hold_frac 0.30, floor_ratio 0.05, beta2 0.95) and the parameter-grouping rule
+(identical-shape (key_d, d) addressing pairs; (D, D) content readouts) are byte-identical to the
+parent. The only thing that moves is the rule that turns a gradient into a step. No other axis
+needs to change: the mechanism is a change of gradient timescale, and it reads nothing about the
+model, the data layout, or the metric.
+
+THE MECHANISM
+
+Adam keeps one exponential average of the gradient with a horizon of ~1/(1-beta1) = 10 steps and
+divides by the RMS of the raw gradient. This impl replaces that core, for every parameter, with a
+two-timescale average taken from the AdEMAMix optimizer (Pagliardini et al., 2024) — a piece of
+optimization literature outside this problem's field, translated here as equations rather than as
+an analogy:
+
+  m_fast_t = b1 * m_fast_{t-1} + (1-b1) * g_t
+  m_slow_t = b3(t) * m_slow_{t-1} + (1-b3(t)) * g_t
+  v_t      = b2 * v_{t-1} + (1-b2) * g_t^2
+  step     = lr * ( m_fast_t/(1-b1^t) + alpha(t) * m_slow_t ) / ( sqrt(v_t/(1-b2^t)) + eps )
+  decoupled weight decay: p <- p * (1 - lr*wd) before the step
+
+with alpha(t) = alpha * min(1, t/T_alpha) and b3(t) the paper's inverted-log warmup from 0.9 to
+b3_end, b3(t) = exp( ln(b3_0)*ln(b3_end) / ( (1-f)*ln(b3_end) + f*ln(b3_0) ) ), f = min(1, t/T_b3).
+m_slow deliberately carries no bias correction, so its contribution is small until roughly one
+slow horizon has elapsed.
+
+Two things here are mine rather than the paper's, and both exist because this search trains under
+a fixed step budget rather than a fixed wall clock. (1) The slow horizon is derived from `steps`:
+b3_end = 1 - 1/(0.35*steps), clamped to [0.98, 0.9999], so the slow average always spans about a
+third of whatever budget the harness passes instead of a hard-coded 10k-step horizon that a short
+run would never reach. (2) T_alpha = T_b3 = 0.6*steps, so the first ~third of the run (the warmup
+and the LR hold) is effectively plain Adam and the slow term only takes over across the cosine
+anneal.
+
+The addressing pairs get the same direction. The parent runs Muon on the identical-shape
+(key_d, d) read/write projections: Nesterov momentum, then Newton-Schulz orthogonalization, then a
+step whose size is fixed by rms_match*sqrt(max_dim). Here the vector fed to Newton-Schulz is the
+same dual-timescale direction m_fast/(1-b1^t) + alpha(t)*m_slow instead of a 20-step heavy ball.
+Because orthogonalization flattens the singular values, adding the slow term cannot change the
+size of that step at all — only its direction — so this arm carries no stability cost. The
+power-iteration soft spectral cap on (D, D) readouts is kept unchanged, as a norm guard, not as
+the mechanism.
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN JUST THE LOSS
+
+comp_ca rewards exactly one thing: carrying a particular content's identity through a chain of
+silent moves, so that reading a location returns what is actually there. Location-keying cancels
+per window by construction; chain-position keying cancels only in expectation.
+
+The parameters that implement carrying are the ones whose gradient arrives through the recurrent
+memory: tr_path / tr_in / tr_out / tr_read in the arch's per-path transition store, and the
+delta-rule addressing pairs. That memory is written with a decay factor per step, so the gradient
+that reaches an early write from a late read is discounted geometrically in the number of
+intervening commands — it is a small, persistent signal riding under per-batch noise that is
+several times larger. Adam's denominator normalizes by the RMS of the raw gradient, which contains
+both, and its 10-step numerator averages away almost none of the noise: the routing signal and the
+noise are boosted by the same factor. A long-horizon average is a matched filter for exactly this
+component — noise that is independent across batches shrinks like 1/sqrt(horizon) inside m_slow
+while a direction that is consistent over hundreds of steps survives at full amplitude. Adding
+alpha*m_slow to the numerator while leaving the denominator on the fast second moment therefore
+raises the effective step size *selectively*, on the consistent directions only: where gradients
+decorrelate, m_slow is near zero and the update is unchanged Adam.
+
+Three concrete consequences I expect, in order of how directly they are observable:
+ 1. Lower training loss at the same step count, since the budget is fixed and the paper's central
+    claim is a per-step convergence gain.
+ 2. The gain concentrated on windows with more intervening moves (the d4+ half of the eligible
+    slice rather than d3), because the discounting argument above is what the slow average is
+    supposed to undo, and the d3 windows already get a comparatively undiscounted signal.
+ 3. comp_ca above the parent's +0.0187. I state this as unmeasured. No miniature run was performed
+    and none would be informative here.
+
+Secondarily, because alpha reaches full strength as the LR anneals, the last 40% of the run is an
+implicit iterate average — the update direction is dominated by a mean of hundreds of past
+gradients — which should behave like a Polyak tail while still steering the trajectory rather than
+only overwriting the endpoint. This is a plausible route to better transfer across held-out
+IMAGES, but it is a side effect of the timescale, not a separate mechanism, and I am not claiming
+it independently.
+
+FALSIFICATION
+
+If the compositional signal is not a small-but-consistent gradient component — if instead it is
+absent, or it is present but the model already fits it inside the budget — then the slow term adds
+nothing beyond a modest effective-LR increase, training loss lands at or near the parent's, and
+comp_ca moves within noise. If it is the opposite of consistent (the routing gradient flips sign
+across batches because different windows want different addressing), m_slow will average toward
+zero and the impl degenerates to plain Adam at a slightly lower lr, which would show as comp_ca
+just below the parent's. Either outcome is a clean read on whether the timescale is the binding
+constraint.
+
+RISK AND HOW IT IS BOUNDED
+
+The failure mode is instability: on a perfectly consistent direction the numerator can reach
+(1+alpha)=3x Adam's, so the peak per-element step is up to 3*lr. I set lr = 4e-4, below the
+parent's 5e-4, so the peak effective step is 1.2e-3 against the parent's 5e-4, and it is only
+reached late in the run when the cosine multiplier is already falling. alpha = 2.0 is at the
+conservative end of the published range (5-10 for large language models). The harness's global
+grad-norm clip at 1.0 and the retained spectral cap are unchanged. This lr choice does mean the
+comparison is not a pure single-variable swap; I chose the safety over the purity, and note that
+holding lr at 5e-4 would have raised the effective step further rather than isolating anything.
+
+COST: three optimizer buffers per parameter instead of two, and elementwise arithmetic only. On a
+model of this size that is a few tens of MB and no measurable step-time change. The Newton-Schulz
+arm does exactly the work the parent's Muon arm already did, on the same five-to-seven matrices.

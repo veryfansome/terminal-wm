@@ -1,0 +1,117 @@
+MECHANISM: gradient-metric address whitening (axis optim only)
+
+One axis changed: optim, from r18_spectral_capped_transition_readout to
+r6_gradmetric_address_whitening. Every other axis keeps the parent's impl and params verbatim
+(arch r22_observation_occlusion_denoising, objective r12_antiretrieval_ring_negatives, head
+r18_transition_forwardmodel_consistency, batcher r6_sysblock_hardneg_curriculum with the parent's
+params, identity target, baseline_interleave stream). The new impl keeps every mechanism of the
+parent optimizer bit-for-bit: the same warmup-hold-cosine-floor lambda, the same AdamW settings,
+the same identical-shape sibling rule for finding addressing projections, the same Muon
+(Newton-Schulz orthogonalized) update on that set, and the same soft power-iteration spectral cap
+on (D,D) latent-transition readouts. The only difference from the parent is one added post-step
+projection.
+
+WHAT IT DOES. Both the parent's arch and the crossover partner's arch route content through a
+linear content store addressed by a code produced by a small matrix W of shape (key_d, in): in the
+parent's r18/r22 lineage these are file_read/file_write, path_read/path_write and tr_path; in the
+partner's r23 lineage they are addr_src/addr_dst. Every read at depth n is a sum over all earlier
+writes weighted by the inner product of the read address with each write address, so what limits
+compositional depth is address collision: any pair of distinct contents whose codes are not well
+separated leaks into the other's slot, and the leak compounds with the number of moves in the
+chain. Muon orthogonalizes the *update* to W, which equalizes how fast directions of W are learned;
+it says nothing about whether the *realized* address cloud W x, over the command distribution the
+layer actually sees, is spread out or collapsed onto the few directions in which command
+embeddings vary most (verb, output format, path prefix). File identity is exactly a low-variance
+direction of that distribution, so a map that merely fits the loss is free to let it be swamped.
+
+The added mechanism estimates the input second-moment matrix of each addressing layer from its own
+gradients and then constrains W to be an isometry in that metric. For a linear layer,
+grad_W = sum_n delta_n x_n^T, so grad^T grad = sum_{n,m} x_n (delta_n . delta_m) x_m^T, whose
+expectation is the input second moment weighted by the squared output-gradient norm and whose
+cross terms average toward zero: this is the KFAC input factor A, obtained for free from tensors
+the optimizer already holds. The optimizer keeps a trace-normalized exponential average A of that
+quantity (so only its shape, never the gradient magnitude, is used), shrinks it toward the identity,
+and after each optimizer step takes one descent step on (1/4)||W A W^T / c - I||_F^2 with
+c = trace(W A W^T)/key_d. Its gradient is (W A W^T/c - I) W A / c, applied with a step capped so a
+single projection can never move W by more than whiten_rho of its own Frobenius norm. Because the
+target is normalized by its own mean diagonal, the constraint fixes only the conditioning of the
+map and is exactly invariant to the scale of W, which matters because every arch in this lineage
+unit-normalizes the address before using it, so scale is a nuisance coordinate and geometry is the
+only thing worth constraining. Setting whiten_shrink to 1 degrades the mechanism to plain row
+isometry W W^T proportional to I; setting whiten_rho to 0 recovers the parent exactly.
+
+WHY THIS IS THE CROSSOVER. The parent and the crossover partner select the same optim impl, so
+there is nothing to recombine at the level of impl names; the substantive recombination is at the
+level of mechanism. The partner's distinctive idea is its target chunk: estimate a second-moment
+matrix online under no_grad, and reshape the space by a symmetric matrix power of it so that the
+directions along which mutually confusable items actually differ are no longer drowned out by the
+directions carrying the most total energy. That idea is applied there to the observation space. I
+apply the same idea to the addressing side, where it can be expressed purely as an optimizer
+projection with no new trainable parameters and no change to the forward function, and combine it
+with the parent's Muon-plus-spectral-cap treatment of the same weights. I deliberately did not
+import the partner's target, objective or arch: the partner's target reshapes the very space the
+prediction is scored in, and importing it at the same time as an address-geometry change would
+make the result unattributable to either. The single-axis change keeps the comparison against the
+parent's +0.0300 clean.
+
+WHY IT SHOULD MOVE comp_ca RATHER THAN THE SHORTCUT. The metric is a paired difference between the
+native chain and a chain in which two contents exchange their move positions over the same board,
+same read location, same depth. Anything that keys on the location being read cancels exactly.
+Anything that improves the separability of *content codes* inside the memory can only pay off
+through the arm difference, because both arms present the same read location and the same number
+of moves and differ only in which content each move carries. Address collision is a failure mode
+whose cost grows with chain depth, so if the mechanism does anything I expect it to show up as a
+larger gain on the d4+ windows than on the d3 windows, with native_hit rising while swap_stayed
+falls. The parent's arch trains under ramped observation occlusion, which is the regime that
+depends most on the memory rather than on a recent observation token, so the two mechanisms should
+reinforce: with observations missing, an unrecoverable read is precisely a read whose address
+overlapped somebody else's write.
+
+The constraint is held at full strength through warmup and the LR hold, then released to zero on a
+cosine across the interval [0.55, 0.85] of the step budget, so the address code geometry is shaped
+while it is being formed and the loss owns those weights outright for the final sixth of training.
+This is a hedge against the main risk below, and it also means the weights that are finally
+measured are a minimizer of the loss and not of my regularizer.
+
+FALSIFIABLE PREDICTIONS.
+1. comp_ca exceeds the parent's +0.0300 on the same measurement; if the mechanism is inert the
+   score lands within noise of the parent, since at whiten_rho = 0 the impl is the parent exactly.
+2. The gain, if any, is concentrated in the d4+ windows; a gain that appears only at d3 with d4+
+   flat would falsify the address-collision story and point at a generic optimization effect.
+3. private.shortcut_leaning should not increase relative to the parent: the mechanism has no
+   access to chain position, only to the conditioning of a weight matrix.
+4. If instead the score falls, the most likely reading is that the loss actively wants an
+   anisotropic address map (for example deliberately collapsing all commands that touch one file
+   onto one code) and the isometry constraint fights it.
+
+RISKS AND HOW THEY ARE BOUNDED. The biggest risk is that the constraint is too strong and takes
+the address geometry away from the loss: a standalone check of the projection on small random
+matrices in exact arithmetic shows it drives the isometry residual to zero monotonically within a
+few dozen steps at this step size, so it behaves closer to a manifold constraint than to a soft
+penalty while it is on. This is bounded three ways: it fixes only conditioning and not scale, so
+it removes no distinction that the input embedding geometry carries (an isometry preserves which
+commands are near each other, it only stops the map from collapsing low-variance directions); the
+shrinkage toward the identity keeps the metric well conditioned when the gradient estimate is poor
+and the metric is not used at all until whiten_min_obs observations have accumulated; and the
+release schedule turns it off before the end of training. Second risk: the sibling rule that
+selects the constrained set is inherited unchanged from the parent, so on the parent's arch it
+also catches sys_val, which is a value projection rather than an address; I chose to keep the rule
+identical rather than to narrow it, because narrowing it would also change which parameters Muon
+updates and would stop this being a single-mechanism ablation of the parent. Third risk: cost. The
+extra work per step is one (in,in) Gram from a (key_d,in) gradient plus two small matrix products
+per addressing weight, about 30 MFLOP per step on the parent's arch against a full transformer
+step, and the extra state is one (in,in) float32 buffer per addressing weight, under 1 MB total.
+I have not been able to run the real harness from the jail, so both the cost claim and every
+performance claim above are unmeasured.
+
+CORRECTNESS NOTES. The impl introduces no trainable parameters, so there is nothing that could
+receive no gradient: every parameter is still in AdamW or in Muon and still receives the training
+loss exactly as under the parent, and the weights the projection edits are the addressing
+projections that determine the memory read at the scored command position. The genome parameters I
+introduce all act on the trajectory of those same weights. The impl never inspects a sequence, a
+length, a layout or a mask, so it is indifferent to the odd-length [cmd_0, obs_0, ..., cmd_r]
+scored layout. It defines no nn.Module and therefore shadows no nn.Module internal. It leaves the
+command tokens untouched, so no code_cmds is involved and the instrument reproduces the tokens
+exactly as for the parent. All projection arithmetic is done in float32 with finiteness guards
+before every in-place write, and any non-finite intermediate causes that parameter to be skipped
+for that step rather than corrupted.

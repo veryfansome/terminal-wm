@@ -1,0 +1,43 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r3_fwl_orthogonalized_ring_contrast"
+  },
+  "arch": {
+   "impl": "r23_dual_address_transport_pointer"
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout"
+  },
+  "target": {
+   "impl": "zca_shrunk_target_whitening"
+  },
+  "stream": {
+   "impl": "r4_pathslot_dualaddress_code"
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency"
+  },
+  "batcher": {
+   "impl": "r5_matched_cmdreplicate_routeblocks",
+   "params": {
+    "hard_frac_max": 0.75,
+    "ramp_frac": 0.3,
+    "n_blocks": 2,
+    "img_share": 0.2,
+    "alpha_max": 2.5,
+    "proj_dim": 32,
+    "min_occ": 8,
+    "max_rate": 0.05,
+    "occ_cap": 32,
+    "max_anchors": 2000,
+    "distinct_tau": 1e-05,
+    "distinct_min": 0.85,
+    "route_bonus": 1.0,
+    "chunk_rows": 8192,
+    "ref_seqs": 128,
+    "ref_steps": 8
+   }
+  }
+ }
+}

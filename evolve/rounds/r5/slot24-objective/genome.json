@@ -1,0 +1,45 @@
+{
+  "chunks": {
+    "objective": {
+      "impl": "r5_prefix_routedepth_multipositive",
+      "params": {}
+    },
+    "arch": {
+      "impl": "r23_dual_address_transport_pointer",
+      "params": {}
+    },
+    "optim": {
+      "impl": "r18_spectral_capped_transition_readout",
+      "params": {},
+      "bs": 64
+    },
+    "target": {
+      "impl": "identity",
+      "params": {}
+    },
+    "batcher": {
+      "impl": "r2_routedepth_tilt_readcollision_blocks",
+      "params": {
+        "alpha_max": 2.5,
+        "ans_max_sim": 0.995,
+        "chunk": 256,
+        "coll_share": 0.5,
+        "hard_frac_max": 0.75,
+        "max_centers": 8000,
+        "n_blocks": 2,
+        "nb_k": 16,
+        "proj_dim": 128,
+        "ramp_frac": 0.3,
+        "sim_thresh": 0.85
+      }
+    },
+    "stream": {
+      "impl": "r4_pathslot_dualaddress_code",
+      "params": {}
+    },
+    "head": {
+      "impl": "r18_transition_forwardmodel_consistency",
+      "params": {}
+    }
+  }
+}

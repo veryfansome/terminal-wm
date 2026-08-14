@@ -1,0 +1,455 @@
+{
+ "seed": "r6",
+ "slots": [
+  {
+   "slot": 0,
+   "parent": "r5-08-depth-stratified-epoch",
+   "parent_fitness": -0.007491,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-19-rolesplit-srcdst-channel",
+    "r4-16-erasing-dualaddress-transport"
+   ],
+   "seed": "r6:0",
+   "axis": "arch"
+  },
+  {
+   "slot": 1,
+   "parent": "g0-16-retrieval-composition",
+   "parent_fitness": 0.029963,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-06-ridge-zca-whitened",
+    "r5-06-neighbor-contrast-shaped"
+   ],
+   "seed": "r6:1",
+   "axis": "batcher"
+  },
+  {
+   "slot": 2,
+   "parent": "r4-17-trajectory-transport-contrast",
+   "parent_fitness": 0.007491,
+   "operator": "cross",
+   "cross_with": "r5-04-persistent-gradient-mixture",
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-15-distinct-blocked-transport",
+    "r5-00-role-addressed-transport"
+   ],
+   "seed": "r6:2",
+   "axis": "head"
+  },
+  {
+   "slot": 3,
+   "parent": "r5-06-neighbor-contrast-shaped",
+   "parent_fitness": 0.059925,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-04-persistent-gradient-mixture",
+    "r5-23-chainhop-hindsight-transport"
+   ],
+   "seed": "r6:3",
+   "axis": "objective"
+  },
+  {
+   "slot": 4,
+   "parent": "g0-12-obs-occlusion-denoising",
+   "parent_fitness": 0.029963,
+   "operator": "cross",
+   "cross_with": "r5-06-neighbor-contrast-shaped",
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r3-00-reference-closure-transport",
+    "g0-05-dualpre-transition"
+   ],
+   "seed": "r6:4",
+   "axis": "optim"
+  },
+  {
+   "slot": 5,
+   "parent": "r4-09-chainlink-route-transport",
+   "parent_fitness": 0.003745,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-24-prefix-routedepth-multipositive",
+    "r4-05-role-bound-path"
+   ],
+   "seed": "r6:5",
+   "axis": "stream"
+  },
+  {
+   "slot": 6,
+   "parent": "r3-05-srcdst-hashslot-coding",
+   "parent_fitness": -0.003745,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-18-relsam-spectral-transport",
+    "r4-07-complement-address-transport"
+   ],
+   "seed": "r6:6",
+   "axis": "target"
+  },
+  {
+   "slot": 7,
+   "parent": "r4-09-chainlink-route-transport",
+   "parent_fitness": 0.003745,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-20-confusable-contrast-metric",
+    "r5-17-decision-direction-metric"
+   ],
+   "seed": "r6:7",
+   "axis": "arch"
+  },
+  {
+   "slot": 8,
+   "parent": "r4-04-tailcycle-snapshot-average",
+   "parent_fitness": 0.026217,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-17-decision-direction-metric",
+    "r3-07-pointer-unbind-transport"
+   ],
+   "seed": "r6:8",
+   "axis": "batcher"
+  },
+  {
+   "slot": 9,
+   "parent": "r3-01-depthtilted-sysblock-curriculum",
+   "parent_fitness": 0.018727,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-05-shared-pathid-signed",
+    "r4-18-twotimescale-router-polyak"
+   ],
+   "seed": "r6:9",
+   "axis": "head"
+  },
+  {
+   "slot": 10,
+   "parent": "r5-00-role-addressed-transport",
+   "parent_fitness": 0.026217,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-19-rolesplit-srcdst-channel",
+    "r2-01-routed-collision-depth"
+   ],
+   "seed": "r6:10",
+   "axis": "objective"
+  },
+  {
+   "slot": 11,
+   "parent": "g0-16-retrieval-composition",
+   "parent_fitness": 0.029963,
+   "operator": "cross",
+   "cross_with": "r5-23-chainhop-hindsight-transport",
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-24-prefix-routedepth-multipositive",
+    "r2-08-routedepth-tilt-readcollision"
+   ],
+   "seed": "r6:11",
+   "axis": "optim"
+  },
+  {
+   "slot": 12,
+   "parent": "r5-09-move-substitution-paired",
+   "parent_fitness": -0.003745,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-06-neighbor-contrast-shaped",
+    "r4-15-distinct-blocked-transport"
+   ],
+   "seed": "r6:12",
+   "axis": "stream"
+  },
+  {
+   "slot": 13,
+   "parent": "r5-00-role-addressed-transport",
+   "parent_fitness": 0.026217,
+   "operator": "cross",
+   "cross_with": "r4-14-backchain-pointer-resolution",
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-08-depth-stratified-epoch",
+    "r4-19-rolesplit-srcdst-channel"
+   ],
+   "seed": "r6:13",
+   "axis": "target"
+  },
+  {
+   "slot": 14,
+   "parent": "g0-12-obs-occlusion-denoising",
+   "parent_fitness": 0.029963,
+   "operator": "cross",
+   "cross_with": "r4-16-erasing-dualaddress-transport",
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-04-tailcycle-snapshot-average",
+    "r3-09-rename-registry-occupancy"
+   ],
+   "seed": "r6:14",
+   "axis": "arch"
+  },
+  {
+   "slot": 15,
+   "parent": "g0-15-prefix-content-xattention",
+   "parent_fitness": 0.011236,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-17-trajectory-transport-contrast",
+    "r4-11-flatbasin-lsam-tailavg"
+   ],
+   "seed": "r6:15",
+   "axis": "batcher"
+  },
+  {
+   "slot": 16,
+   "parent": "g0-13-obspresent-imagination",
+   "parent_fitness": 0.003745,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r2-08-routedepth-tilt-readcollision",
+    "r4-06-ridge-zca-whitened"
+   ],
+   "seed": "r6:16",
+   "axis": "head"
+  },
+  {
+   "slot": 17,
+   "parent": "r5-17-decision-direction-metric",
+   "parent_fitness": 0.014981,
+   "operator": "cross",
+   "cross_with": "r3-09-rename-registry-occupancy",
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-00-role-addressed-transport",
+    "r5-26-dual-role-path"
+   ],
+   "seed": "r6:17",
+   "axis": "objective"
+  },
+  {
+   "slot": 18,
+   "parent": "r4-11-flatbasin-lsam-tailavg",
+   "parent_fitness": 0.022472,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-08-depth-stratified-epoch",
+    "r4-17-trajectory-transport-contrast"
+   ],
+   "seed": "r6:18",
+   "axis": "optim"
+  },
+  {
+   "slot": 19,
+   "parent": "r3-05-srcdst-hashslot-coding",
+   "parent_fitness": -0.003745,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-19-rolesplit-srcdst-channel",
+    "r4-17-trajectory-transport-contrast"
+   ],
+   "seed": "r6:19",
+   "axis": "stream"
+  },
+  {
+   "slot": 20,
+   "parent": "r5-27-confusion-discriminant-metric",
+   "parent_fitness": -0.0,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-06-ridge-zca-whitened",
+    "r5-24-prefix-routedepth-multipositive"
+   ],
+   "seed": "r6:20",
+   "axis": "target"
+  },
+  {
+   "slot": 21,
+   "parent": "g0-12-obs-occlusion-denoising",
+   "parent_fitness": 0.029963,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-15-distinct-blocked-transport",
+    "r3-09-rename-registry-occupancy"
+   ],
+   "seed": "r6:21",
+   "axis": "arch"
+  },
+  {
+   "slot": 22,
+   "parent": "r5-19-dualrole-address-mention",
+   "parent_fitness": 0.812734,
+   "operator": "cross",
+   "cross_with": "g0-00-baseline",
+   "inspirations": [
+    "r5-12-dualslot-overwrite-path",
+    "r4-14-backchain-pointer-resolution",
+    "g0-16-retrieval-composition",
+    "r2-08-routedepth-tilt-readcollision"
+   ],
+   "seed": "r6:22",
+   "axis": "batcher"
+  },
+  {
+   "slot": 23,
+   "parent": "r5-05-shared-pathid-signed",
+   "parent_fitness": 0.018727,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-18-twotimescale-router-polyak",
+    "r4-00-backward-multihop-pointer"
+   ],
+   "seed": "r6:23",
+   "axis": "head"
+  },
+  {
+   "slot": 24,
+   "parent": "r4-15-distinct-blocked-transport",
+   "parent_fitness": 0.007491,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-13-fisher-localdelta-discriminative",
+    "r5-08-depth-stratified-epoch"
+   ],
+   "seed": "r6:24",
+   "axis": "objective"
+  },
+  {
+   "slot": 25,
+   "parent": "r5-05-shared-pathid-signed",
+   "parent_fitness": 0.018727,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r2-03-routed-recall-namedecoy",
+    "r4-15-distinct-blocked-transport"
+   ],
+   "seed": "r6:25",
+   "axis": "optim"
+  },
+  {
+   "slot": 26,
+   "parent": "r4-04-tailcycle-snapshot-average",
+   "parent_fitness": 0.026217,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-14-backchain-pointer-resolution",
+    "r4-00-backward-multihop-pointer"
+   ],
+   "seed": "r6:26",
+   "axis": "stream"
+  },
+  {
+   "slot": 27,
+   "parent": "r5-01-identityreach-geocells-dupaware",
+   "parent_fitness": 0.003745,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-17-trajectory-transport-contrast",
+    "r3-04-stiefel-addressing-plateau"
+   ],
+   "seed": "r6:27",
+   "axis": "target"
+  },
+  {
+   "slot": 28,
+   "parent": "r5-17-decision-direction-metric",
+   "parent_fitness": 0.014981,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r5-28-address-transport-memory",
+    "r5-14-unbind-residual-backchase"
+   ],
+   "seed": "r6:28",
+   "axis": "arch"
+  },
+  {
+   "slot": 29,
+   "parent": "g0-05-dualpre-transition",
+   "parent_fitness": 0.0,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r5-19-dualrole-address-mention",
+    "r5-12-dualslot-overwrite-path",
+    "r4-12-pathslot-dualaddress-code",
+    "r5-27-confusion-discriminant-metric"
+   ],
+   "seed": "r6:29",
+   "axis": "batcher"
+  }
+ ]
+}

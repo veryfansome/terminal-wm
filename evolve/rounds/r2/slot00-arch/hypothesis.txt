@@ -1,0 +1,156 @@
+PROPOSAL: arch = r23_pointer_transport_memory   (only the arch axis is changed)
+
+WHAT THE DATA DOES, READ OFF evolve/jail_data/train_sample.jsonl
+
+A cups window in a trajectory is literally this: N steps `cat <path_i>` whose observation IS the
+content stored at path_i (role cups_expose); then one or more steps `mv <src> <dst>` whose
+observation is empty (output "", exit 0, so the rendered observation is just "cwd=/ exit=0\n");
+then one step `cat <final_loc>` (role cups_test) whose observation is the content that the chain of
+moves routed to that location. The meta of the test step names it exactly: routed_idx, movers,
+depths, final_loc. Depth 3-4 means the routed content is carried through 3-4 successive mv steps.
+
+So the quantity the score is asking for is a *pointer chase over locations*: keep a map
+location -> content, `cat P` returns map[P], `mv A B` sets map[B] = map[A] and empties map[A].
+
+WHAT NEITHER PARENT COMPUTES
+
+The baseline transformer has no memory at all; its command-position prediction is a causal
+attention read over the raw token stream, which can copy a nearby observation but has no operation
+that reassigns a stored content from one address to another.
+
+The r18/r22 parent DOES have delta-rule slot memories (file memory, path memory, latent-transition
+memory), but every one of them derives exactly ONE address per command step. In
+`_chunked_delta_reads` the query is file_read(x_cmd) and the key is file_write(x_cmd) — both from
+the same command vector, and the value written is that step's own observation. In
+`_transition_reads` there is a single address p_i = unit(tr_path(x_cmd_i)) used for BOTH the read
+and the write-back at step i. Consequently:
+  - at an `mv A B` step the value the parent writes is the observation of the mv, i.e. the empty
+    "cwd=/ exit=0" embedding, not the content sitting at A; and
+  - the parent has no operation whose effect is "the thing stored at address A is now stored at
+    address B". A one-address memory can rewrite a slot in place; it cannot move a slot.
+The parent can therefore only reach the test observation by an associative shortcut (nearest
+earlier observation, chain position, name-conditioned recall), which is exactly what the
+role-swapped arm is built to cancel.
+
+WHAT I ADDED
+
+A second slot memory, mem [B, K, D] with K = key_d = 64 and D = 768, in which every command emits
+TWO addresses in one shared address space:
+
+    a_i = quotient( tp_addr( tp_src_sel(x_cmd_i) ), verb_basis )      source address
+    b_i = quotient( tp_addr( tp_dst_sel(x_cmd_i) ), verb_basis )      destination address
+
+Both go through the SAME projection tp_addr and the same verb-quotient/unit-normalise the r18
+trunk already uses for its file addressing, so a source address and a destination address live in
+one comparable space and the verb direction ("cat" vs "mv") is projected out of both — the address
+is meant to be the *path*, not the verb. tp_src_sel is initialised to the identity so the source
+address starts out as the ordinary r18-style command address; tp_dst_sel starts random and has to
+learn the "second path in this command" read-out.
+
+Per command i, in this order (the order is what makes it causal):
+
+  read     s_i   = a_i^T mem                     content currently at the source address
+           c_i   = a_i . occ                     how much has ever been stored at that address
+  move     mem  += m_i * ( b_i (x) s_i  -  a_i (x) s_i )
+  write    mem  += a_i (x) [ w_i * ( obs_i - a_i^T mem ) ]
+
+with m_i = sigmoid(tp_move_gate([x_cmd_i, h_cmd_i])) and
+     w_i = sigmoid(tp_write_gate([h_cmd_i, h_obs_i])), both zeroed on padded steps.
+
+The move term is the operation neither parent has: because a_i is a unit vector, a_i (x) (a_i^T mem)
+is exactly the component of mem stored at a_i, so subtracting it removes the content from the
+source and adding b_i (x) s_i deposits that same content vector at the destination. The content
+vector itself is carried verbatim — no re-encoding, no name involved. Chained moves compose:
+after `mv A B` then `mv B C`, a read at C returns the vector that was written at A. In code the two
+updates are algebraically fused into one rank-2 bmm using a_i^T mem after the move = s_i * (1 +
+m_i (a_i . b_i - 1)), which is an identity, not an approximation; I verified the algebra numerically
+(orthogonal slots, content 0 written at slot 0, moved 0->2, moved 1->3: the read at slot 2 returns
+content 0 exactly and the read at slot 3 returns content 1 exactly).
+
+The intended division of labour, which the gates have to discover from the data:
+  `cat P`  ->  m ~ 0, w ~ 1 : read map[P] (this read is the prediction), then store the observed
+                              content at P.
+  `mv A B` ->  m ~ 1, w ~ 0 : first path is the source, second path is the destination, transport;
+                              do not write the empty mv observation anywhere.
+  test `cat P` -> the read s_i is the content the chain routed to P.
+
+occ is the same recursion run on a scalar instead of a content vector: it tracks how much mass has
+been stored at each address and is transported by the same move. a_i . occ is therefore "is there
+anything at the address I am about to read". It is fed to the output gate.
+
+READOUT AND THE CROSSOVER
+
+The read is RMS-capped, passed through a zero-initialised (D,D) linear tp_read, gated by
+sigmoid(tp_out_gate([h_cmd, occupancy, read_rms])), and ADDED to the command-position prediction
+the r18 forward already produced. Because tp_read is zero at init, the module's forward is
+bit-for-bit identical to the parent's at initialisation (verified: max |dpred| = 0 over a random
+batch with the same manual_seed), so nothing the parent earns is given up on day one and the new
+channel has to earn its own gate.
+
+This is where the crossover with the plain-transformer partner is real rather than cosmetic. The
+partner's whole content is "the prediction is what the causal trunk says, with no memory bypass".
+Here that is preserved as the fallback branch: when the address being read has never been written
+(occupancy ~ 0), the gate input carries that fact explicitly and the gate can close, leaving the
+prediction exactly the trunk's. The parent's contribution — ramped stochastic observation
+occlusion — is kept unchanged (same occ_p, same ramp, same masking, and it runs before everything
+else so the transport memory sees the occluded stream too), and it now does double duty: an
+occluded expose step is one where valid_obs is False, so nothing is written at that address, which
+manufactures exactly the training examples in which the memory is empty at the test read and the
+gate must fall back to the trunk. Occlusion supplies the supervision for the fallback gate that the
+partner's mechanism contributes.
+
+WHY THIS SHOULD MOVE comp_ca AND NOT THE THINGS THAT CANCEL
+
+comp_ca is native_hit minus swap_stayed on the same board with the same read location. A predictor
+keyed on the read location is identical in both arms and contributes structurally zero. A predictor
+keyed on chain position cancels only in expectation. The transport read is keyed on neither: the
+prediction at the test step is the vector that the move commands actually deposited at that
+address. Under the role swap the move-position sets of two contents are exchanged, so the content
+deposited at the read address genuinely changes; a model reading its own transported memory follows
+the swap and swap_stayed drops, while native_hit is unaffected. That is a per-window positive
+difference rather than a noise-cancelling one, and it grows rather than shrinks with depth, which
+is where 29 of the 89 eligible windows sit.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+1. The load-bearing assumption is address matching across commands: tp_dst_sel applied to the
+   pooled embedding of "mv A B" must land on the same unit address as tp_src_sel applied to the
+   pooled embedding of "cat B". Both are linear read-outs of frozen mean-pooled encoder vectors of
+   whole command strings. If the encoder's pooled representation does not keep the first path and
+   the second path in linearly separable subspaces — if "mv A B" and "mv B A" pool to nearly the
+   same vector — then a_i and b_i cannot be made to disagree in the right way, the move becomes a
+   no-op or a scramble, and the gate closes back to the parent. This is the single thing most
+   likely to kill it, and it is not something I could check from inside the jail because the
+   encoder embeddings are not here; the sample file has only the raw text. I state it as unverified.
+2. Address crosstalk. K = 64 with roughly 5-9 distinct paths per window plus context commands; the
+   verb quotient removes 8 directions. If learned addresses collapse toward a common direction,
+   a . b -> 1 and the move degenerates into "leave it where it is" (the code's shrink factor makes
+   this explicit and harmless, but also useless).
+3. Gate misassignment. If tp_write_gate does not learn to close on mv steps, the empty mv
+   observation gets written over the source address before the content is read out downstream, and
+   the chain breaks after one hop. The write gate sees h_obs, and the mv observation is a
+   distinctive constant string, so this is learnable, but it is a real failure mode.
+4. Budget. Measured on CPU at B=64, L=64: 0.134 s/step baseline, 0.568 s/step the parent, 1.017 s/step
+   this candidate — about 1.6x the parent, from one extra per-command python loop of the same shape
+   as the loop the parent already runs. Sequences in the training sample are 26-32 steps, so L<=64 is
+   the real worst case. This is a wall-clock cost at a fixed step budget, not a quality cost, but if
+   the lane is time-bound rather than step-bound it matters. I have not measured it on the eval GPU.
+
+CHECKS I RAN (all on the real module, importing the real r18/r22 chunk sources from the jail)
+
+  - forward shapes for L in {0,1,2,3,9,40}, finite everywhere, h and pred both [B,L,*]
+  - init equivalence to the parent: max |dpred| = 0.0 and max |dh| = 0.0 under the same seed
+  - causality (this is what the no-leakage guard checks): with all parameters perturbed away from
+    init, adding 5.0 to the observation token at position 11 changes predictions at positions < 11
+    by max 0.0 and at positions > 11 by 5.98
+  - transport algebra on orthogonal slots, as described above
+  - gradients are non-zero on every new tp_* parameter after one backward
+  - finite output on inputs scaled x50 and on an all-padded batch (prediction exactly 0)
+  - optim co-design: r18_spectral_capped_transition_readout routes tp_addr.weight (64,176) into the
+    Muon addressing group alongside file_read/file_write/path_read/path_write/tr_path, and puts
+    tp_read.weight (768,768) under the same spectral cap as tr_read.weight
+  - head co-design: r18_transition_forwardmodel_consistency still sees transition_from_emb
+    (_disabled = False) and it still returns [N,768]
+  - 665k new parameters on a 3.74M-parameter model
+
+No performance number for this candidate is claimed. Nothing above is a measurement of comp_ca.

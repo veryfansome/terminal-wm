@@ -1,0 +1,88 @@
+AXES CHANGED: target only (identity -> r6_spectral_equalized_target). arch, objective, optim,
+batcher, stream and head are the parent's verbatim. The mechanism is entirely a change of the
+space the regression target lives in, so nothing else has to move: the model, the tokens, the
+optimiser and the aux losses all keep their meaning, and the transform is an exact linear
+bijection so the retrieval eval still happens in the fixed observation space.
+
+WHAT IS WRONG WITH THE IDENTITY TARGET HERE
+The observation a step carries is rendered from cwd + exit code + output. In the real training
+trajectories in this jail, a large share of the steps are `mv` and `cat ... >> ...` whose output is
+empty, so their observation text is literally the same string, and the steps that do carry content
+carry either a one-line canary token (`cv-d55da5631a1ac194`) or a small file body inside an
+otherwise identical `cwd=/ exit=0` frame. The covariance of the frozen mean-pooled observation
+embeddings is therefore hugely anisotropic: the leading directions encode empty-versus-content,
+output format and output length, and they carry most of the total variance. Per-dimension
+standardisation does not touch this, because it removes per-coordinate scale, not correlation. Two
+candidate contents in a scored window differ along a much smaller-variance direction than the one
+that separates "an mv produced nothing" from "a cat produced a file". An MSE-shaped or
+distance-shaped loss on the raw target spends its error budget in proportion to target variance,
+so it is spent almost entirely on the axis that is identical for every candidate at the scored
+read, and barely at all on the axis that decides which content the read returns. The ranking at
+the read is decided only by the components along which the true content and its foils actually
+differ: an error along a direction common to all candidates very nearly cancels in the comparison
+d(pred,true) vs d(pred,foil). So the head of the target spectrum is where the loss looks and the
+tail is where the score is.
+
+THE MECHANISM (outside the domain: whitened-MSE / redundancy-reduction representation learning,
+Ermolov et al. W-MSE and Barlow Twins, implemented as a volume-controlled linear normalising flow
+in the style of Householder flows, Tomczak & Welling)
+The target module holds k = 24 Householder reflection vectors whose product Q is an exactly
+orthogonal D x D matrix, and a bounded log-scale a in R^k. It takes U = the first k columns of Q,
+which are orthonormal by construction and cannot collapse onto each other, and defines
+
+    make_target(z) = Q diag(e^{a}, 1, ..., 1) Q^T z = z + U (diag(e^{a}) - I) U^T z
+    to_obs(p)      = Q diag(e^{-a}, 1, ..., 1) Q^T p
+
+which is an exact inverse (verified numerically to 4e-15 in a standalone mirror of the same
+arithmetic), so the eval is unchanged as a measurement: whatever the model predicts is mapped back
+into the fixed observation space before any retrieval. a is bounded by a_max * tanh(gain * raw /
+a_max) with a_max = 1.5, so a scale can never reach 0 (no collapse) and the inverse can never
+amplify by more than e^{1.5} ~ 4.5 (no blow-up).
+
+reg() is the whitening pair, computed on the same batch of targets that make_target just
+transformed, and it is what decides where the frame points and how far the scales move:
+  - log-volume term  -mean_i log Var(U_i^T z):  maximising the log volume of the covariance
+    projected onto an orthonormal k-frame is exactly the k-dimensional PCA criterion, so this term
+    steers U onto the leading eigendirections of the target covariance. It is bounded above by the
+    top-k eigenvalues, so it cannot run away.
+  - equalisation term mean_i (log Var(U_i^T z) + 2 a_i - goal_i)^2 with a detached
+    goal_i = (1-rho) log Var(U_i^T z) + rho log Vbar_tail, rho = 0.5, where Vbar_tail is the mean
+    variance of the D-k untouched coordinates. Its stationary point is a_i = (rho/2) *
+    log(Vbar_tail / Var_i): each leading direction is pulled halfway (in log variance) down to the
+    variance of an average tail direction. With a realistic anisotropic spectrum this lands the
+    scales around 0.33-0.70, comfortably inside the bound, so the transform partially whitens the
+    head of the spectrum instead of saturating.
+Both parameter tensors receive gradient from reg AND from the main loss (the loss compares the
+model's cmd-position prediction to make_target's output, which is a function of both), and both
+change the prediction at the scored read position through to_obs, which is applied to every
+prediction including the final command of the odd-length scored layout. The module never indexes
+the sequence: it is a pure per-row map on the last dimension, applied to the already-masked
+[n, 768] rows, so an odd sequence length and a final command with no following observation are
+structurally irrelevant to it. z_prev is deliberately unused: adding a z_prev coupling would add a
+"copy the previous observation" component to every prediction, and at a scored read the previous
+observation is a contentless mv, which would inject a common offset that biases the choice among
+contents.
+
+WHAT I EXPECT
+Flattening the head of the target spectrum should re-weight the training loss toward the
+directions that separate one file's content from another's, which is the only thing that can move
+a forced-foil pick at the read. The prediction that survives the role swap has to be about which
+content is there, so I expect the native pick rate to rise more than the swapped-arm hold, i.e.
+comp_ca above the parent's -0.0037. The measurable intermediate signature, if the mechanism is
+doing what I claim, is that the fitted scales come out well below 1 on the leading directions
+(the transform is actually compressing something) and that the absolute native pick rate improves;
+if the scales sit near 1, the frame never found an anisotropic head and the candidate should score
+like its parent, which is the clean falsification. This is a mechanism argument, not a measurement:
+I have run no training here, and the only thing I have verified numerically is the linear algebra
+(exact inverse, orthonormal frame, correct reflection order) and the implied scale range on a
+synthetic anisotropic spectrum.
+
+HOW IT COULD FAIL
+The bet is that candidate contents differ mostly outside the leading 24 directions. If two
+contents in a window differ substantially along a leading direction — a short canary line versus a
+long shell script, say — then the inverse amplifies the model's error there by up to ~3x on
+exactly the axis that discriminates, and the score can move the wrong way. rho = 0.5 and k = 24
+are the hedge: only the very top of the spectrum is touched, and only halfway. Cost is 2k = 48
+sequential rank-1 updates per make_target call plus the same at eval, which is a few hundred extra
+kernel launches per step against a transformer forward/backward — small, but it is not free, and
+it is unmeasured on the real box.

@@ -1,0 +1,143 @@
+CANDIDATE  r23 slot-addressed transport world model
+axes changed: stream (assigned), arch, head.  inherited unchanged: objective
+r12_antiretrieval_ring_negatives, optim r18_spectral_capped_transition_readout,
+batcher r6_sysblock_hardneg_curriculum {hard_frac_max 0.75, n_block_images 1,
+ramp_frac 0.3}, target identity.
+
+CROSSOVER ACCOUNTING
+Parent (g0-14-pathstate-rssm) contributes the r18 path-state trunk with its learned
+latent-transition operator, its forward-model aux head and its spectral-capped optim.
+Partner contributes r22: ramped stochastic occlusion of observation tokens, which makes
+"predict with the evidence missing" an in-distribution training regime for the same trunk
+the instrument measures.  My arch subclasses r22 (so it IS r18 + occlusion) and changes
+only how the transition memory is addressed; the occlusion idea is generalised to a second
+channel (the new command-code block).  Both parents' mechanisms are kept and running.
+
+
+1. MECHANISM (what this code computes that neither parent does)
+
+The stream reserves a fixed random 200 of the 768 command-token coordinates (five disjoint
+40-dim blocks, chosen once from seed 20260809) and OVERWRITES the native embedding values
+there with five deterministic pseudorandom unit codes: code(source path), code(parent of
+source), code(destination path), code(parent of destination), code(destination joined with
+the source basename).  Paths are parsed out of the command string with shlex and resolved
+to absolute form against a cwd folded from the `cd` commands at STRICTLY EARLIER steps.
+Because the blocks are disjoint coordinates and the native content there is replaced, not
+added to, the arch recovers each code EXACTLY by a gather (measured round-trip error
+1.5e-8), and the command token's norm is unchanged (26.9 vs 27.7 for an obs token).
+
+The arch decodes those blocks and rebuilds the delta-rule keys of the latent-transition
+memory: the READ key is a learned 2-way gated mix of {source, source-parent} codes mapped
+through one shared semi-orthogonal matrix `addr`, and the three WRITE keys are the
+{destination, destination-parent, destination-join} codes mapped through the SAME `addr`
+(so the same path yields the same key whether it is being read or written), each plus a
+small unit-normalised learned residual so a command with no path argument still gets a
+learned key.  Per step the memory now does: read the content at the source address, push it
+through the inherited transition operator f(s_pre, cmd), overwrite the destination
+addresses with the result, and erase the source address, all in one batched rank-4 update.
+
+The head replaces cosine-similarity triple mining with EXACT code matching: for a step k
+whose destination code differs from its source code, i is the latest earlier step reading
+the same source and j the earliest later step reading k's destination (or its
+directory-join); f(obs_i, cmd_k) is trained to reproduce obs_j.
+
+
+2. WHY THIS SHOULD MOVE comp_ca
+
+The parent structurally cannot move content between locations.  In
+r18_pathstate_latent_transition_worldmodel._transition_reads the SAME vector
+`pi = unit(tr_path(x_cmd))` is used to read s_pre and to write the correction:
+`mem = decay*mem + pi (x) (v_i - s_pre)`.  One key per step means the operator can only
+edit-in-place at a single address.  `mv A B` can therefore be represented as "something
+changed at the path this command mentions" but never as "what was at A is now at B" — and
+the brief states exactly that marking a location as touched cancels to zero in the paired
+metric.  The parent scored +0.0000, which is what a marker scores.
+
+The second reason the parent cannot express transport is upstream of the arch: a mean-pooled
+frozen sentence embedding of "mv /etc/a.conf /var/tmp/a.conf" mixes source and destination
+additively, so no linear read-out of z_cmd can separate "the address I take content from"
+from "the address I put it at".  Every arch in this genome family inherits that bottleneck.
+The stream removes it by handing the two addresses over as separate exact codes.
+
+With both fixed, a chain composes algebraically: write(dst_k) <- f(read(src_k)), and
+src_{k+1} = dst_k for a chained move, so content survives k hops with one transition
+application per hop.  I verified this at initialisation on a hand-built board (temporarily
+forcing only the mutate/observe gate, everything else at its init value): the memory read at
+`cat /c/h1` after `cat /a/f1; mv /a/f1 /b/g1; mv /b/g1 /c/h1` returns 0.80 x obs(/a/f1) with
+all other stored observations below 0.06 — content carried across TWO hops.  On a
+two-file board (`cat /a/f1; cat /a/f2; mv /a/f1 /b/g1; mv /a/f2 /c/g2; ...`) the read at
+`cat /b/g1` is 0.86 x obs_0 - 0.26 x obs_1 and at `cat /c/g2` is 0.85 x obs_1 + 0.18 x obs_0,
+i.e. each destination is dominated by the correct file.  This is precisely the quantity the
+role-swap difference measures: swap which file gets which move and these two coefficient
+vectors exchange, so the paired difference is large, whereas any read keyed on the queried
+location alone is identical in both conditions and cancels.  The queried location's code is
+by construction the same under native and swapped chains, so the codes give no shortcut —
+they only make the multi-hop computation representable.
+
+The head change matters for the same reason: r18's head mines its (pre, cmd, post) triples
+by z_cmd cosine above 0.60, which conflates "same command family" with "same path", and it
+weights by CHANGE between obs_i and obs_j — but a move PRESERVES content, so the supervision
+that teaches transport is the low-change case r18's change_floor of 0.25 filters out.  On a
+synthetic board my head mines exactly the transport triples, including the second hop:
+(cat /a/f1, mv /a/f1 /b/g1, cat /b/g1), (cat /a/f2, mv /a/f2 /c/g2, cat /c/g2),
+(cat /b/g1, mv /b/g1 /d/h1, cat /d/h1).
+
+
+3. WHAT I EXPECT IF I AM WRONG, AND THE CHEAPEST OBSERVATION
+
+Wrong-case A (the one I consider most likely): the counterfactual role-swapped chain is
+built by permuting the two moves' z_cmd rows WITHOUT rewriting the `cmds` strings the seq
+dicts carry.  Then my codes describe the native chain in BOTH conditions, the model leans on
+the codes, and comp_ca collapses to roughly 0 — the parent's score, not worse.  Cheapest
+check: for one scored window print the `cmds` list of the native and the swapped seq dicts
+side by side and confirm the mv arguments actually differ.  If they do not, this design
+cannot earn and nothing downstream needs looking at.
+
+Wrong-case B: the mechanism is representable but never learned, because `tr_read` is
+zero-initialised and gated, so the whole transition pathway starts contributing exactly
+nothing to the prediction and the contrastive loss may find a cheaper non-compositional
+optimum first.  Symptom: comp_ca near zero while next-obs retrieval health is normal or
+improved.  Cheapest check: after training, read `sigmoid(net.tr_read_gate.bias)` and the
+Frobenius norm of `net.tr_read.weight`; if the norm is still ~0 the pathway was never used
+and the fix is a bigger head aux_weight, not a different addressing scheme.
+
+Wrong-case C: path parsing is wrong often enough that codes are noise.  Symptom: training
+loss and retrieval indistinguishable from the parent.  Cheapest check: run
+`_step_paths` over 200 real commands from the pack and eyeball how many produce a plausible
+(source, destination) pair.
+
+I have NOT measured comp_ca, retrieval, or final loss for this candidate.  The only numbers
+above are initialisation-time memory read-out coefficients on hand-built toy boards with
+random embeddings, mined-triple listings, a leakage_ok pass, and wall-clock cost.
+
+
+4. THE RISK I SEE IN MY OWN DESIGN
+
+Beyond wrong-case A, the concrete risk is the 200 coordinates the stream destroys.  Roughly
+26% of every command embedding's dimensions are overwritten, and that information is gone —
+not attenuated, gone.  If the score depends more on fine-grained command semantics (which
+flag, which pattern, exact file name in a `cat`) than on address structure, I have traded
+away real signal for addressing I may not use well.  Two things bound it: mean-pooled
+transformer embeddings are highly redundant so 574 surviving dimensions still carry the verb
+and most of the argument text, and the arch's `cmd_proj` is a learned linear map that can
+suppress the code block for the semantic pathway while the addressing pathway reads it.  I
+also ramp a 10% stochastic drop of the code block during training (the partner's occlusion
+idea applied to the new channel) so the learned fallback keys stay trained.  Still, if this
+candidate scores BELOW the +0.0037 baseline rather than merely failing to beat the bar,
+excessive command-embedding destruction is the first thing I would suspect, and the cheap
+follow-up is the same design with SLOT_K reduced from 40 to 16 (80 reserved dims), which
+costs code cross-talk (0.16 -> 0.25 typical) but returns 120 dimensions.
+
+Secondary risks: (i) code cross-talk — random 40-dim unit codes have typical mutual cosine
+0.16 and I observed 0.30 for one pair, so a board with many live paths will smear reads,
+though the delta rule's error-correcting write partially compensates; (ii) the erase gate
+starts at 0.5 and fires on every command's read address, which for a repeated `cat` at the
+same path removes half of what it just read before rewriting it — learnable, but a bad
+early trajectory could push it to a degenerate setting; (iii) I set `self._cmd_raw` on the
+module inside forward so `_transition_reads` can see the raw command tokens, which is
+single-threaded-only.
+
+COST: 0.535 s/step versus 0.512 for r22 + the r18 head at B=64, n=24 on CPU (+4.5%), and
++14887 parameters on 3.07M.  Causality: `leakage_ok` passes; the read at step i is taken
+from the memory before step i's own observation is written, and every code at command
+position 2t is a function of cmds[0..t] only.

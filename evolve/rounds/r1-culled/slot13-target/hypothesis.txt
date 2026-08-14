@@ -1,0 +1,115 @@
+CANDIDATE: target = r23_sibling_contrast_metric  (assigned axis)
+           arch   = r23_memory_completion_prefix_copy  (crossover of the two parent archs)
+           objective / optim / batcher / stream / head inherited unchanged from the parent
+           (head r20_interventional_gain_shell_consistency already runs the partner's
+           r18_transition_forwardmodel_consistency as its BASE, so both parents' head
+           mechanisms are retained).
+
+1. THE MECHANISM — what this code computes that the parents do not.
+
+(a) TARGET. Both parents train with the identity target, i.e. the loss measures prediction
+error isotropically over all 768 standardized observation dimensions. This impl replaces the
+identity with an exactly invertible rank-16 gain
+
+      make_target(z, ·) = z + (z U) (g - 1) U^T ,     to_obs(p, ·) = p + (p U) (1/g - 1) U^T
+
+with U [768,16] orthonormal and g in [0.5, 2.0]. U is the top principal subspace of the
+standardized observation cloud, tracked by damped orthogonal iteration on an EMA buffer; the
+gain of each direction is estimated as
+
+      g_j = ( q_j / (T/D) )^(1/2),
+
+where q_j is the mean squared difference along u_j between CONFUSABLE PAIRS — a symmetrized
+8-nearest-neighbour graph over the batch's true next observations, with near-duplicate pairs
+(distance below 2% of the mean pair distance) excluded — and T/D is that same quantity averaged
+over all directions. So a direction that separates a step from its nearest neighbours more than
+an average direction does is amplified; one along which near neighbours agree (shared shell
+formatting, cwd banner, system identity) is shrunk. The basis used to score a batch is always
+the one committed BEFORE that batch entered the estimator, which removes the in-sample selection
+bias that otherwise makes every leading direction look discriminative. Gains ramp from exactly 1
+over the first 150 updates, are EMA'd (0.95), are recomputed every 4th step from at most 192
+rows, cost no trainable parameters, and reg() is 0. There is no RNG anywhere in this module.
+
+(b) ARCH. The parent (r20) carries file identity in a recurrent path-state memory (a delta-rule
+slot per path with a learned latent-transition operator) but must REGENERATE the content of the
+queried path through a linear readout. The partner (r22) can COPY a prefix observation verbatim
+through cross-attention whose values are the raw 768-d observation embeddings, but addresses it
+only from the trunk's hidden states. This impl keeps the parent's whole trunk (including the
+interventional calibrator the parent's head trains) and adds the partner's copy channel with two
+changes: the attention query is xq_h(h_cmd) + xq_c(rms(pred_cmd)) and the key is
+xk_h(h_obs) + xk_c(rms(obs_raw)), i.e. the command position's OWN current predicted content
+addresses the prefix observations by content, and the gate additionally sees the peak attention
+weight (a match-confidence signal). xq_c is zero-initialized and xk_c is not, so the content term
+has a live gradient at step 0 while the block's output readout x_out stays zero-init: the forward
+is exactly the parent's at initialization. Causality is unchanged — command t attends only to
+observations strictly before t (verified: stream leakage_ok True, and perturbing obs_0 leaves
+pred at cmd_0 bit-identical while moving pred at cmd_3).
+
+2. WHY THIS SHOULD MOVE comp_ca.
+
+The score is the argmin over candidate observations, differenced between the native chain and a
+role-swapped chain over the SAME board. For candidates c_i, ||p - c_i||^2 = ||p||^2 - 2 p·c_i +
+||c_i||^2, so which candidate wins depends only on the projection of p onto the candidate-
+DIFFERENCE directions. Prediction error orthogonal to that subspace shifts every candidate's
+distance by the same amount and cannot change the pick. Under an identity target the training
+loss spends capacity uniformly over all 768 directions, most of which are shared by every
+candidate on the board (same image, same shell rendering, same cwd banner) and therefore cannot
+earn anything; the model's remaining error concentrates wherever the loss is flattest, and a
+prediction that is right about format but generic about content produces the same pick under the
+native and the swapped chain — which is exactly a zero. The gain vector is a direct, measured
+estimate of the candidate-difference covariance's diagonal in the top principal basis, so
+training in that metric moves capacity onto the axes the pick is actually decided on. Neither
+parent can express this: their target space is fixed, and the only reweighting in the shared
+objective (r12's per-dim precision) keys on where the MODEL is already accurate, not on where
+candidates are SEPARABLE — it can even reinforce the shared, easily-predicted directions.
+
+On the arch side, mean-regression is the other route to a zero: a memory that knows which file is
+at the queried path but emits a blurred average of plausible file contents keeps its pick fixed
+across the swap. Querying the prefix observations WITH the memory's own content estimate is
+content-addressed pattern completion (CA3-style): the blurry reconstruction is projected onto the
+set of contents that were actually shown, so the emitted vector is an exact earlier observation
+embedding rather than a centroid. When the swap changes which file the memory read returns, the
+retrieved observation changes discretely — the pick follows content, which is what the paired
+difference measures. The partner cannot do this (its query never sees the memory content), and
+the parent cannot do this (it has no copy channel at all).
+
+The two changes are coupled and not merely stacked: a copy channel is only useful if the loss can
+tell two same-format observations apart, and the sibling-contrast metric is exactly the term that
+makes copying the WRONG neighbour expensive. The inherited r6 batcher (hard_frac 0.75, one image
+block) makes most in-batch rows share a system, so the 8-NN graph the gains are estimated from is
+predominantly a same-system sibling graph — the same geometry the score is measured in.
+
+3. WHAT I EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST CHECK.
+
+- Inert case: the learned gains stay near-uniform. Print exp(log_gain_eff) after training; if all
+  16 entries sit within a few percent of 1.0 the target is a no-op and any movement came from the
+  arch alone. On synthetic clouds the estimator is well calibrated (measured: 1.00 +/- 0.02 on
+  directions that carry only isotropic residue, and clamped at 2.0 on the one direction along
+  which near neighbours genuinely differ), so near-uniform gains on the real root would mean the
+  observation manifold has no anisotropic sibling contrast to exploit.
+- Harmful case: comp_ca flat or down WHILE next-obs retrieval health drops relative to the parent.
+  That single number is the cheapest discriminator: it says I amplified the wrong subspace and the
+  1/g restoration at eval is magnifying residual error into the decision.
+- Dead copy channel: after training, mean sigmoid(x_gate) < 0.05 or ||x_out.weight|| still within
+  a few percent of its zero init. Then the pattern-completion story is unsupported and the arch
+  reduces to the parent.
+I have NOT measured comp_ca or anything on the real data root; every number above comes from
+synthetic probes of the estimator and from correctness/edge-case tests of the two modules
+(exact-inverse error 2.4e-7 on values of order 3, U^T U - I error 1e-6, leakage_ok True, finite
+loss and finite gradients through both new channels, constant prediction still at chance).
+
+4. THE BIGGEST RISK I SEE.
+
+The gain estimator defines "confusable" as 8-nearest-neighbour in the batch's own target space.
+If those neighbours are dominated by the same trajectory's adjacent steps rather than by
+different files on the same board, then q_j measures step-to-step drift, not file-identity
+contrast, and I will amplify (by up to 2x, on 16 of 768 directions) a subspace that encodes
+"how far along the trajectory we are". The model would then spend capacity on drift while the
+pick stays constant across the swap, and the 1/g restoration at eval would add error on the
+suppressed directions for nothing. The blast radius is bounded by construction — rank 16, gains
+clamped to [0.5, 2.0], ramped in, exact inverse — so the downside is a diluted parent rather than
+a collapse, but a diluted parent is still a zero. The secondary risk is that the content-addressed
+query creates a self-reinforcing loop (pred addresses a prefix observation, whose copy is added
+back into pred), which could lock onto a confident wrong neighbour early; the zero-init readout
+and the sigmoid gate mean the loop only exists to the extent training makes it pay, and the
+inherited spectral cap on x_out bounds its gain.

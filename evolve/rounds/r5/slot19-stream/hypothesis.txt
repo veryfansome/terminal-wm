@@ -1,0 +1,196 @@
+CANDIDATE: r5-dualaddress-transport
+axes changed: stream (new impl), arch (new impl), head (new impl, r20 with one call site changed;
+same params); optim / target / batcher / objective inherited as the union of the two programs I was
+given.
+
+================================================================================
+1. WHAT THE TWO PROGRAMS EACH HAVE, AND WHAT NEITHER HAS
+================================================================================
+
+Read the parent's arch (r18_pathstate_latent_transition_worldmodel) and the partner's arch
+(r24_reference_closure_transport). r24 is r18 plus a reference-closure branch, so on the arch axis
+the union is r24. Both carry two kinds of memory, and the fact this proposal turns on is that
+each memory has exactly one of the two properties a move needs:
+
+  (a) The FILE / PATH memories (`_chunked_delta_reads`, both archs) have TWO addresses per step:
+      the read key is `file_read(x_cmd)` and the write key is `file_write(x_cmd)`, two different
+      learned maps. But the VALUE they write is `value_file = obs_tok`, the step's OWN observation.
+      A `mv` step's observation is, verbatim in the training split, `cwd=/ exit=0\n` with an empty
+      output — I checked evolve/jail_data/train_sample.jsonl: every mv and every redirect step has
+      "output": "". So these memories store "nothing" at the destination. They can address a move
+      but they cannot carry anything through it.
+
+  (b) The TRANSITION memory (`_transition_reads`) does carry content: r24 adds the `obs_info` gate
+      so the value written is `f*obs_i + (1-f)*s_pre`, i.e. a step whose observation is empty
+      composes on the retrieved state instead of overwriting it with emptiness. But it has ONE
+      address per step: `p_i = unit(tr_path(x_cmd_i))`, and the loop reads at `p_i` and writes at
+      `p_i`. Structurally it can only update a slot in place. It cannot relocate content from one
+      slot to another, which is exactly what a move is.
+
+So: dual-addressing without content, and content without dual-addressing. Neither program has both
+in the same memory, and the measured quantity is precisely "did the content survive the relocation".
+
+================================================================================
+2. THE MECHANISM I ADDED
+================================================================================
+
+ARCH (arch__r5_dualaddress_transport_closure.py). `_transition_reads` becomes a two-address
+content transporter. Per step i, with `a_read` and `a_write` unit vectors in the key_d-dim slot
+space:
+
+    s_src   = mem^T a_read_i                       # content currently at the SOURCE slot
+    reads_i = s_src                                # <- what the prediction head consumes
+    delta   = _transition(s_src, x_cmd_i)          # shared command-conditioned affine operator
+    base    = info_i * obs_i + (1 - info_i) * s_src
+    v_i     = (1 - mut_i) * base + mut_i * delta
+    s_dst   = mem^T a_write_i
+    mem    <- decay*mem + a_write_i (x) (v_i - s_dst)*active      # delta rule at the DESTINATION
+                        + a_read_i  (x) (-erase_i * s_src)*active # source invalidation
+
+`erase_i = sigmoid(tr_erase(x_cmd_i)) * (1 - cos(a_read_i, a_write_i)^2)`, so a step whose two
+addresses coincide can never erase itself, and only a step with a genuinely different destination
+can vacate its source. Everything else in r24 — the file and path delta-rule memories, the
+reference-closure branch with its one-shot transitive solve, the system-summary film, all readouts
+— is retained verbatim, and `transition_from_emb` is unchanged so the head aux still attaches.
+
+r24's `tr_path` is DELETED. In r24 it was the transporter's single address map; here the addresses
+come from `addr` on the raw token, so `tr_path` would be a parameter no gradient reaches and no
+prediction depends on. `_transition_reads` keeps `cmd_raw` optional so that a future recombination
+pairing this arch with a head that does not pass it cannot crash, but the fallback now takes its two
+addresses from `path_read` / `path_write` — the path memory's own read/write pair, which the trunk
+trains and reads through at every prediction. The transporter therefore owns no addressing
+parameter of its own beyond `addr`, which is live in the main forward.
+
+STREAM (stream__r5_dualrole_address_mention_code.py). The two addresses are only useful if
+`a_read` of a later command lands on the SAME slot as `a_write` of the move that put the content
+there. The stream makes that an identity rather than something the optimizer has to discover:
+
+  - coords [0:224)   SRC region: the standardized command embedding is ZEROED and replaced by a
+                     dense +/-1 blake2b hash of the command's source path.
+  - coords [224:448) DST region: the SAME hash of the destination path, at index-for-index aligned
+                     offsets, embedding zeroed the same way. A command with no explicit destination
+                     takes its source as its destination; a command with no path takes the fixed
+                     hash of the empty string.
+  - coords [448:704) MENTION region: a SECOND, independent hash family, summed over the paths the
+                     command names in EITHER role and renormalized by 1/sqrt(2).
+  - coords [704:768) FORM region: a hash of the verb plus eight replicated form flags
+                     (source present, explicit destination, mv, cat, ls, '>', '>>', destination
+                     distinct from source).
+  - the standardized command embedding survives at scale 0.6 under the MENTION and FORM regions
+    only.
+
+The arch pairs with this through ONE shared linear map `self.addr` (Linear(224 -> key_d), no bias)
+applied to the two regions: `a_read = unit(addr(tok[..., 0:224)))`, `a_write = unit(addr(tok[...,
+224:448)))`. Because the SRC and DST regions hold the identical bit pattern for the identical path
+and carry no embedding residue, this is EXACT: for any single map W, `W phi(p) = W phi(p)`. So
+
+  - `cat /x/a.dat` addresses one slot for both read and write (src == dst -> identical patterns ->
+    identical address -> erase gate is exactly zero);
+  - `mv /x/a.dat /y/b.dat` reads the slot of /x/a.dat and writes the slot of /y/b.dat, and the slot
+    of /y/b.dat is the same slot a later `cat /y/b.dat` reads;
+  - two paths differing only in a trailing ".5" vs ".6" hash to near-orthogonal 224-bit patterns,
+    so the addresses are near-orthogonal — which matters, because the real chains in the training
+    split are exactly of that shape (I read one: root.msg -> root.msg.1 -> sshd_config.cfg.2 ...
+    with a second content's chain interleaved through the same directory and stem, so partial
+    string similarity is a decoy and only exact full-path equality is informative). The coding
+    therefore deliberately contains NO partial-path features: no basename, no parent directory.
+
+The MENTION region exists for a specific, checkable reason. With SRC/DST role-separated, plain
+token cosine between `mv A B` and `cat B` would be near zero — B sits in the DST region of one and
+the SRC region of the other. The head aux (r18 `_mine_triples`, which my head inherits unchanged
+through r20) decides "same path" by raw
+token cosine, so role separation alone would starve it. The mention region restores an undirected
+"these two commands touch a common path" signal without contaminating the directed match. With
+these widths and RAW_SCALE=0.6, token cosine is roughly: shares-a-path 0.47-0.60; adjacent moves in
+one chain (`mv A B` vs `mv B C`, which share no path in the SRC/DST sense but do in mention) about
+0.21-0.34; unrelated same-verb 0.05-0.20. That is why the head's `path_thresh` is set to 0.42 in
+the genome instead of its 0.60 default: 0.42 sits in the gap.
+
+HEAD (head__r5_rawaddress_dualpre_consistency.py). r20 line for line, with one call site changed.
+r20's mem-pre arm rebuilds the arch's memory under no_grad and supervises the shared transition
+operator on the pre-states it finds there; its own description calls that "the deployment
+distribution". It reaches the memory by calling `_transition_reads` with six positional arguments,
+which on r18 and r24 IS the deployment call, because there the addressing takes only the projected
+command feature. On this arch it is not: deployment addresses from the raw coded token through
+`addr`, so a six-argument call would build a differently-addressed memory and the arm would train
+the operator on pre-states the net never sees. The new head inspects `_transition_reads` for a
+`cmd_raw` parameter and, when it is there, passes `rows_tok[:, 0::2][:, :maxn]` — the same raw
+command tokens the main forward uses. Archs without that parameter are called exactly as r20 calls
+them, so the head remains valid across the arch axis. Nothing else moves: the raw-obs arm, the
+mining pass, the number of RNG draws, `wrap`, `leak_safe` and every genome parameter are r20's,
+and the arm stays under `no_grad` with both pre-states detached.
+
+================================================================================
+3. WHY THIS SHOULD MOVE comp_ca RATHER THAN SOME OTHER NUMBER
+================================================================================
+
+comp_ca is native_hit minus swap_stayed on the same board. A predictor that keys on WHICH location
+is read is identical in both arms and contributes exactly zero. The transported content is the only
+thing that differs: under the native chain slot(E) holds content X, under the role-swapped chain the
+same slot(E) holds the partner's content, because the move commands that wrote into it were
+re-encoded and therefore read from different source slots. The memory's read at the scored step is
+the model's own recurrence over the move commands; nothing in my code resolves a chain outside the
+net. The stream only writes lexical hashes of the paths a single command names, which is explicitly
+sanctioned ("Coding the move commands themselves is fine").
+
+Depth: each move is one rank-one rewrite, so an N-hop chain resolves in N steps with no depth limit
+and no per-hop layer. The eligible slice is 60 windows at d3 and 29 at d4+, i.e. the majority of the
+score lives at depths where a one-hop heuristic earns nothing.
+
+The two gates:
+  - Read-position invariance. `code_cmds` is a pure per-command function of the command string
+    alone. The read command string is identical in both arms, therefore its token is bit-identical.
+    No cross-command state, no sequence-order term, nothing prefix-dependent at all.
+  - Causality / leakage. In the loop the read is appended BEFORE any write of the same step, and the
+    write is multiplied by `active`, so `reads_i` depends only on observations strictly before i.
+    Nothing in the transporter is gated on obs_i being present, which matters because the scored
+    position is exactly the position whose observation is withheld: at that step `active` is 0 (the
+    obs token is padded, or L is odd and the step takes the no-pair branch) and the READ is still
+    computed and still feeds `tr_read`. The mechanism is live where it is judged.
+
+================================================================================
+4. WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+================================================================================
+
+  - If `addr` collapses. It is a single 64x224 map shared by both regions; if it learns a
+    low-rank/degenerate solution, distinct paths alias onto one slot and the transport smears. It is
+    unit-normalized after, so weight decay cannot shrink it into nothing, but nothing forces it to
+    be well-conditioned. Note it is the ONE param of shape (64,224), so the optim's sibling rule
+    keeps it out of the Muon group and it trains under plain AdamW.
+  - If the gates do not separate. The whole mechanism depends on `obs_info` learning to be ~0 on mv
+    and redirect steps (so the write value is the retrieved content, not the empty observation) and
+    `tr_erase` learning to fire on mv but not on redirect. Both flags are explicitly present in the
+    FORM region, and obs_info is initialized at bias +4.0 (i.e. "trust the observation"), so the
+    model has to move against its initialization. If it does not, this degenerates to r24 with a
+    dual-addressed but empty-valued memory, which would score at or below the partner.
+  - If zeroing the embedding under SRC/DST costs more than it buys. 448 of 768 coordinates no longer
+    carry the frozen sentence embedding at all, and the rest is at 0.6. For the cups windows the
+    content is a random canary blob and the command embedding predicts nothing about it, so I expect
+    the cost to land on the `read`-arm steps (cat /etc/... on unseen images) and show up in the
+    reported health rather than in comp_ca — but that is an expectation, not a measurement, and if
+    the base task degrades enough the contrastive objective could destabilize everything.
+  - If `path_thresh=0.42` is mis-set. My cosine bands above are an analytic estimate from the block
+    widths and the raw scale, using an unknown embedding-cosine term rho in [0,1]; I could not run
+    torch in this jail to measure the real distribution. If the true bands sit elsewhere, the head
+    aux either mines nothing (it degrades to a no-op, losing the parent's head mechanism) or mines
+    unrelated pairs (it adds noise). Neither is fatal to the transporter, which is the main claim.
+  - Cost. The transporter loop is the same length as r24's, with one extra rank-one read and one
+    extra outer product per step, fused into a single batched update so the number of retained
+    `mem` tensors per step is unchanged from r24. I have not profiled it; if r24 was near the step
+    budget this is maybe 1.2-1.4x that loop.
+  - Head cost. The mem arm now runs the full two-address transporter rather than a single-address
+    loop, on `row_frac` of the batch, once per step, under no_grad. Same loop length, roughly the
+    same per-step work as the arch's own call on a fraction of the rows. Unprofiled, like the rest.
+  - Head arm on the real distribution. Feeding the arm true deployment pre-states is a bet that
+    those pre-states are worth supervising on. Early in training the memory holds close to nothing,
+    so the arm's mem half contributes a near-zero pre-state and the operator is effectively trained
+    by the raw-obs arm alone; the arm only becomes informative once `addr` and the gates separate.
+    If they never do, this half of the aux is wasted work rather than a wrong signal, and the r18
+    raw-obs arm at weight 1.0 carries the operator on its own — which is what it does in the parent.
+  - Arch/head pairing. The transporter's addressing and the head's mem arm are now one design. A
+    recombination that takes this arch with a head that never passes `cmd_raw` still runs — the
+    fallback uses `path_read` / `path_write` — but its aux arm would then supervise the operator on
+    a memory addressed unlike the deployed one, which is the failure the new head exists to avoid.
+
+No claim here is a measurement. Nothing in this jail was executed against torch; the parser was the
+only piece I could run, and I ran it against every command form in evolve/jail_data/train_sample.jsonl.

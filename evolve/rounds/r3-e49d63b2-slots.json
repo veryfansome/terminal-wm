@@ -1,0 +1,155 @@
+{
+ "seed": "r3",
+ "slots": [
+  {
+   "slot": 0,
+   "parent": "g0-05-dualpre-transition",
+   "parent_fitness": 0.0,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "g0-08-exact-target-equivalence",
+    "g0-13-obspresent-imagination"
+   ],
+   "seed": "r3:0",
+   "axis": "arch"
+  },
+  {
+   "slot": 1,
+   "parent": "g0-13-obspresent-imagination",
+   "parent_fitness": 0.003745,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-09-routed-content-alignment",
+    "g0-12-obs-occlusion-denoising"
+   ],
+   "seed": "r3:1",
+   "axis": "batcher"
+  },
+  {
+   "slot": 2,
+   "parent": "r2-01-routed-collision-depth",
+   "parent_fitness": -0.022472,
+   "operator": "cross",
+   "cross_with": "r2-09-routed-content-alignment",
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "g0-05-dualpre-transition",
+    "g0-12-obs-occlusion-denoising"
+   ],
+   "seed": "r3:2",
+   "axis": "head"
+  },
+  {
+   "slot": 3,
+   "parent": "g0-16-retrieval-composition",
+   "parent_fitness": 0.029963,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-09-routed-content-alignment",
+    "g0-08-exact-target-equivalence"
+   ],
+   "seed": "r3:3",
+   "axis": "objective"
+  },
+  {
+   "slot": 4,
+   "parent": "r2-08-routedepth-tilt-readcollision",
+   "parent_fitness": 0.018727,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-03-routed-recall-namedecoy",
+    "g0-16-retrieval-composition"
+   ],
+   "seed": "r3:4",
+   "axis": "optim"
+  },
+  {
+   "slot": 5,
+   "parent": "g0-15-prefix-content-xattention",
+   "parent_fitness": 0.011236,
+   "operator": "cross",
+   "cross_with": "g0-16-retrieval-composition",
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "g0-12-obs-occlusion-denoising",
+    "g0-05-dualpre-transition"
+   ],
+   "seed": "r3:5",
+   "axis": "stream"
+  },
+  {
+   "slot": 6,
+   "parent": "g0-15-prefix-content-xattention",
+   "parent_fitness": 0.011236,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-09-routed-content-alignment",
+    "g0-13-obspresent-imagination"
+   ],
+   "seed": "r3:6",
+   "axis": "target"
+  },
+  {
+   "slot": 7,
+   "parent": "g0-16-retrieval-composition",
+   "parent_fitness": 0.029963,
+   "operator": "rewrite",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-01-routed-collision-depth",
+    "r2-06-shrunk-zca-content"
+   ],
+   "seed": "r3:7",
+   "axis": "arch"
+  },
+  {
+   "slot": 8,
+   "parent": "r2-08-routedepth-tilt-readcollision",
+   "parent_fitness": 0.018727,
+   "operator": "cross",
+   "cross_with": "g0-16-retrieval-composition",
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "g0-08-exact-target-equivalence",
+    "r2-01-routed-collision-depth"
+   ],
+   "seed": "r3:8",
+   "axis": "batcher"
+  },
+  {
+   "slot": 9,
+   "parent": "g0-12-obs-occlusion-denoising",
+   "parent_fitness": 0.029963,
+   "operator": "diff",
+   "cross_with": null,
+   "inspirations": [
+    "r2-07-dual-address-transport",
+    "r2-02-dualaddress-move-transport",
+    "r2-01-routed-collision-depth",
+    "g0-14-pathstate-rssm"
+   ],
+   "seed": "r3:9",
+   "axis": "head"
+  }
+ ]
+}

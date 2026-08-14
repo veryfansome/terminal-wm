@@ -1,0 +1,138 @@
+CANDIDATE: arch = r4_complement_address_transport   (only the arch axis changed)
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+
+From the parent (r22_retrieval_composition_renderer): the whole r18 path-state stack and its
+zero-init RMS-capped composition renderer, kept by subclassing the parent class and calling
+super().forward(). Nothing in the parent's forward is altered.
+
+From the second program (r22_observation_occlusion_denoising): the ramped stochastic observation
+occlusion, reimplemented in this class's forward (it is a sibling of the parent, not an ancestor,
+so it cannot be inherited). In training mode only, each observation token is independently zeroed
+and key-padded with a probability that ramps 0 -> occ_p over occ_ramp_start..occ_ramp_end steps.
+The occluded tokens and the widened pad mask are what the parent's forward and this class's new
+pointer both consume; eval-mode forward is untouched. Zero new trainable parameters from this part.
+
+WHAT IS NEW, AND WHAT IT COMPUTES THAT NEITHER PROGRAM COMPUTES
+
+Look at what a scored window actually is in the training data (evolve/jail_data/train_sample.jsonl,
+role fields cups_expose / cups_mv / cups_test): N steps `cat P_i` whose observation IS content C_i;
+then R steps `mv A B` whose observation is empty ("cwd=/ exit=0\n" and nothing else, so the move
+carries all of its information in the COMMAND token and none in its observation); then one step
+`cat X` whose observation is withheld and is the answer. The answer is verbatim one of the earlier
+exposure observations. So the quantity the metric asks for is: which earlier observation now sits
+at the location named by the final command, after the chain of moves.
+
+Neither program has any way to say "location X" and "location B in `mv A B`" are the same address.
+The parent addresses its memory with one key per command, derived from the whole command
+embedding, so `mv A B` gets a single key that mixes both paths and can never be matched by the
+later `cat B`. The occlusion program adds no addressing at all. This candidate adds an explicit
+address algebra:
+
+  1. ADDRESS CODE. For each command position, from its raw 768-d embedding only (never from the
+     trunk, so the same path produces the same code wherever it appears): a single linear map
+     addr_map, then rescaled by a scalar and shifted by a vector, both selected by a soft
+     6-way mixture (addr_verb) over the same embedding. Call the result code_i in R^addr_d.
+     The intent is that code_i approximates the SUM of the path codes the command mentions:
+     code("cat P") ~ p, code("mv A B") ~ a + b. The per-mixture scalar exists because the frozen
+     encoder mean-pools, so a two-path command is divided by roughly twice as many tokens as a
+     one-path command; the per-mixture offset exists to subtract the verb's own token
+     contribution. Both are affine in the embedding at fixed mixture, which is what keeps the
+     sum structure usable.
+
+  2. CAUSAL SLOT BANK. A bank of slots, one appended per command step, each holding
+     (unit address in R^addr_d, occupancy scalar in [0,1], mixture row over prefix observation
+     indices). Slot j is appended at step j and is only visible to steps i > j.
+
+  3. SOURCE SELECTION BY OCCUPANCY. At step i, a softmax over the earlier slots with logits
+     temp * cos(slot address, unit(code_i + zero-init adjust)) + occ_weight * slot occupancy.
+     For `cat X` the code is ~x and the slot holding x wins on cosine. For `mv A B` the code is
+     ~a+b, which has substantial cosine with BOTH endpoints; the occupancy term is what breaks the
+     tie, because the source of a move is a location that currently holds content and the
+     destination is (in this data) a freshly named file. That is why the erase gate matters.
+
+  4. COMPLEMENT ADDRESS. The address the step WRITES is
+         residual_i = code_i - <code_i, src_unit_i> * src_unit_i
+     i.e. the component of the step's own address code orthogonal to the address it just matched.
+     If code("mv A B") ~ a + b and the matched source address is ~a, the residual points along b,
+     scale-free, so it is directly comparable by cosine with the code of a later `cat B`. This is
+     the mechanism neither parent computes and it is the whole point of the candidate: it makes a
+     move's destination and a later read's query land in the same address space by construction
+     rather than by hoping two independently learned heads agree. It is blended with a directly
+     learned destination head (dst_direct) through a gate whose bias starts at +2.0, so the
+     orthogonal-complement path dominates at initialization and training can back off it.
+
+  5. TRANSPORT AS POINTER COMPOSITION. The new slot's mixture row is
+         g_move * (mixture read from the matched slot) + (1 - g_move) * one-hot(own observation).
+     An exposure (g_move ~ 0) makes the slot point at its own observation; a move (g_move ~ 1)
+     copies the matched slot's mixture, so a depth-d chain composes d routing matrices and the
+     final mixture still points at the ORIGINAL exposure observation. The erase gate multiplies
+     the matched slot's occupancy by (1 - g_move * g_erase * alpha), so a moved-from location
+     stops competing as a source.
+
+  6. READOUT. The per-step mixture is contracted against the prefix observation embeddings in one
+     bmm and injected into the command-position prediction through a zero-init (D,D) linear and a
+     sigmoid gate conditioned on the trunk state, the softmax peak, the occupancy hit, the mixture
+     mass and the content RMS. Zero-init means the forward is bit-identical to the parent's at
+     initialization; the whole machine is trained only by the existing main loss.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+
+comp_ca is native_hit minus swap_stayed on the same board. Under the role swap the board, the
+destinations and the depth are identical and only the move commands are re-encoded. Everything
+this mechanism uses is a function of the move commands' address codes: which slot is selected,
+which complement address is written, which mixture is transported. Swap the arguments of the moves
+and the selected slots change, so the emitted mixture changes, so the prediction changes. A
+predictor that keys on the read location alone contributes exactly zero here; this one cannot,
+because its output is a distribution over WHICH earlier observation, resolved through the move
+commands. It is also not a positional heuristic: nothing in the routing looks at where in the move
+order a content sits, only at address agreement and occupancy.
+
+The occlusion half is not decorative in this combination. With observations randomly missing, the
+trunk cannot lean on "the answer resembles a nearby observation token", which is the failure mode
+that makes native and swapped predictions collapse onto the same content; the pointer branch,
+which routes rather than recalls, is the only part of the model that still works, so the occlusion
+schedule is a pressure that pushes gradient into exactly the new machinery. The pointer's slot
+liveness is deliberately computed from the ORIGINAL pad mask, not the occlusion-widened one, so
+occlusion zeroes the content a pointer resolves to but never deletes the pointer structure itself.
+
+BEHAVIOUR AT THE SCORED POSITION
+
+The scored command's own observation is withheld. Nothing here is gated on it. At step i the read
+mixture is built from slots j < i, whose mixture rows have support only on observation indices
+m <= j < i, so the injected content is a combination of strictly earlier observation embeddings.
+The slot appended AT step i is the only thing that uses observation i, and it is visible only to
+steps after i. The gates read h_out at command position 2i, which under the trunk's causal mask
+sees tokens up to 2i and therefore not observation i. So the mechanism is fully switched on at the
+position where it is judged, and it is causal for the no-leakage guard.
+
+NO ANSWER IS COMPUTED OUTSIDE THE MODEL
+
+No command string is parsed anywhere. No path, source, destination or routing table is read from
+the data, the meta fields or anything else. The only inputs are the frozen embeddings the harness
+already supplies and the module's own learned weights. The code supplies the shape of the
+computation (match, subtract the matched component, transport a pointer, erase); the model has to
+learn every map that makes that shape mean anything, and if it learns nothing the branch stays at
+its zero-init value and the candidate degenerates to the parent.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- The additive premise. If the frozen encoder's mean-pooled embedding of `mv A B` is not
+  approximately a linear superposition of a per-path code for A and one for B, then no linear
+  addr_map makes code("mv A B") decompose, the orthogonal complement is not the destination, and
+  step 4 is noise. This is the load-bearing empirical assumption and I could not test it from
+  inside the jail; it is unmeasured.
+- Address separability. The destinations in this data are derived from other contents' paths plus
+  a suffix (magic.txt.1 next to magic.txt). If the encoder places those two strings at a cosine
+  close to 1, the softmax cannot separate them at any temperature and the chain resolves to the
+  wrong content. The learned temperature and the occupancy term help but cannot fix an encoder
+  that does not distinguish the strings.
+- Gate collapse. If g_move never separates moves from reads, every slot writes a one-hot to its
+  own observation and the branch reduces to "copy some earlier observation", which is weaker than
+  the parent's existing prefix reads and the ptr_gate should then shut it off rather than hurt.
+- Cold start. The (D,D) readout is zero-init, so the address machinery receives no gradient on the
+  very first step and only starts learning once the readout leaves zero. If the step budget is
+  short relative to that, the branch may still be near-inert at measurement time.
+- Cost. One extra python loop of n_cmd iterations with small bmms, on top of the two the parent
+  already runs. The banks it retains are O(n_cmd^2 * (addr_d + n_cmd)) per batch, which is small
+  next to the trunk activations, but the added wall-clock is unmeasured from here.

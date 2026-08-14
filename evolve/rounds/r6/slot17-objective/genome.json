@@ -1,0 +1,36 @@
+{
+  "chunks": {
+    "objective": {
+      "impl": "r6_occupancy_transport_name_decoy",
+      "params": {}
+    },
+    "arch": {
+      "impl": "r18_pathstate_latent_transition_worldmodel",
+      "params": {}
+    },
+    "optim": {
+      "impl": "r18_spectral_capped_transition_readout",
+      "params": {}
+    },
+    "target": {
+      "impl": "identity",
+      "params": {}
+    },
+    "batcher": {
+      "impl": "r6_sysblock_hardneg_curriculum",
+      "params": {
+        "hard_frac_max": 0.75,
+        "n_block_images": 1,
+        "ramp_frac": 0.3
+      }
+    },
+    "stream": {
+      "impl": "r4_role_bound_path_atom_codes",
+      "params": {}
+    },
+    "head": {
+      "impl": "r2_dualaddress_move_transport",
+      "params": {}
+    }
+  }
+}

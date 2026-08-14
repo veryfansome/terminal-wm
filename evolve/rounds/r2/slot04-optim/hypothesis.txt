@@ -1,0 +1,116 @@
+CANDIDATE: optim = r2_spherical_addressing_tail_avg, objective = r22_exact_target_equivalence_quotient
+(everything else inherited unchanged: arch r18_pathstate_latent_transition_worldmodel, batcher
+r6_sysblock_hardneg_curriculum {hard_frac_max 0.75, n_block_images 1, ramp_frac 0.3}, head
+r18_transition_forwardmodel_consistency, target identity, stream baseline_interleave, bs 64).
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+The two programs I was given differ on exactly one axis: the objective. r22 is not an alternative
+to r12 — it contains r12's mechanisms (per-dimension precision weighting, the confusability ring
+with the duplicate band-stop, the repulsion margin, the MSE anchor) and adds one thing r12 lacks:
+numerically-equal targets are collapsed into one multi-positive class, with occurrence mass divided
+by class size. That matters on this data rather than in the abstract. In the sample trajectories a
+large share of steps are mutations whose observation renders to exactly "cwd=/ exit=0\n" (every mv
+and every `cat a > b` / `cat a >> b` produces empty stdout, exit 0, unchanged cwd), so their frozen
+observation embeddings are bit-identical. r12 makes each such step the sole positive of its own row
+and every identical sibling a negative, which is an unsatisfiable classification whose gradient
+pushes identical targets apart and whose focal term keeps re-weighting toward it. r22 makes that
+term exactly zero. Since the mutation steps are precisely the steps that carry the mv chain the
+score is about, I keep r22 on the objective axis. Both parents' optim is identical, so the optim
+axis is where a new mechanism has to come from, and that is my assigned axis.
+
+WHAT THE NEW OPTIM ADDS THAT NEITHER PROGRAM COMPUTES
+
+(1) A FIXED-NORM (SPHERICAL) CONSTRAINT ON THE ADDRESSING PROJECTIONS.
+Both programs run Muon on the sibling-paired (key_d x d) addressing matrices. Muon's update is a
+Newton-Schulz orthogonalization of the momentum, rescaled to a FIXED RMS: the step added to W is
+-lr * rms_match * sqrt(max(shape)) * O with O orthogonal, so ||dW||_F is a constant of the schedule
+and does not depend on the gradient magnitude. No weight decay is applied in that group. Therefore
+||W||_F grows monotonically in expectation over training.
+Every matrix in that group whose output the arch unit-normalizes is SCALE-INVARIANT: in
+r18_pathstate_latent_transition_worldmodel, q_file/k_file are _quotient(file_read(x), Q) and
+_quotient(file_write(x), Q) and _quotient ends in _unit(); q_path/k_path are _unit(path_read(h)) and
+_unit(path_write(h)); p is _unit(tr_path(x)). For such a W, replacing W by cW (c>0) leaves the
+network function bit-identical, and the only thing that moves the function is the ANGLE W travels.
+With a constant-length step and a growing norm, the angular step is ||dW||/||W||, which decays as
+||W|| grows: the delta-rule key geometry — the mechanism that decides which slot a content is
+written into and read back from — freezes progressively over the run, and the LR schedule does not
+actually control it.
+The new code captures ||W||_F at make() time (make() is called on a freshly built net) and, after
+every Muon step, rescales each of those matrices back to that radius: W <- W * (r0 / ||W||_F). This
+is exactly function-preserving at the moment it is applied (unit-normalized outputs), so it cannot
+change what the model represents; it only makes the per-step rotation angle constant and equal to
+lr(t) * rms_match * sqrt(max(shape)) / r0, i.e. governed by the schedule alone. Concretely: the
+total angle the addressing geometry travels over the fixed step budget goes up, and it keeps
+travelling in the late phase instead of stalling.
+Which tensors get the constraint is decided structurally, not by name. The Muon group is selected
+exactly as before (2-D, shape[0]==key_d, shape[1] not in {key_d, D}, and at least two tensors of
+that shape — the sibling rule). Inside that group the constraint is applied only to tensors that
+are NOT the weight of a biased Linear, detected by checking whether the next parameter in
+net.parameters() order is 1-D with length shape[0]. This matters here and is not cosmetic: with the
+arch's defaults sys_d == key_d == 64, so sys_val.weight is also (64,176) and is already in the Muon
+group, but its output goes through tanh() and is NOT scale-invariant — rescaling it would change
+the function. The adjacency test excludes exactly it. I verified the selection against the arch's
+parameter registration order: Muon group = {file_read, file_write, path_read, path_write, sys_val,
+tr_path}.weight (identical to what both programs already route there, so that mechanism is
+untouched), sphere set = the same minus sys_val.weight.
+
+(2) A TERMINAL TAIL AVERAGE OF THE ITERATES, WITH THE DECAY SHORTENED TO PAY FOR IT.
+The optimizer counts its own steps against the `steps` it was handed (the harness calls opt.step()
+exactly once per training step, `steps` times) and accumulates a running sum of every parameter
+tensor over the last tail_frac=0.25 of the budget. On the final step it writes the uniform mean of
+those iterates into the live parameters, re-imposes the sphere radii, and re-runs the spectral cap.
+The net the harness hands back is therefore the tail-averaged net, not the last iterate. Nothing
+about the training trajectory is altered — the average is accumulated, never fed back.
+Because averaging plays the role a decay-to-zero plays, the schedule is retuned to keep the tail
+alive: hold_frac 0.30 -> 0.35 and floor_ratio 0.05 -> 0.20, so the averaged window spans LR
+0.50 -> 0.20 of peak instead of collapsing to 0.05, where the iterates barely differ and an average
+would be a no-op.
+
+(3) THE SPECTRAL CAP IS KEPT, unchanged, on (D,D) readouts (here exactly tr_read.weight, the
+zero-init injection through which the latent-transition memory reaches the prediction). It is what
+makes (1) safe: a constant-speed rotation of the key geometry keeps rewriting what the delta-rule
+memory stores, and the cap bounds the gain with which that content is injected.
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN JUST THE LOSS
+comp_ca = mean over windows of (native_hit - swap_stayed). It is zero by construction for any
+predictor that keys on the location being read, and it is only positive for a net that carries a
+particular content's identity through the mv chain. In this arch that carrying is done by the
+delta-rule associative memories, and which content lands in which slot is decided entirely by the
+addressing projections' ANGLES. Mechanism (1) is the only change in this candidate that directly
+increases how far those angles can travel inside a fixed step budget, and it does so without
+touching the represented function at any instant — it removes an optimization artefact (norm growth
+under a fixed-length update with no decay) that silently anneals the routing mechanism to a stop
+while the schedule still reports full LR. Mechanism (2) attacks the other half of the objective's
+statement: the measurement is a top-1 forced choice over a small eligible slice, so the final
+iterate's noise is a direct additive noise on the score; a uniform tail average is the standard
+variance reduction for exactly that (Polyak-Ruppert averaging; SWA; LAWA / constant-LR-plus-average
+matching a decayed run), and there is no BatchNorm anywhere in the arch, so no statistics need
+re-estimating after the swap — LayerNorm only.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+- If ||W||_F of the addressing matrices does not actually grow much under Muon here (e.g. successive
+  orthogonalized updates are close to mutually cancelling), the constraint is nearly a no-op and the
+  candidate reduces to schedule retune + tail average, which is unlikely to clear the noise band.
+- If the addressing geometry is not the binding constraint — if the memory already addresses well
+  and what is missing is the content transition or the read mix — then rotating the keys faster and
+  longer buys nothing, and holding a constant late-phase rotation may even prevent the keys from
+  settling, costing accuracy on the ordinary next-observation task.
+- The averaged window spans LR 0.50 -> 0.20 of peak. If the run is still descending rather than
+  oscillating over that window, the average lags the trajectory and is worse than the last iterate.
+  The higher floor (0.20) is what makes averaging worth doing and is also what makes this risk real;
+  they cannot be separated.
+- The sphere set is chosen by a structural test (2-D, key_d-rowed, sibling-paired, not followed by a
+  matching 1-D bias). It is exact for this arch, checked against its parameter order. On some other
+  arch a bias-free matrix of that shape whose output is NOT unit-normalized would be rescaled, and
+  that would change the function; the failure would show up as a training-health change, not
+  silently.
+- r22 replaces r12 on the objective axis. If the exact-equality classes are rarer at bs=64 than the
+  sample suggests, that half of the crossover contributes nothing and the whole result rests on (1)
+  and (2).
+
+UNMEASURED. I cannot run the harness from this jail; no number here is extrapolated from a
+miniature run. The structural claims (which parameters land in which group, that the sphere set is
+exactly the unit-normalized projections, that the swap happens on the last of exactly `steps`
+optimizer calls, that the schedule is finite and monotone through warmup/hold/decay) were checked
+against the arch source, the harness loop and a stubbed parameter-order reconstruction; the
+behavioural claims are arguments, not measurements.

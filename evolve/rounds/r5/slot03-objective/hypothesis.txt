@@ -1,0 +1,120 @@
+CANDIDATE: objective = r5_boardlocal_namecollision_quotient_nce
+All other axes are the parent's, unchanged.
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+
+From the parent (r12_antiretrieval_ring_negatives): the per-dimension precision weighting of the
+distance, the band-pass confusability RING over target-target distance (close-but-distinct
+negatives amplified, near-identical ones suppressed), the focal hardness weight, the margin
+repulsion hinge stated in the eval's own squared-L2 decision variable, and the squared-error
+anchor.
+
+From the partner (r22_exact_target_equivalence_quotient): the exact-target equivalence QUOTIENT.
+Numerically equal targets become one multi-positive class; every candidate's occurrence mass is
+divided by its class size; the positive term is a logsumexp over the whole class. This is the
+mechanism that matters most on this data and I checked why on the jail sample
+(evolve/jail_data/train_sample.jsonl, 24 trajectories / 724 steps, rendered exactly as
+realenv.seq_worldmodel.render_obs does): 227 of 724 steps (31%) carry the SAME observation string
+"cwd=/ exit=0\n" -- every mv and every redirect step, because a command that mutates the
+filesystem prints nothing and the rendered observation is only cwd + exit code. 63% of steps have
+an observation that is duplicated somewhere in the sample. Without the quotient, roughly a third
+of every batch is a block of mutual false negatives that a plain in-batch softmax actively pushes
+apart from its own correct answer.
+
+WHAT IS NEW -- WHAT NEITHER PROGRAM COMPUTES
+
+Both programs build their negative weighting from ONE signal: the distance between targets. The
+new module keeps that but makes the negative distribution an explicit per-row MIXTURE over four
+components with fixed mass budgets, and two of the components are new signals that require
+WANTS_CTX (neither parent sets it):
+
+1. SAME-TRAJECTORY (board-local) negatives, budget _RHO_GROUP = 0.35. Rows are cut into
+   trajectories by _segment_ids: the harness builds ctx["prev"] as the strict-causal shift of the
+   target matrix inside each padded sequence, so the first command row of every sequence -- and
+   only those -- has an exactly all-zero previous observation. cumsum over that indicator gives a
+   segment id per row. Errors in this segmentation can only SPLIT a trajectory, never merge two,
+   because a real standardized observation embedding is not exactly zero.
+
+2. COMMAND-COLLISION negatives, budget _RHO_COLL = 0.25 (_collision). Cosine similarity between
+   the anchor's own command input, ctx["cmd"], and every candidate's; standardized to a z-score
+   using the batch's own off-diagonal mean and standard deviation; passed through
+   sigmoid((z - 2.0)/0.5). This selects the candidates whose COMMAND is a near-duplicate of the
+   anchor's command while the ANSWER is different -- gated by (1 - exp(-tt/_DUP_DELTA)) and by
+   `distinct`, so a candidate with the same or a near-identical target is never a collision.
+   The same statistic also raises the anchor's own weight in the listwise average
+   (row_w = inv_class * (1 + _ROW_COLL * max_j collide)).
+
+3. The RING keeps a budget of _RHO_RING = 0.20, and 0.20 stays on the uniform (occurrence-
+   quotiented) share. A component with zero mass in a row folds its budget back into the uniform
+   share, so every row's negative weights sum to exactly 1 and the mass a component receives is
+   independent of batch size and of how many candidates it contains -- unlike an additive
+   kappa-boost, whose effective share silently shrinks as the batch grows.
+
+WHY THAT SHOULD MOVE comp_ca
+
+comp_ca is native_hit minus swap_stayed: it pays only for carrying a particular content's identity
+through the chain of moves, and a predictor that keys on WHICH PATH is being read contributes
+exactly zero. So the training signal that matters is precisely the one that punishes reading a
+name instead of tracking content. Component 2 manufactures that signal directly and it has real
+mass in this data: on the jail sample, 43 distinct command strings produce more than one distinct
+output, and 299 of 724 steps (41%) are steps whose command does NOT determine its observation --
+`cat /tmp/w/cvar/g0/s0.dat` alone appears with 21 different contents across trajectories, and
+inside a single trajectory 48 steps re-read a path whose content changed under them (13 of 24
+trajectories contain at least one). For every one of those rows, the model that answers from the
+path text is provably wrong and the model that answers from what its own context routed there is
+right. Under both parents those pairs are ordinary negatives at weight ~1 among ~1500 in-batch
+candidates and can be ignored at essentially no loss; here they own a quarter of the negative
+mass and additionally double the row's weight.
+
+Component 1 makes the softmax resemble the measurement's own question. The cups probe never asks
+the model to separate boards -- it asks which of the N contents exposed on THIS board is at the
+read location. Cross-trajectory negatives are easy and there are ~1500 of them per batch;
+same-trajectory negatives are the other exposed contents of the same board, ~17 distinct
+observations per trajectory in the sample. Giving them a fixed 35% of the negative mass turns the
+bulk of the training signal into the discrimination the probe scores, instead of leaving it a
+~1.5% share.
+
+WHY THIS IS NOT COMPUTING THE ANSWER OUTSIDE THE MODEL
+
+The module is a loss. It never touches the model's input, it never runs at scoring time, and it
+never parses a command, a path or a move: it sees only pred, tgt, ctx["cmd"] (the command token
+the model itself was fed) and ctx["prev"] (a strictly causal previous observation). It resolves no
+move chain; it re-weights which comparisons the gradient pays attention to. The one mechanical
+trap named in the brief -- a mechanism gated on an observation being present, which switches off
+exactly at the withheld scored position -- does not apply: nothing here is evaluated at scoring
+time at all, and the segmentation signal it uses (an all-zero previous observation) is a property
+of the training collate, not of the scored window.
+
+ANTI-COLLAPSE
+
+Positive weights per row sum to 1 and negative weights per row sum to 1, so nll = logsumexp(all) -
+logsumexp(class) >= 0 and equals 0 only if the prediction is nearer its own equivalence class than
+every weighted alternative. A constant prediction gives every row the same distance profile over
+candidates, cannot be nearest to each row's own class, and additionally pays the class-balanced
+squared-error anchor and the repulsion hinge. I verified the direction on a pure-Python mirror of
+the exact algebra (no torch in this jail): perfect prediction -> ~0.0002, noisy -> 0.023, constant
+-> 2.15, batch-mean constant -> 2.19; every row's negative weights summed to 1.0 and every row's
+positive weights summed to 1.0; nll never went negative; and with the segmentation signal removed
+the group budget folded back into the uniform share without changing anything else. That is a
+correctness check on a 12-row toy, not a performance measurement -- I have taken no measurement of
+this candidate's score.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- If near-identical COMMAND embeddings do not in fact select the history-dependent pairs -- e.g.
+  if the r3 stream's sparse src/dst hash code dominates the cosine so much that two reads of the
+  same path in different trajectories are no longer upper-tail outliers -- component 2 degenerates
+  into an ordinary hard-negative miner over whatever the top ~2% of command similarity happens to
+  be, and buys nothing. (Identical command strings still give identical codes and cosine 1, so the
+  cross-trajectory cvar case survives; the suffix-differing cups case is the one at risk.)
+- If a fixed 35% on same-trajectory negatives is too aggressive, training could over-fit
+  within-board discrimination and lose the general next-observation fit that the absolute pick
+  rate depends on; the 0.20 uniform floor and the 0.05 squared-error anchor are the only things
+  holding that.
+- If most gradient signal actually comes from the 31% mutation rows, quotienting their occurrence
+  mass down to that of a single row removes it. I judge this to be the right trade -- their target
+  is a constant string and there is nothing to learn from predicting it -- but it is a real change
+  in what the loss spends its budget on.
+- Cost: one extra n-by-n matmul per step (the command Gram matrix, ~768 inner dimension) on top of
+  the two the parents already form, plus a few more n-by-n elementwise buffers. Unmeasured; I
+  could not profile it here.

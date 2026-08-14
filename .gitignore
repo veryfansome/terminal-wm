@@ -22,6 +22,11 @@ evolve/.cache/
 .results/
 cloud/podresults/
 
+# Real trajectories copied into inventor jails so a mechanical question about the data is
+# answered by looking rather than inferred. Regenerated from a data root by evolve/jail_sample.py,
+# which is tracked; the sample itself is derived and is not.
+evolve/jail_data/
+
 # Derived lane artifacts. build_context writes .cache/ at the repo root; an encoded context
 # is around a gigabyte and is rebuilt on demand.
 .cache/
@@ -30,3 +35,13 @@ cloud/podresults/
 *.pt
 *.pth
 *.safetensors
+
+# The lane records its pod id here; a committed id points at a box that may still bill. The glob
+# covers every LANE_STATE path, not just the default one — concurrent lanes each get their own.
+cloud/.lane-*
+cloud/podresults-archive/
+
+# Per-draw snapshots of cloud/podresults/, kept so a FORCE=1 re-measure cannot destroy the draw it
+# is being compared against. Same class as podresults itself: the archive is the record, these are
+# the raw per-candidate blobs behind it.
+cloud/draws/

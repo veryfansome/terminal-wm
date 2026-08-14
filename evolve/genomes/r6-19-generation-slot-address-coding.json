@@ -1,0 +1,36 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives",
+   "params": {}
+  },
+  "arch": {
+   "impl": "r22_prefix_content_xattention",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "r6_generation_slot_address_coding",
+   "params": {}
+  },
+  "head": {
+   "impl": "r2_dualaddress_move_transport",
+   "params": {}
+  }
+ }
+}

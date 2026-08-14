@@ -1,0 +1,91 @@
+AXES CHANGED: arch only (r20_dualkey_contentgated_transition_worldmodel -> r6_capacity_ledger_transport).
+Everything else — objective r22_exact_target_equivalence_quotient, optim r18_spectral_capped_transition_readout,
+target within_sequence_contrast_equalizer, batcher r20_depthtilted_sysblock_curriculum, stream baseline_interleave,
+head r4_chainlink_route_transport — is the parent's, verbatim. I changed one axis because the mechanism I am
+testing is a claim about how the trunk should represent a filesystem, and the other six axes are the controls that
+make that claim readable against the parent's +0.0037.
+
+MECHANISM
+
+The parent resolves "what content is at this location now" with two parallel delta-rule associative memories plus a
+latent-transition slot memory: content is written into a key-addressed (key_d x D) matrix and read back out. Nothing
+in that construction knows that a move REMOVES content from its source. A location that was emptied three steps ago
+is still, as far as the memory is concerned, holding whatever was last written there, and a fuzzy address match can
+retrieve it. That matters here because the addresses in this data are almost the same string: a chain writes
+/tmp/w/cups/etc/ssh/sshd_config.cfg -> .cfg.1 -> magic.txt.4, so the live location and two dead ones differ by a few
+characters and are near-identical under a frozen mean-pooled encoder.
+
+I replace the whole memory stack with a LOCATION LEDGER resolved by capacity-depleted address matching. Per step j:
+
+  z_j     = W_addr LayerNorm(cmd_raw_j)
+  src_j   = unit(S gelu(z_j + r_src)),   dst_j = unit(T gelu(z_j + r_dst))     (one shared feature layer read
+                                                                                twice under two learned role
+                                                                                biases; T is initialised as a
+                                                                                copy of S plus 0.02 noise, so at
+                                                                                init matching is plain command
+                                                                                similarity and training separates
+                                                                                the roles)
+  logit_ji = <src_j, dst_i>/tau + log(avail_i + 1e-4) - softplus(rho)*(j-i-1)   for i < j
+  link_j   = softmax([logit_j,:j , null_j])[:j]                                 (null_j is a learned per-step
+                                                                                no-match option)
+  content_j = take_j * mass_j * (link_j @ content_<j) + (1 - take_j * mass_j) * obs_j
+  avail_i  <- avail_i * (1 - consume_j * link_ji)      for i < j                (THE DEPLETION)
+  avail_j  <- write_j
+
+avail_i is how much unconsumed content still sits at step i's destination address. It enters the next step's logits
+in LOG space, so it is a multiplicative prior on the match, and a pull DEPLETES it. The erase that a move performs —
+which r5_dualaddress had to hand-build as a separate subtraction term with its own gate and its own alignment
+heuristic — falls out of a capacity constraint instead. This is the sequential, strictly-causal analogue of the
+one-to-one matching constraint that Sinkhorn/optimal-transport normalisation imposes on an assignment matrix; the
+doubly-stochastic version cannot be used here because column normalisation reads later rows, so I impose the same
+constraint by consumption in time order, the way coverage vectors do in pointer/attention decoders.
+
+Content is carried not as a D-vector but as a COEFFICIENT ROW over the raw observation embeddings, so content_j is
+a [B,n] row and the recurrence above costs n-by-n per sequence instead of n-by-D. One bmm at the end turns the
+resolved rows into vectors. A chain of any depth therefore resolves exactly in a single forward pass over the n
+steps, with no triangular solve and no chunked delta-rule kernel; the arch is materially cheaper than the parent,
+which ran an n-step loop over a (key_d x D) matrix memory AND two chunked delta-rule solves.
+
+WHY IT SHOULD MOVE comp_ca
+
+comp_ca is native_hit minus swap_stayed on the same board. A predictor that keys on the location being read is
+identical in both arms and contributes exactly zero. To score, the model has to change its answer when the same
+board's moves are re-encoded. The ledger's answer at a read is a function of which earlier destination address the
+read's source address matches AND of which of those destinations is still live, and both change under the role
+swap, so the two arms diverge by construction rather than by luck. Depletion specifically attacks the failure the
+parent cannot see: when the swap sends the partner content through a location that the native chain had emptied,
+an undepleted memory returns the stale content and the two arms agree. Concretely, in the swapped arm the
+model must not answer with the content that WAS at .cfg.1 before the move that emptied it; the log-availability
+term is what suppresses that candidate.
+
+WHAT I EXPECT TO SEE (all unmeasured — I could not run the harness from the jail)
+
+- comp_ca above the parent's +0.0037, driven mainly by the d4+ windows, where the number of dead-but-similar
+  addresses competing with the live one is largest; d3 windows should move less.
+- swap_stayed should fall relative to native_hit rather than native_hit rising: the mechanism is about
+  disagreeing correctly under the swap, not about being generally more accurate.
+- The learned link temperature should train downward from 0.25 (sharpening) and softplus(rho) upward from
+  softplus(-1)=0.31; if instead the read gate closes toward zero and mass collapses, the addresses failed to
+  separate the two roles and the candidate will land at the parent or below.
+- Wall-clock per step below the parent's.
+
+WHY THE HEAD STAYS AND WHY IT IS NOT REDUNDANT
+
+r4_chainlink_route_transport mines exact-duplicate observation clusters from the batch and supervises a routing
+distribution with them. Two of its terms bind directly to this arch: the gate BCE teaches "a step whose observation
+duplicates many others is a mutation", which is exactly the signal my presence feature feeds into take/write/consume;
+and transition_weight calls net.transition_from_emb, which I keep and — unlike the parent, where the transition fed
+only a zero-init tr_read into a separate memory — now put on the live path, as the renderer applied to the resolved
+content before the readout. So the head's forward-model aux supervises an operator the scored prediction actually
+runs through. Its own router injects a second, independently-supervised estimate; at init its readout is zero, so
+at step 0 only the ledger speaks.
+
+BIGGEST RISK
+
+Depletion is only as good as the addresses. If src/dst separation does not train — the two roles come from one
+shared feature layer under additive biases, and the frozen mean-pooled encoder may not make "the path in argument-1
+position" linearly separable from "the path in argument-2 position" — then link rows stay diffuse, mass smears
+across several near-identical destinations, and depletion subtracts availability from the wrong candidates, which
+is strictly worse than not depleting at all. Removing the parent's file/path delta-rule memories means there is no
+fallback retrieval channel if that happens: the trunk transformer alone carries the general next-observation
+prediction, so a failure mode is a candidate that is both flatter on comp_ca and worse on the absolute gate reading.

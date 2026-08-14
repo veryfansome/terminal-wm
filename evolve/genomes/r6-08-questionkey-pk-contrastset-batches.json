@@ -1,0 +1,47 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "dualkey_contentgated_occlusion_denoising",
+   "params": {
+    "occ_p": 0.12,
+    "occ_ramp_end": 1000,
+    "occ_ramp_start": 300
+   }
+  },
+  "batcher": {
+   "impl": "questionkey_pk_contrastset_batches",
+   "params": {
+    "keys_per_batch_min": 1,
+    "seqs_per_key": 8,
+    "min_members": 4,
+    "hard_frac_max": 0.75,
+    "ramp_frac": 0.25,
+    "depth_pow": 1.5,
+    "size_pow": 0.5
+   }
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives",
+   "params": {}
+  },
+  "optim": {
+   "impl": "tailcycle_snapshot_average_spectral_muon",
+   "params": {
+    "avg_cycles": 4,
+    "avg_frac": 0.35
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

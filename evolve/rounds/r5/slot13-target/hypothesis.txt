@@ -1,0 +1,126 @@
+CANDIDATE: target = fisher_localdelta_discriminative_target, head = erasing_dualaddress_transport_batchhard
+(objective / arch / optim / batcher / stream inherited from the parent unchanged)
+
+WHAT THE CROSSOVER KEEPS FROM EACH SIDE
+
+From the parent I keep the thing that made it a parent on this axis: the model is not trained in the raw
+standardized observation space but in a globally re-metricized one, built from a running second moment of
+the targets, applied as one matrix identical for every step and every window, and undone exactly by the
+matching inverse before retrieval. I also keep its arch (r22 prefix-content cross-attention) and its stream
+(r3 src/dst hashslot coding), because that stream is what puts a path's identity into the command token as
+one recoverable sparse pattern in a source block and the same pattern in a destination block — the substrate
+a two-address transport memory needs to make "the destination of move k" and "the source of move k+1" the
+same key.
+
+From the second program I keep its head: erasing_dualaddress_transport_batchhard, in place of the parent's
+r2_dualaddress_move_transport (which the parent additionally ran with pred_weight = 0.0, so only its memory
+read was supervised). Three properties of that head are the reason: (a) after the destination has taken the
+value read at the source, the source itself is pushed toward a gated erasure of its own current value, so a
+location that has been moved away from stops returning what it used to hold — that is exactly the failure a
+depth-3/4 chain punishes; (b) every gate is a function of the command embedding alone and the observation
+enters only as a write VALUE scaled by an observation-present factor, so a command slot whose observation is
+absent still READS — the head is not switched off at the scored position, which is a command whose own
+observation is withheld; (c) its forward-model term supervises f(obs_pre, cmd) against the later
+post-mutation observation, and the parent's arch (r22 inherits r18) exposes transition_from_emb, so that term
+is live rather than a no-op.
+
+THE NEW MECHANISM, AND WHAT IT COMPUTES THAT NEITHER PROGRAM COMPUTES
+
+Neither program computes any statistic of the STEP-TO-STEP DIFFERENCE between consecutive observations. The
+parent's target keeps one estimate — the second moment of the targets themselves — and whitens by it. The
+second program's target is the identity and keeps nothing. This candidate keeps a second estimate and uses
+the pair to define a Fisher-style discriminative metric instead of a plain whitening.
+
+Concretely, per training step the module receives z_obs [n,768] and z_prev [n,768] (z_prev is zero on a
+sequence's first step). It updates, as before, the EMA second moment S of z_obs. It additionally forms
+d = z_obs - z_prev for the rows whose z_prev is nonzero, discards rows whose d is (numerically) exactly zero,
+sorts the surviving squared magnitudes and keeps only the lower half, unit-normalizes each kept d, and
+accumulates an EMA of E[d_hat d_hat^T] as a second matrix S_d with trace fixed to 768. Every _REFRESH_EVERY
+steps, on CPU in float64: S is shrunk toward I and eigendecomposed as V diag(mu) V^T; the local-change moment
+is carried into the FULLY whitened frame, A = S^(-1/2) S_d S^(-1/2), and eigendecomposed as U diag(lam) U^T;
+each direction gets gain g_i = clamp((lam_i / mean(lam))^(q/2), 1/c, c). The forward map is
+F = s * U diag(g) U^T * V diag(mu^(-p/2)) V^T and the inverse is Finv = V diag(mu^(p/2)) V^T * U diag(1/g) U^T / s,
+so Finv F = I exactly by construction (U orthogonal, and mu^(p/2) mu^(-p/2) = 1), and s is chosen so
+tr(F S_shrunk F^T) = 768, i.e. the transformed targets keep unit average per-dimension variance. With q = 0
+the gains are all 1 and the whole thing collapses to exactly the parent's map including its normalizing
+constant, so the new mechanism is a strict extension of the mechanism it is crossed with.
+
+WHY THAT SHOULD MOVE THE MEASURED QUANTITY
+
+The score is decided by a squared-L2 distance, averaged over all 768 dimensions, between the model's
+next-observation prediction and each candidate content's true observation embedding. All the candidates at a
+scored read sit on the same board: same image, same cwd, same exit line, same verb, same rendering — they
+differ only in the content string that the chain routed there. So only the subspace along which SAME-CONTEXT
+observations differ can decide the comparison, while every other direction (image identity, output length,
+listing format, the empty-output mode that every mv and every redirect step shares) contributes distance that
+is common to all candidates and pure variance to the model's fit.
+
+Whitening by the total second moment is a crude proxy for that: it up-weights low-total-variance directions,
+which correlates with content-hash directions only because those happen to be small. The local-change moment
+measures the right contrast directly. In the training split, consecutive steps of one trajectory are two
+reads of the same board that differ in exactly one content token, or two listings of the same directory that
+differ by exactly one moved filename; the difference vector for such a pair IS a content-routing direction.
+Consecutive steps that switch format (a content read followed by a mutation's empty observation, or an ls
+followed by a cat) produce large differences, and two mutations in a row produce an identically-rendered
+observation and hence an exactly-zero difference. The lower-half-of-nonzero selection is what separates those
+three populations without labels: the exact zeros are dropped by the nonzero test, the format switches are
+dropped by the magnitude cut, and what accumulates is the same-context content-difference scatter. In the
+train sample here, exactly-zero-difference consecutive pairs are about a fifth of all consecutive pairs and
+same-shape neighbours (short-output read followed by short-output read, long followed by long) are about a
+third, so the kept band is populated and is dominated by the pairs I want. Unit-normalizing each kept
+difference makes the estimate a direction histogram, so a handful of atypically large kept differences cannot
+define the basis.
+
+There is a second, compounding effect on the loss that is worth checking in the code. The inherited objective
+(r12 antiretrieval ring negatives) builds its negative weighting from TARGET-TARGET distances in whatever
+space make_target hands it, with a band-pass: near-identical targets get ~0 weight as presumed false
+negatives, close-but-distinct targets get up to (1+kappa)x weight. Under the raw or merely whitened metric,
+two observations that differ only in a content hash are close enough to risk being masked out as duplicates —
+that is, the very pairs the eval discriminates between get discounted as hard negatives. Stretching exactly
+the content-difference subspace pushes those pairs out of the duplicate band and into the ring, while the
+empty-output observations shared by every mutation step stay exact duplicates of each other and keep getting
+~0 weight. So the same matrix that fixes the geometry of the regression also re-aims the contrastive term at
+the eval's own decision.
+
+SCORE-TIME SAFETY (the failure this design deliberately avoids)
+
+z_prev is used ONLY to accumulate statistics inside make_target during training, under
+`self.training and torch.is_grad_enabled()`. It is not an argument of either map: make_target returns
+z_obs @ F.t() and to_obs returns pred @ Finv.t(). At the scored position — a command whose own observation is
+withheld — nothing about this mechanism is gated on an observation being present, and to_obs behaves
+identically whatever z_prev is passed, including zeros. A delta-style target (predict z_obs - z_prev, invert
+by adding z_prev back) would have had exactly that gating hazard; this one does not.
+
+It also computes nothing about routing. F is one global matrix, the same for every step, every window, every
+candidate and every arm of the role swap, containing only second-order statistics of the training split's
+embeddings. No command is parsed, no chain is resolved, nothing derived from the move sequence is placed in
+the model's input. Everything about which content ends up where still has to be learned by the net.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+1. If the frozen encoder does not place the content-hash difference in a stable low-dimensional subspace —
+   if two reads of the same board differing only in the hex token differ in a direction that varies from pair
+   to pair — then S_d converges toward an isotropic matrix, lam is flat, all gains go to 1, and the map
+   degenerates to the parent's whitening. In that case this candidate should land at the parent's score, not
+   below it. This is the benign failure.
+2. If the lower-half magnitude cut selects the wrong population — e.g. if per-dimension standardization makes
+   content differences LARGER than format switches, so the kept band is dominated by the pairs I meant to
+   exclude — the amplified subspace would be the format axis. That subspace is shared by all candidates at a
+   scored read, so it would waste amplification on directions that cancel, and the candidate would score at or
+   below the parent. This is the real risk, and it is the assumption a reviewer should attack: I am asserting
+   that among nonzero consecutive differences, format switches are the larger ones. I have checked the text
+   population that produces them (empty-output mutations render as a single constant line, content reads as a
+   short hex token, listings as many lines) but I have not measured the embedded magnitudes, so state it as
+   an untested assumption, not a fact.
+3. If the gain cap c = 3 combined with the whitening at p = 0.75 conditions the map badly enough that the
+   objective's precision weighting and the spectral cap on the (D,D) readout fight it, training could get
+   noisier. The trace renormalization holds the average per-dimension variance of the transformed targets at
+   1, and both stages are eigenvalue-clamped, which is the mitigation.
+4. If the erasing head's erasure gate (initialized at bias -2, i.e. mostly off) never turns on within the
+   fixed step budget, the head contributes little beyond the parent's head and the crossover reduces to a
+   target-axis change alone.
+5. Cost: two 768x768 float64 eigendecompositions plus about six 768-cubed float64 matmuls per refresh, at
+   _REFRESH_EVERY = 100 after a 200-step warmup, versus one eigendecomposition every 50 steps for the parent.
+   That is the same order of CPU work, not more; the per-step added work is one masked 768x768 gram over
+   roughly half the rows. I have not profiled this on the scoring box — it is an estimate from the operation
+   counts, not a measurement.

@@ -1,0 +1,116 @@
+CANDIDATE: r22 dual-key transport  (arch + head + optim changed; objective and batcher inherited)
+
+  arch   r22_dualkey_transport_worldmodel   (new)
+  head   r22_silenthop_rollout_transport    (new)
+  optim  r22_isometry_banded_gain           (new, assigned axis)
+  objective r12_antiretrieval_ring_negatives (inherited, both parents)
+  batcher   r6_sysblock_hardneg_curriculum {"hard_frac_max":0.75,"n_block_images":1,"ramp_frac":0.3}
+            (inherited, both parents)
+  target/stream: defaults (identity / baseline_interleave), as in both parents.
+
+
+1. MECHANISM — what the code computes that the parents do not
+
+(a) Two addresses per command instead of one. Both parents' `_transition_reads` use a SINGLE
+unit key p_i = unit(tr_path(x_cmd_i)) as both the read address and the write address of the
+latent-transition memory, and write the delta-rule correction (v_i - s_pre) at that one address.
+My arch emits a source address q_i = unit(tr_path(x_cmd_i)) AND a destination address
+k_i = unit(tr_dest(x_cmd_i)). On a silent step (command present, observation absent — exactly the
+metric's move hops) it performs a two-key delta rule:
+
+      s_src = q_i^T mem                      content currently at the source
+      s_dst = k_i^T mem                      content currently at the destination
+      delta = transition(s_src, cmd_i)       r20 content-conditioned operator (parent)
+      amount = g_i * w_i,   g_i = evid/(evid+c)   r21 evidence gate (partner)
+      mem <- decay*mem + k_i (amount*(delta - s_dst))^T - q_i (amount*e_i*s_src)^T
+
+so the content is DEPOSITED at the destination (reading k_i afterwards returns delta) and the
+source is VACATED by e_i = sigmoid(tr_move(x_cmd_i)). On observed steps `imag` is 0, so both
+`amount` and `vacate` are exactly zero and the write rule reduces to the parents' single-address
+delta rule at q_i; the only change on the observed path is the smaller residual cap in 1(c). tr_dest.weight is initialised as a copy of tr_path.weight and
+tr_move.bias at -2, so at initialisation k_i == q_i and the silent-step write equals the partner's
+imagination write minus a 0.12-weighted vacate term.
+
+(b) The silent branch is actually trained. In the parent, `collate` fills an observation for every
+valid command, so `imag` is identically 0 for the whole training run: the imagination-write path of
+r20/r21 receives NO gradient anywhere and is a pure test-time extrapolation. The partner's head
+does build masked-endpoint batches, but it runs them under `torch.no_grad()` and trains only a
+bolt-on observer on top of a detached forward, so the base net's silent branch still gets no
+gradient. My head re-lays real training rows out as [observed prefix pairs | H consecutive
+observation-free command hops | read command], H = min(3, r-1), runs the BASE net's own forward on
+them WITH gradients, and trains the prediction at the read command against the true observation
+with a duplicate-masked squared-L2 InfoNCE (the eval's own decision variable) plus MSE. It keeps
+the parent head's r18 forward-model consistency term unchanged (imported, not copied).
+
+(c) optim (assigned axis): the parent's AdamW(warmup-hold-cosine-floor) + Muon on the (key_d,d)
+addressing projections + spectral cap on the (D,D) readout, plus two per-hop retention controls.
+(i) Every parameter with ndim < 2 goes into a weight-decay-free group. In the parent, weight decay
+pulls `logit_decay` — the single scalar setting the memory retention factor decay = 0.90 +
+0.099*sigmoid(logit_decay), initialised at 0.985 — toward sigmoid(0) = 0.9495; over four hops that
+is 0.81 of the content instead of 0.94. (ii) An isometry band on the transition's gain head: the
+first D rows of every (2D,h) weight that is not exactly zero at construction get a row-norm cap
+(1.0) and the corresponding bias half is clamped to +-0.25. Because film_out and sysfilm_out are
+zero-initialised and tr_out is not, this selects exactly the transition gain head at make() time.
+The per-hop content map is s -> s*(1+gamma) + beta + residual with gamma = 0.5*tanh(tr_out row . h);
+bounding the row norm bounds |gamma| and so keeps the per-hop gain (1+gamma) in a narrow band
+around 1. The arch also lowers r20's additive residual cap tr2_cap from 2.0 to 0.5 for the same
+reason.
+
+2. WHY THIS SHOULD MOVE comp_ca
+
+The score is a paired native-vs-role-swapped difference at a fixed queried location, so the query
+text is the same in both arms and every bit of signal has to arrive through the move commands.
+The only way the memory at the queried address can differ between arms is if the content read at
+the source (which differs: file A vs file B) is written to an address the later read command will
+query.
+
+A single-address rule structurally cannot do that. It writes at p(move-cmd) the quantity
+(v - s_pre). A later read whose key has cosine c with p(move-cmd) therefore receives
+c*(delta - s_pre) = c*(gamma*s_pre + beta + res) — and the "- s_pre" erase term is only correct at
+the exact address it was read from. At any other address it subtracts c*s_pre, i.e. it pushes the
+prediction AWAY from the content of the file that was just moved and hence toward the other file.
+That is a systematic negative contribution to a native-minus-swapped difference, and the parent
+measures -0.0300, below the +0.0037 of the plain baseline. My rule puts the erase on q_i, where the
+content actually was, and deposits the CONTENT (delta, referenced to the destination's own current
+content s_dst) at k_i. A read at the destination now receives +c*delta, so the sign of the
+identity-carrying term flips from negative to positive.
+
+Across several hops this composes: hop 2's source read q_2 picks up hop 1's deposit at k_1 (they
+overlap through the shared filename/directory tokens of the two commands), transforms it again, and
+deposits at k_2. Carrying identity three or four times only works if the operator is near-isometric
+on content, which is what the optim band and the retention-logit no-decay group protect, and if the
+composition is ever practised, which is what the head's H-hop rollout supplies. Structurally: the
+parents can only express "the slot this command names has changed"; this candidate can express
+"the thing that was at A is now at B, and A is now empty".
+
+3. WHAT I EXPECT IF I AM WRONG, AND THE CHEAPEST OBSERVATION
+
+If the anti-tracking diagnosis is wrong, comp_ca will stay negative and roughly at the parent's
+value even though the reported "under role-swap the pick follows the swapped content" rate should
+have moved. The cheapest single observation is the eval's own breakdown line: if the mechanism
+works, "native picks" must rise and "follows the swapped content" must rise TOGETHER (the model
+becomes sensitive to which file the chain carries, in both arms) while "same pick held under
+swap" falls. If instead all three barely move, the silent branch is still not being exercised —
+check next whether tr_dest ever separates from tr_path (cosine of their rows after training; it
+starts at exactly 1.0 and only the rollout aux can move it). If tr_dest is still identical to
+tr_path, the head's window selection never fired and the whole arch change collapsed back to the
+partner's imagination write. Second cheapest: next-obs retrieval health. If retrieval health drops
+sharply while comp_ca does not move, the rollout aux weight (0.30) is simply competing with the
+main objective and should be cut, not the mechanism.
+
+4. THE RISK I SEE
+
+The largest one: the rollout aux pushes gradient through a heavily masked input distribution that
+the trunk never sees on the ordinary path, and it is the ONLY source of gradient for tr_dest and
+tr_move. If its window selection is too permissive (roll_path_thresh 0.55 on mean-pooled command
+embeddings, which are globally similar within one trajectory), most selected windows will be hops
+that do not determine the read at all, and the net will learn to ignore the silent hops — which is
+exactly the degenerate solution the metric gives zero for, while still paying the training cost and
+distorting the observed-path representation. Secondary risks: the isometry band is identified by
+"nonzero at construction among (2D,h) weights", which is correct for this arch family but would
+silently select a different head on an arch whose FiLM heads are not zero-initialised; and the
+lowered residual cap (tr2_cap 2.0 -> 0.5) is a second, independent change to the observed path, so
+a regression in ordinary next-obs prediction cannot be attributed to one edit alone. Speed is
+unmeasured: the aux adds one forward over at most 24 rows of length at most 17 per step, which I
+expect to be small next to the main batch of 64 rows of length 2*maxn, but I have not profiled it
+and there is no torch in this jail to profile with.

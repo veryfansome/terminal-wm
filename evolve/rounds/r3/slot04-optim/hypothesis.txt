@@ -1,0 +1,164 @@
+CANDIDATE: r3-stiefel-addressing-plateau-tailavg
+AXES CHANGED vs parent: optim (new impl), head (parent's r18 head -> partner's r20 head).
+Kept from parent: arch r22_retrieval_composition_renderer, batcher
+r2_routedepth_tilt_readcollision_blocks (with the parent's params), objective
+r12_antiretrieval_ring_negatives, stream baseline_interleave, target identity.
+
+
+1. WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+
+The two programs I was given differ on three axes, and on two of them one side is a strict
+code-level superset of the other. I checked this by reading the sources, not by guessing:
+
+  - arch. evolve/chunks/arch/r22_retrieval_composition_renderer.py declares
+    `class R22RetrievalCompositionRenderer(R18PathStateLatentTransition)` and imports the
+    partner's arch as its base. r22 IS r18 plus a zero-init composition renderer. Keeping the
+    parent's r22 therefore keeps the partner's arch mechanism intact inside it.
+  - head. evolve/chunks/head/r20_dualpre_transition_consistency.py imports the parent's head as
+    `CH` and calls CH.wrap / CH._mine_triples / CH._smoothstep / CH._interleave_layout_ok, then
+    adds a second supervision arm on the same mined triples with `pre` taken from the arch's own
+    `_transition_reads` memory instead of the raw observation. r20 IS the parent's r18 head plus
+    the mem-pre arm. Taking the partner's r20 therefore keeps the parent's head mechanism intact
+    inside it. This is the one axis where the parent is dominated, so this is the axis I flip.
+  - batcher. r6_sysblock_hardneg_curriculum builds image pools and draws a ramped hard fraction
+    from k sampled images. r2_routedepth_tilt_readcollision_blocks builds the same image pools
+    (`img_pools`, sampled by size, ramped `hard_frac_max`) and adds read-collision pools plus the
+    Boltzmann tilt on hop-count depth, mixing the two block kinds by `coll_share`. With
+    coll_share=0.5 the parent's batcher already emits the partner's image-block behaviour half the
+    time. Keeping r2 keeps both.
+
+So the arch/head/batcher part of the crossover is: r22 arch + r20 head + r2 batcher, which is the
+union of the two programs' mechanisms rather than a pick. That union alone is not worth a slot.
+Both programs also carry the SAME optim impl, so the crossover operator gives me nothing on my own
+axis; the invention has to happen there.
+
+
+2. THE MECHANISM I ADDED (optim), AND WHAT IT COMPUTES THAT NEITHER PARENT COMPUTES
+
+Two additions on top of the shared optim (AdamW + warmup/hold/cosine + Muon on the (key_d x d)
+group + soft spectral cap on the (D,D) transition readout, all of which I kept):
+
+(A) SOFT STIEFEL RETRACTION OF THE ADDRESSING PROJECTIONS.
+    After every optimizer step, each weight W in the (key_d x d) group is replaced by
+        W <- (1 - eta) * W  +  eta * ( Q * ||W||_F / ||Q||_F ),   Q = polar_orth(W),
+    with eta = retract_rate = 0.2 and Q computed by 6 Newton-Schulz quintic iterations (the same
+    `_ns_orth` primitive Muon uses, applied to the WEIGHT rather than to the update). Because
+    key_d=64 < d=176, the fixed point of this map is the set of row-orthonormal 64x176 matrices:
+    the Stiefel manifold St(176,64), i.e. W = R P where P projects R^176 onto a freely chosen
+    64-dimensional subspace and R rotates it. This is the Bjorck / orthogonal-weight-normalization
+    retraction (Bjorck & Bowie 1971; Huang et al. AAAI 2018; the soft-orthogonality family of
+    Bansal, Chen & Wang NeurIPS 2018), applied as a manifold retraction after a Muon step rather
+    than as a penalty in the loss.
+
+    Neither parent computes this. Muon orthogonalizes the UPDATE and leaves the weight's spectrum
+    free; the shared optim's spectral cap constrains only sigma_max of the single (768,768)
+    `tr_read` and only from above. Nothing in either program bounds the CONDITION NUMBER of the
+    addressing maps from below, and nothing stops their effective rank collapsing.
+
+(B) CONSTANT-LR PLATEAU + UNIFORM TAIL AVERAGE WITH WRITE-BACK.
+    The schedule is changed from warmup / hold / cosine-to-floor into warmup / hold / cosine-down-
+    to-`floor_ratio`-by-step-(1-avg_frac)*steps / CONSTANT `floor_ratio` for the last avg_frac of
+    training. Over exactly that constant-LR plateau the optimizer keeps a running uniform mean of
+    EVERY parameter (Polyak-Ruppert / SWA, Izmailov et al. UAI 2018), and on the final step it
+    copies the mean into the live parameters, then re-applies the retraction at eta=1 and the
+    spectral cap so the returned weights sit on the same geometry the model trained under. With
+    floor_ratio=0.15 and avg_frac=0.25 at a 4000-step budget this averages 1001 iterates drawn at
+    a fixed 7.5e-5 learning rate. Neither parent averages anything; both return the last iterate.
+    The arch is LayerNorm-only (verified: no BatchNorm anywhere in
+    r18_pathstate_latent_transition_worldmodel.py or its r22 subclass), so SWA's usual
+    running-statistics recomputation problem does not exist here.
+
+
+3. WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+
+The scored quantity is native_hit - swap_stayed per window: whether the read at a location returns
+the content the chain of `mv`s actually routed there, and stops returning it when two contents
+exchange their moves. In this arch the only machinery that can carry a content's identity across a
+chain is the delta-rule associative memory: `_chunked_delta_reads` writes the observation value
+under a write key k = file_write(x_cmd) / path_write(h_cmd) and reads it back with
+q = file_read(x_cmd) / path_read(h_cmd), and `_transition_reads` runs a second [key_d, D] memory
+addressed by `tr_path`. Whether the content written when `mv A B` executed comes back out when
+`cat B` is issued is decided entirely by the inner products q_read . k_write across locations.
+
+That memory is a rank-key_d outer-product store. Its ability to hold N distinct contents at N
+distinct locations without cross-talk is bounded by the number of near-orthogonal directions the
+key maps actually produce. The training sample confirms N is small but not trivial: a cups window
+in evolve/jail_data/train_sample.jsonl exposes five slots (`"N": 5`) at five paths and moves two of
+them; the cvar windows add more distinct paths in the same trajectory. If the addressing maps
+collapse to a low effective rank — the ordinary fate of an unconstrained linear map trained by a
+diffuse contrastive loss — then distinct paths produce nearly collinear keys, every write smears
+across every slot, and the read returns a blend. A blend does not carry identity: the native and
+swapped chains then produce near-identical reads, native_hit falls, swap_stayed does not, and the
+paired difference collapses toward zero. Forcing the addressing maps onto the Stiefel manifold
+keeps all 64 key dimensions live while still letting the map DISCARD nuisance directions (a
+row-orthonormal 64x176 matrix is exactly a projection onto a chosen 64-dim subspace followed by a
+rotation, so the map can still throw away the other 112 directions — it just cannot squash the
+ones it keeps). That is the specific failure this addition is aimed at.
+
+One property of this arch makes the intervention unusually safe: the outputs of every one of these
+projections are renormalized before use. `_quotient` ends in `_unit(...)`, and q_path/k_path/tr_path
+all go through `_unit(...)`. Key MAGNITUDE is therefore discarded by the model, so the Frobenius
+rescale in the retraction is cosmetic and the retraction is a pure conditioning intervention with
+no gain side effect on the addressing path.
+
+The second addition targets the measurement rather than the model. comp_ca is a mean of 89 per-
+window 0/1 differences, so a single window is worth 0.0112 and the parent's whole margin over the
+baseline is a couple of windows. Each window's contribution is a discrete argmin over 64 candidates
+— a step function of the weights. The last iterate of SGD-like training samples that step function
+at one noisy point; a tail average over 1000 plateau iterates evaluates a much lower-variance point
+in the same basin, and SWA's documented effect is a shift toward flatter solutions that transfer
+better out of distribution. The eval holds windows out BY IMAGE, so out-of-distribution transfer is
+exactly what is being asked for. I expect (A) to raise native routing accuracy and (B) to both add
+a smaller mean gain and shrink the seed-to-seed spread, which is what a margin has to clear.
+
+Nothing here inspects commands, paths, `mv` edges, or the move chain. The whole impl reads only
+parameter shapes and parameter values. The routing answer is not computed anywhere in my code; if
+the model does not learn to route, this optimizer has nothing to hand it.
+
+
+4. WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+  - The addressing maps may not be rank-collapsing in the first place. If Muon on that group
+    already keeps them well conditioned, the retraction is a near-no-op and (A) contributes
+    nothing. This is the single biggest risk and I cannot check it from the jail; I state it as
+    unmeasured. What I can say is that Muon constrains updates, not weights, and that the shared
+    optim contains no weight-spectrum constraint of any kind on this group.
+  - The map may NEED unequal gains inside its retained subspace. Orthogonality forbids the map
+    from down-weighting a retained direction relative to another; if path discrimination depends
+    on a soft gain profile rather than on subspace choice, eta=0.2 every step will fight the
+    gradient and cost accuracy.
+  - The group I retract is the same group the shared optim already routes to Muon, selected by the
+    same rule (2-D, key_d rows, cols not in {key_d, D}, at least two same-shape siblings). On the
+    r22 arch I verified this resolves to six tensors: file_read, file_write, path_read, path_write,
+    tr_path AND sys_val, all (64,176). sys_val is the system-summary value projection, not an
+    addressing map, and it feeds a tanh where scale matters. I deliberately did not add a new
+    heuristic to exclude it — a bare parameter iterator carries no way to tell a bias-free
+    addressing Linear from a biased value Linear at the same shape, and inventing one would be a
+    guess. So sys_val gets orthogonalized too. The Frobenius rescale preserves its overall gain, so
+    I expect this to be neutral-to-mildly-helpful, but if the running system summary degrades, that
+    is where it comes from.
+  - The plateau LR (0.15 x peak, held for the last quarter) may leave the model under-converged
+    relative to the parent's cosine-to-0.05 tail, and the average may not recover the difference.
+    Then (B) is a loss, not a gain.
+  - The averaged weights are written back only if the optimizer's own step counter reaches the
+    `steps` it was constructed with. The harness runs exactly `steps` iterations with one
+    `opt.step()` each, so this holds; but a run that exits early on non-finite loss returns the raw
+    last iterate, which is the same thing the parent would have returned.
+
+
+5. WHAT I CHECKED FROM THE JAIL, AND WHAT I DID NOT
+
+  - Speed. On CPU, 300 steps of the real r22 arch + r20 head + r12 objective at B=24, n=12 spent
+    3.47s inside the parent's opt.step and 4.20s inside mine (+2.4ms/step: six 64x176
+    Newton-Schulz retractions, plus a 3.7M-parameter float32 running mean over the closing
+    quarter). That is ~10% of a CPU step where the forward is unusually cheap relative to a GPU
+    step; on the scoring hardware I expect the fraction to be smaller, but that is UNMEASURED and
+    the CPU number is not a proxy for it.
+  - Mechanical verification, not a score: in the same 300-step run the sigma_max/sigma_min of every
+    (64,176) projection ended at 3.44-4.12 under the parent's optim and at 1.00 under mine, with
+    no non-finite parameters and a matching loss value. That confirms the retraction does what
+    section 2(A) says it does. It says NOTHING about comp_ca, which I cannot measure here.
+  - Degenerate budgets. The plateau index is clamped into [decay_start+1, steps-1]. I evaluated
+    the schedule and plateau index directly at steps = 1, 2, 5, 12, 30, 100, 4000, and ran the
+    full r22+r20+r12 loop at steps = 2, 12, 60: the write-back path executes and every parameter
+    stays finite in all three. I did not and cannot run the real eval.

@@ -1,0 +1,161 @@
+CANDIDATE: batcher = r5_identityreach_geocells_dupaware_sweep. Axes changed: batcher only.
+Everything else is the parent's genome verbatim (objective r12_antiretrieval_ring_negatives, arch
+r22_prefix_content_xattention, optim r18_spectral_capped_transition_readout, target
+zca_shrunk_target_whitening, stream r3_srcdst_hashslot_coding, head r2_dualaddress_move_transport
+with pred_weight 0.0). The crossover is performed inside the assigned axis, between my parent's
+batcher (r2_routedepth_tilt_readcollision_blocks) and the partner program's batcher
+(r2_routed_collision_depth_batcher), plus two mechanisms neither of them has. I deliberately did
+not swap any of the partner's other axes: their sources are not in this jail, so I could neither
+read them nor reason about how they compose with the parent's arch and stream, and a blind swap
+would add variance rather than expected value.
+
+
+WHAT I KEPT FROM EACH PARENT
+
+From my parent: the backward walk. It resolves a read by following the write events that landed
+content at the read path, which is the only way to recover WHERE THE CONTENT CAME FROM, not just
+how many hops it took. It also keeps the anneal-from-flat schedule, the exp(beta * z) Boltzmann
+tilt on a standardized depth score, and the idea of blocking a batch out of collision cells.
+
+From the partner program: its command parser (verb / args / redirection target, rejecting
+pipelines), its cell key shape (image, digit- and hex-collapsed read path, hop count), cell weight
+size^size_pow, member weight raised by how many routed reads a sequence has (its "demand"), a
+group_size of members dealt per cell, and the rule that a batch holds distinct indices.
+
+
+WHAT NEITHER PARENT COMPUTES — MECHANISM 1: A CORRECT IDENTITY-CARRYING REACHABILITY
+
+The partner's tracker propagates hop counts FORWARD (hops[b] = hops[a] + 1) and treats
+'cat SRC >> DST' as one more hop: hops[b] = max(hops[b], hops[a] + 1). That is wrong about the
+data. In evolve/jail_data/train_sample.jsonl the cvar arm repeatedly does
+
+    cat .../g2/s1.dat >> .../g2/acc.dat
+    cat .../g2/s0.dat >> .../g2/acc.dat
+    cat .../g2/s1.dat >> .../g2/acc.dat
+    cat .../g2/acc.dat        -> "cv-d6821...\ncv-d89c3...\ncv-d6821..."
+
+The read of an accumulator returns a CONCATENATION. No single content's identity is carried there,
+so such a read is not an instance of the quantity being measured, yet the partner scores it as a
+depth-2/3 routed read and up-weights the sequence for it. My parent has the opposite error: it
+counts only 'mv', so every 'cat SRC > DST' copy chain in the cvar arm scores as depth 0 and is
+demoted into the uniform part.
+
+_identity_reads walks backwards from each read to the latest earlier write of that path, counts
+move hops and copy hops separately, and ABANDONS the read the moment the walk meets an append.
+Sequence score = max over surviving reads of (mv_hops + copy_w * cp_hops), plus demand_share times
+the sum over all surviving reads. So the up-weighting is driven by reads that really do carry one
+content's identity, with copy indirection worth half a move, and accumulator reads contributing
+nothing. On the 24 real trajectories in the jail this labels every sequence, with deepest scores
+spread over 1.0 / 1.5 / 2.0 / 3.0 / 4.0, and it recovers the origin path of the deepest read.
+
+
+WHAT NEITHER PARENT COMPUTES — MECHANISM 2: GEOMETRY-MATCHED CELLS, KEYED BY ORIGIN AND DESTINATION
+
+Because the walk returns the origin path, I can key a cell on the PAIR (origin template, read
+template, move hops, copy hops), cross-image. Members of such a cell are sequences whose deepest
+read has the same board geometry -- content started at the same shape of location, ended at the
+same shape of location, after the same number of hops of each kind -- and differ only in which
+content that was, and on which system. That is the closest thing the training split contains to the
+role-swapped pair the metric compares against: same board, same destination, same depth, different
+content. My parent can only approximate this with a thresholded Johnson-Lindenstrauss cosine
+neighbourhood on the read step's command embedding, which is a destination-side test only; the
+partner keys on the destination and the hop count but never on the origin.
+
+Cells are built by a cascade so they populate at any split size: level 1 is the full key, whatever
+is left in a group too small to be a cell is regrouped at level 2 ((image, read path) /
+(origin, read path)), and the remainder at level 3 (image / read path). Measured on the jail
+sample there are 8 images, 9 distinct read templates and 12 distinct origin templates, so level-1
+keys number a few hundred and populate on any realistic split, with the cascade covering the tail.
+
+Two channels are drawn from: the partner's (image, read path, hops) cell -- which densifies
+same-system, same-command-shape, different-answer negatives -- and the new cross-image
+(origin, read path, hops) cell, split geo_share 0.45 / 0.55.
+
+
+WHAT NEITHER PARENT COMPUTES — MECHANISM 3: DUPLICATE-TARGET-AWARE ASSEMBLY
+
+evolve/harness.py flattens the batch to one row per COMMAND POSITION and hands the objective
+[sum_of_steps, D]. So in-batch negatives are per step, not per sequence, and boilerplate steps are
+negatives for each other. Two steps whose observation text is identical -- the same 'ls -1 /' or
+'cat /etc/secfixes.d/alpine' on two sequences of the same image -- have exactly equal target
+embeddings. In r12's listwise term such a pair can never be separated: dist2 to the duplicate
+equals dist2 to the truth, p_true is pinned near 1/(number of duplicates), and the focal factor
+(1 - p_true)^gamma therefore stays near 1 on those rows FOREVER, while rows the model actually
+learns have their focal weight decay towards zero. Unlearnable duplicate rows end up owning a
+growing share of the gradient. Image blocking, which both my parent and r6 do, makes this worse,
+because same-image sequences are exactly the ones that share boilerplate.
+
+_obs_classes quantizes six fixed coordinates of every step's observation embedding into an exact
+duplicate class (identical text gives an identical frozen embedding, so exact duplicates land in
+the same class), counts how many sequences hold each class, and keeps only the classes held by at
+least two and at most avoid_frac of the sequences. Classes that are everywhere -- above all the
+empty observation that every mv and every redirect step produces -- are excluded because no batcher
+can avoid them. A candidate is then refused when more than max(dup_tol, dup_frac * |signature|) of
+its avoidable classes are already in the batch; the tolerance is relaxed by one on each retry round
+and dropped on the last pass so the batch always fills. This is a lever on WHICH rows the objective
+gets, not on the objective, and it is what makes same-image blocking safe to keep.
+
+
+WHAT NEITHER PARENT COMPUTES — MECHANISM 4: LOW-DISCREPANCY SERVING
+
+Both parents draw with torch.multinomial(..., replacement=True). Over a fixed step budget that
+gives Poisson exposure counts, and the deep-chain sequences this objective cares about are the
+scarce ones. Both the cell draw and the sequence draw here are instead an additive recurrence on
+the normalized cumulative-weight axis (Weyl / Kronecker quasi-Monte Carlo): pick t lands at
+(shift + t * phi) mod 1 with phi the golden-ratio conjugate, mapped through searchsorted on the
+cumulative weights. Successive picks are maximally separated, so a heavy item is spread across
+steps instead of being drawn several times inside one batch and then thrown away by the distinctness
+rule, and the count an item accumulates tracks its weight share with low discrepancy. The ordering
+of the axis and the recurrence offset are redrawn once per sweep of the pool, so co-occurrence is
+not frozen. Members inside a cell come from a reshuffling deck, which is the same idea one level
+down.
+
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+
+comp_ca is native_hit minus swap_stayed. A predictor that keys on the read location alone is
+exactly zero by construction, so the number can only move if the model is pushed onto the move
+chain. Mechanisms 1 and 2 put gradient where the chain is real and deep, and put in one batch the
+sequences that differ from each other in which content the chain routed while agreeing on board,
+destination and depth -- so the discriminative pressure lines up with what the swap arm varies, not
+with what it holds fixed. Mechanism 3 stops the focal-weighted listwise term from spending itself
+on rows that are unlearnable by construction, which should raise the effective number of gradient
+steps that see a routed read at all inside the fixed budget. Mechanism 4 makes the scarce deep
+sequences actually get their weighted share of that budget instead of a Poisson draw of it.
+
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- If avoidable duplicate rows are a small fraction of the real batch, mechanism 3 buys nothing and
+  only costs the tilt. The two mechanisms genuinely compete: on a synthetic split built by
+  replicating the 24 jail trajectories, tightening dup_frac from 0.5 to 0.2 cut duplicate
+  collisions per batch from ~540 to ~360 but flattened the depth-4 exposure share from 0.65 to
+  0.37, because a rejected cell member falls through to the relaxed fill. That split is degenerate
+  (only 24 distinct trajectories, so every copy shares every boilerplate class) and the real split
+  should let both run; dup_frac = 0.4 is the compromise I shipped. If on the real split the filter
+  still eats the tilt, this candidate is a worse version of its parent.
+- If the frozen encoder maps digit-collapsed sibling paths far apart, cells are not hard negatives
+  and channel one degenerates into an ordinary image block.
+- If copy indirection transfers negatively to move chains, copy_w = 0.5 is spending budget on the
+  cvar arm for nothing; the parent spent none there.
+- If the eligible eval slice is dominated by mv depth 3 and 4 only, the demand term (which rewards
+  many shallow routed reads) mildly misdirects the tilt.
+- If quasi-random serving correlates gradients across steps in a way iid sampling does not, the
+  optimizer could behave worse despite better coverage.
+
+MEASURED IN THIS JAIL, WITH A HAND-WRITTEN TORCH STUB (there is no torch here, so nothing about
+training was run and NO claim about the score is made): the contract holds -- exactly bs indices,
+in range, integer, deterministic given the seed, seed-sensitive, fit never mutated, distinct within
+a batch whenever n >= bs, and it degrades correctly on splits with no routed read, no z_obs, and
+n <= bs. Setup is one pass over the command lists plus one pass over the observation embeddings;
+on a 2880-sequence split the per-step cost was well under a millisecond of pure-Python stub work,
+so the batcher is not near the step budget. The depth tilt was verified to bite: at full ramp the
+deepest-chain stratum took 0.61 of the exposure against a 0.33 population share, while the
+shallowest took 0.03 against 0.13. Exposure-count dispersion under flat weights was 0.885 against
+0.997 for iid sampling, i.e. mechanism 4 is a real but modest variance reduction, and I am not
+claiming it is the load-bearing part of this design.
+
+The batcher runs only inside the training loop; it is never called at scoring time, and nothing in
+it is conditioned on an observation being present at the position the probe withholds. It selects
+training SAMPLES from parsed commands and from training observations; it never writes a resolved
+route into any model input.

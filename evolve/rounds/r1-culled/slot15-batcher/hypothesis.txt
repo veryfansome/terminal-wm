@@ -1,0 +1,127 @@
+CANDIDATE: r23 multi-hop silent chain (crossover of g0-11-masked-endpoint-trunk with the
+interventional-gain-shell partner)
+
+AXES CHANGED
+  batcher : NEW  r23_placefield_chainyield_replay      (assigned axis)
+  head    : NEW  r23_multihop_silent_chain_trunk
+  arch    : r18_pathstate_latent_transition_worldmodel -> r20_interventional_gain_shell_worldmodel
+            (taken from the partner, source unchanged)
+  objective / optim / target / stream : inherited unchanged.
+
+
+1. THE MECHANISM — WHAT THE CODE COMPUTES THAT NEITHER PARENT DOES
+
+(a) head. Every `chain_period` steps the head mines, per training sequence, the h LAST
+    gate-selected commands (arch's own detached tr_mut_gate above `chain_gate_floor`), requires the
+    earliest of them to be at index >= 1, and takes every valid NON-gated command j after the last
+    of them as a read query. It then builds, in-batch, a compressed token layout
+
+        [cmd_0, obs_0, ... , cmd_{m1-1}, obs_{m1-1}] [cmd_{m1}, PAD] [cmd_{m2}, PAD] ... [cmd_{mh}, PAD] [cmd_j]
+
+    i.e. a fully OBSERVED prefix, then h consecutive commands whose observations are DELETED, then
+    the read command, and trains the prediction at the read column against z_obs[j] with the same
+    same-verb-weighted L2-InfoNCE + MSE anchor the parent head used. h cycles 1..chain_max_hops and
+    falls back downward when a depth is unminable. Several j from the same chain land in the same
+    InfoNCE batch, so two examples sharing an identical prefix and an identical silent chain differ
+    only in the read command and are each other's negatives.
+
+(b) arch. r20's `_transition_reads` takes its imagination branch exactly when n_cmd != n_pair, i.e.
+    on odd-length token streams. Ordinary training collate always produces L = 2*maxn (even), so on
+    the fitness forward r20 is bit-identical to the inherited r18. The only place the branch fires
+    is the layout the new head builds: there, at each of the h masked steps, the model writes
+    alpha_i * (delta_i - s_pre) into the path-addressed memory, where delta_i is the learned latent
+    transition and alpha_i = sigmoid(logit(w_i) + g(x_i, x_{i+1}, w_i)) from the 12.5K calibrator.
+    So h imagined writes compose before the read.
+
+(c) batcher. Batches are assembled from a few PLACE CLIQUES instead of system blocks. Path-like
+    argument tokens are parsed out of the command strings (full arg, its basename, its dirname);
+    a clique is the set of train sequences that touch one token, band-passed on clique size
+    (weight c for c <= clique_cap, cap^2/c above it, tokens owned by > 4*clique_cap sequences
+    dropped) and, with probability sys_frac, further narrowed to the system of a sampled member.
+    Members are drawn without replacement with weight pri_i = 1 + carry_i + gamma_chain * chain_i,
+    where carry_i counts steps whose path token was first seen earlier with a mutation verb in
+    between, and chain_i = min(#mutations, max_hops) * #reads-after-first-mutation, i.e. an explicit
+    estimate of how many (h-hop silent chain, later read) examples the head can mine from that
+    sequence. Remaining slots come from a shuffled without-replacement epoch cursor, so coverage is
+    complete and a batch contains distinct sequences.
+
+
+2. WHY THIS SHOULD MOVE THIS SCORE
+
+The score is a paired difference between the native chain of moves and a chain in which two files
+swap their moves, on windows of depth 3 and 4+. Both members of the pair have the same board, the
+same queried location and the same set of moves, so anything that keys on the query name, on
+"something was disturbed here", or on which file moved first or last is identical in both arms and
+subtracts to zero. Only a representation that carries a particular file's content through the moves
+separates the arms.
+
+Parent (r18 arch + r22 head) cannot express that at all: in r18's `_transition_reads` a step whose
+observation is absent has active = 0, so NOTHING is written to memory. Across a silent chain the
+memory is frozen at its pre-chain contents, and the only signal left at the read is the pre-move
+board plus the command text — exactly the analytic shortcut that cancels. Its masked-endpoint task
+also only ever poses a ONE-hop layout.
+
+Partner (r20 arch + r20 head) supplies the missing write: on the masked layout it commits an
+imagined transition into the path memory. But its head detaches p0/p1 and only ever updates the
+two-scalar calibrator (~12.5K params). The transition operator, the path addressing, the read gate
+and the readout receive no gradient from any obs-missing geometry, so the trunk never learns to
+READ what the imagined write deposited, and again only at one hop.
+
+The crossover puts a differentiable retrieval loss at the end of h composed imagined writes and lets
+it backprop through all of them into the whole trunk (transition MLP, tr_path addressing,
+tr_read/tr_read_gate, calibrator). That is the first configuration in this lineage in which the
+gradient of a "which file is here now" decision flows backwards through more than one unobserved
+hop. The negatives make the decision content-routed rather than disturbance-routed: candidates are
+the other reads' true observations plus 128 flat targets from the same batch, up-weighted by command
+cosine, and same-chain sibling reads sit inside the candidate set, so predicting "the board was
+disturbed" or "the last moved file" scores no better than chance on the loss.
+
+The batcher is co-designed with both halves. Place cliques put sequences that touch the SAME path
+token into one batch, so the in-batch negatives of both the main ring objective and the chain
+InfoNCE are "different content at the same location / same content at a different location" rather
+than merely "same system"; that is the confusion the metric grades. The pri weighting spends the
+fixed step budget on the sequences from which multi-hop chains can actually be mined, which raises
+the number of chain examples per step — the head's supervision is silent on sequences with fewer
+than h gated mutations, so composition of the batch directly sets the effective size of the new
+signal. Sampling without replacement removes duplicate sequences within a batch, which under an
+in-batch contrastive loss are dead negatives (the objective's own dupmask zeroes them).
+
+
+3. WHAT I EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST OBSERVATION
+
+Failure mode A — the new term never fires. If tr_mut_gate does not push any command above 0.8, or
+if trajectories rarely contain two mutation commands before a read, the h-fallback collapses to h=1
+and then to "no pairs", and the candidate reduces to the parent up to batch composition. Cheapest
+check: count, once per 500 steps, the number of rows selected by `_mine_chain` at each h; if the
+h>=2 counts are ~0 for the whole run, this hypothesis is untested rather than refuted, and the fix
+is to lower chain_gate_floor or to define hops by verb text instead of by the learned gate.
+
+Failure mode B — it fires and the score does not move, or moves down. Then the imagined write
+carries no usable identity: alpha*(delta - s_pre) is a command-conditioned affine edit of the slot's
+own contents, which can represent "the content at this path was replaced by f(previous content,
+command)" but cannot copy content BETWEEN two path slots, which is what `mv` actually does. Cheapest
+observation: the paired difference itself — native pick rate should rise while the role-swapped arm
+follows the swapped content; if instead both arms move together (the same pick is held under swap),
+the model is still keying on disturbance and the extra hops bought nothing.
+
+Failure mode C — the batcher hurts. If place cliques are dominated by one or two ubiquitous
+directory tokens, the hard fraction degenerates into near-duplicate batches and the main objective
+loses gradient diversity. Cheapest observation: the distribution of clique sizes actually drawn, and
+next-obs retrieval health on the dev split; a drop there with unchanged comp_ca points at the
+batcher, not the head.
+
+
+4. THE BIGGEST RISK I SEE
+
+The compressed multi-hop layout is a geometry I have inferred, not observed: the scoring instrument
+is not in my jail, and the parent head's docstring claims its ONE-hop layout is "the frozen
+instrument's exact obs-missing compressed layout". If the instrument really does keep the
+intervening non-mutation commands, or lays the chain out uncompressed, then my h>=2 layout is
+off-distribution for the eval and the extra training could pull the model away from the geometry it
+is graded on, costing score rather than earning it. I mitigated it by cycling h so that a third of
+the chain steps still train the exact one-hop layout both parents use (and on those rows r20's
+forward shell correction still fires, so nothing the partner earns is lost), but I cannot rule the
+mismatch out from inside the jail. Secondary risk: no run was possible here — torch is not installed
+in this environment — so every claim above is a claim about mechanism read off the source, and the
+speed of the extra forward pass (P <= 64 rows, length <= L+1, every second step, same order as the
+parent head's existing imagination forward) is reasoned, not measured.

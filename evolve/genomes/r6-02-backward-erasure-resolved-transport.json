@@ -1,0 +1,60 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r23_dual_address_transport_pointer",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "head": {
+   "impl": "r6_backward_erasure_resolved_transport",
+   "params": {
+    "key_d": 64,
+    "addr_hidden": 256,
+    "obs_hidden": 128,
+    "temp_init": 0.25,
+    "recency_init": 0.15,
+    "erase_init": 2.0,
+    "erase_sharp_init": 8.0,
+    "erase_thresh_init": 0.5,
+    "move_cap": 0.98,
+    "direct_init": 0.02,
+    "gate_bias": -2.0,
+    "relay_bias": 0.0,
+    "occ_bias": 1.5,
+    "dup_frac": 0.05,
+    "max_dup": 3,
+    "max_examples": 192,
+    "nce_temp": 0.5,
+    "read_weight": 1.0,
+    "pred_weight": 0.5,
+    "relay_weight": 0.25,
+    "mse_weight": 0.05,
+    "aux_weight": 1.0,
+    "ramp_steps": 300
+   }
+  },
+  "objective": {
+   "impl": "r4_trajectory_transport_contrast",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r5_persistent_gradient_mixture_channel_opener",
+   "params": {}
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

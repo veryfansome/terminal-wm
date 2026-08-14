@@ -1,0 +1,126 @@
+WHAT THE CROSSOVER KEEPS
+
+Parent = {arch r22_observation_occlusion_denoising, head r3_rename_registry_occupancy_routing}.
+Partner = {arch r23_dual_address_transport_pointer, head r18_transition_forwardmodel_consistency}.
+
+The headline mechanism of the parent is the rename registry: a move RE-ADDRESSES a slot instead of
+copying its value, so a content's vector survives a chain of renames byte-identically. The headline
+mechanism of the partner is the dual-address transport memory with a POINTER-COPY readout: the value
+retrieved at a source address is used as the query of a masked softmax over the strictly earlier raw
+observation embeddings, and the selected observation is copied verbatim into the command-position
+prediction. I keep both: arch = r23 (partner), head = r3 (parent). They are not redundant — r3 keeps
+identity stable across renames inside a slot store and injects a registry read, r23 turns a retrieved
+address into an explicit *choice among earlier observations* and copies that observation into pred.
+The partner's head (r18_transition_forwardmodel_consistency) is dropped: it supervises
+net.transition_from_emb and returns 0.0 on any arch without that operator, and r3's aux already
+carries an equivalent content-preservation term on the same operator, guarded the same way.
+
+The optim, target, batcher (with its params), and stream are identical in both programs and are
+inherited unchanged.
+
+WHAT I ADDED ON MY OWN AXIS
+
+New objective impl: objective__window_reidentification_ring.py. It is the parent's objective
+(precision-weighted focal listwise contrastive with the confusability-ring negative weighting, the
+gated repulsion hinge, the squared-error anchor) plus ONE new term, and one re-weighting.
+
+It opts into WANTS_CTX, so it receives ctx["cmd"] (the command embedding that produced each
+prediction, a model input) and ctx["prev"] (the strict-causal previous observation), both aligned
+row-for-row with pred/tgt. baseline_interleave defines extract_cmd_input, so the flag is safe with
+the inherited stream.
+
+1. TRAJECTORY RECOVERY (_trajectory_ids). The harness builds prev as
+   cat([zeros, tgt[:, :-1]]) masked by cmd_mask, so the first command row of each trajectory — and
+   only that row — has an exactly-zero previous observation. Cumulative-summing that indicator over
+   the flattened rows gives a trajectory id per row; row order inside a trajectory is step order.
+   This is why the objective can be sequence-aware at all, which the parent's objective is not: the
+   parent's loss is a permutation-invariant function of the batch rows.
+
+2. RE-READ MINING (_mine_reidentification, all under no_grad). A row j is flagged when there exists
+   an earlier row i in the SAME trajectory with
+     (a) d2(tgt_i, tgt_j)/D <= 0.06 * mean pairwise target distance  — same content,
+     (b) d2(cmd_i, cmd_j)/D >= 0.02 * mean pairwise command distance — different command, and
+     (c) the count of batch rows whose target is within the same duplicate radius of tgt_j is <= 4.
+   i is taken as the earliest qualifying row. (b) rejects the same command re-issued (whose command
+   distance is exactly zero). (c) rejects targets that repeat all over the batch — the observation of
+   a mutating command, which in this data renders as "cwd=<...> exit=0" with empty output and is
+   therefore identical for every mv/redirect step in every trajectory — and likewise boilerplate
+   listings. What survives (c) is a content that appears in exactly its own window: in the training
+   data, the cups_expose/cups_test pair (cat of the pre-move path, then cat of the post-move path,
+   same file content both times) and the cvar produce/test pair (cat A, then cat A > B, then cat B).
+
+3. THE NEW TERM. At each flagged row j, form the candidate set = every earlier row of the same
+   trajectory, minus rows whose target near-duplicates the positive's target (false negatives), plus
+   the positive itself; require at least 3 candidates. Score each candidate by -d2(pred_j, tgt_k)/D
+   over temperature and take cross-entropy with the positive i as the label. Weight 0.5. This is
+   trained on pred — the model's own next-observation prediction — in the isotropic squared-L2
+   distance the retrieval arms decide with, not on any auxiliary read.
+
+4. ROW BOOST. Flagged rows get weight 3x (1 + 2*flag, renormalised so the mean weight is 1) inside
+   the focal listwise term. With no flagged rows the objective is numerically the parent's.
+
+WHAT IT COMPUTES THAT NEITHER PARENT COMPUTES
+
+Neither program's objective ever looks at sequence structure; both are functions of the unordered set
+of (pred, tgt) rows, and both explicitly ZERO the weight on near-duplicate target pairs (the ring's
+dupmask) because such pairs are false negatives for a retrieval loss. Those very pairs are the only
+place in the training data where the SAME content is observed at TWO different addresses. This
+objective keeps them out of the negative set and harvests them as the POSITIVE of a within-window
+forced choice. The r3 head's NCE is the nearest relative and is still different in three ways: it
+trains the registry read rather than the model's prediction, it selects positions by a
+command-similarity bridge heuristic rather than by target duplication, and its candidate set is the
+sequence's observations without the batch-rarity filter.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+
+comp_ca is native_hit minus swap_stayed at a read whose observation is withheld: the model must
+return the content the move chain actually routed to the read location, and must NOT return the same
+content when the two contents exchange their moves. The dominant wrong answer is the content that was
+originally exposed at the read's own path — a name-keyed answer, which is precisely the answer a
+lexical shortcut gives, because the read command "cat .../magic.txt.1" is far more similar to the
+expose command "cat .../magic.txt" of the content that was originally there than to the expose
+command "cat .../g53/f149.tmp" of the content that was moved in. My term puts that name-matched
+content in the candidate set as a hard negative and labels the moved-in content as the positive, so
+the gradient at exactly the eval's kind of row actively punishes the name-keyed shortcut. MSE alone
+never expresses this: it pulls pred toward the right vector but never asks it to be closer to that
+vector than to the sibling contents of the same window, and it spends the same weight on the ~90% of
+rows where nothing was routed. The batch-level listwise term does ask for discrimination, but against
+negatives drawn from the whole batch by target-distance heuristics rather than against the four or
+five sibling contents of the same window, which is what the instrument's forced choice uses.
+
+The arch/head pairing is chosen for this term. r23's pointer softmax over strictly earlier
+observations is literally a distribution over the same candidate set my cross-entropy scores, so the
+new loss supplies a direct gradient to that pointer: raising attention on the correct exposure row
+lowers the cross-entropy. Under the parent's objective the pointer had no signal telling it which
+earlier observation to copy at a re-read, only a squared-error target for the blend.
+
+WHERE IT IS MEASURED — THE GATING CHECK
+
+The scored position is a command whose own observation is withheld. Nothing in this mechanism runs
+at scoring time: loss() is called only from evolve/harness.py inside the training loop. The mining
+reads tgt, ctx["cmd"] and ctx["prev"], all training-side quantities, and no resolved routing is ever
+placed in the model's input; the model still has to learn the mapping. The mining does read targets
+of rows that are later in the batch (the rarity count), which is a loss-side statistic exactly like
+the parent's in-batch negatives, not a model input.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- If the command-distance threshold is miscalibrated. 0.02 of the batch mean is set low deliberately:
+  it must only separate an exactly-repeated command (distance 0) from two different paths. If two
+  different-path cat commands embed closer than 2% of the batch mean pairwise command distance, true
+  pairs are rejected and the term goes inert; if the encoder makes repeated identical commands land
+  above it — impossible, their distance is identically zero — trivial pairs would be admitted.
+- If the rarity cap of 4 is too tight: a content exposed once and read twice, in a batch that samples
+  the same trajectory twice, reaches a duplicate count of 6 and would be dropped. That loses examples
+  but does not corrupt any.
+- If the rarity cap is too loose for some pack whose "empty output" observations are rarer than 4 per
+  batch, the term would spend some of its weight teaching "a mutating command prints nothing", which
+  is easy and harmless but dilutes.
+- If the eligible windows' contents are so close in embedding space that the within-window forced
+  choice is not learnable from the frozen encoder at all, the term adds gradient noise and the score
+  moves down rather than up.
+- If stacking the r3 registry on the r23 transport arch destabilises training or exhausts the step
+  budget. Both loops are over steps-per-sequence (about 26) on tensors of a few megabytes, and each
+  program already pays one of them; I have not measured the combined wall clock and do not claim it.
+
+No figure in this file is a measurement. Nothing here was run: there is no torch in this jail.

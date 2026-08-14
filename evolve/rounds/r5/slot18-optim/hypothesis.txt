@@ -1,0 +1,177 @@
+CANDIDATE: r5 relative-sharpness optim + dual-extractor displacement transport head
+AXES CHANGED: optim (assigned), head (the crossover)
+
+WHAT I WAS GIVEN. The parent and the crossover partner have identical genomes on six of seven
+axes; they differ only in the head. So the crossover is a head crossover, and the optim axis is
+where I add the one mechanism neither program has.
+
+=====================================================================
+PART 1 - head__r5_dualextractor_displacement_transport.py (the crossover)
+=====================================================================
+
+Both parents run the same shape of machine: a delta-rule outer-product memory of shape
+(key_d, D) scanned causally over the command/observation pairs, where each command produces a
+SOURCE key and a DESTINATION key, the slot at the source key is read BEFORE the write, and what
+is written at the destination key is a move-gated blend of that read and the step's own
+observation. They differ in exactly how the two keys are produced, and in what the train-time
+aux supervises.
+
+Kept from the parent (r21_slotdisplacement_transport_roles):
+  - destination = source + displacement, with the displacement layer zero-initialised, so
+    kd == ks EXACTLY at initialisation and every command is an identity slot until the
+    displacement grows;
+  - the source-slot ERASE, proportional to the move gate, so a move empties the location it
+    moved out of instead of leaving a stale copy there;
+  - the key-alignment aux: when exactly one content-free step separates the earlier and later
+    duplicate observations, that step's SOURCE key is trained to retrieve the earlier read
+    command's key and its DESTINATION key the later read command's key, in one softmax over the
+    sequence's own read commands;
+  - the key-tying term on single-path read commands, and the forward-model consistency aux on
+    the arch's shared transition operator with both a raw-observation and a memory-content
+    pre-state arm.
+
+Kept from the partner (r2_dualaddress_move_transport):
+  - the SECOND command extractor, initialised as a symmetry-broken copy of the source extractor
+    (dst_ext.weight = src_ext.weight + 0.02 * N(0,1), bias copied), so the destination argument
+    of a command has its own extraction pathway into the shared path-to-key encoder;
+  - the higher weight on the term that supervises the INJECTED PREDICTION (pred_weight 0.5,
+    the partner's value, versus 0.25 in the parent), because the prediction at a command
+    position is the quantity the measurement actually reads;
+  - the partner's preference for DEEP mined examples: where the parent capped its mined set by
+    duplicate exactness alone, the cap here is two-pool.
+
+WHAT THE COMBINATION COMPUTES THAT NEITHER PARENT COMPUTES.
+
+(a) kd = unit(path_key(gelu(src_ext(c))) + displace(gelu(dst_ext(c)))).
+    The parent computes both keys from ONE feature vector f = gelu(addr_in(c)): the destination
+    key is base(f) + displace(f), so a single hidden vector must simultaneously encode "the
+    location this command reads from" and "the offset to the location it writes to". The partner
+    computes the two keys from two extractors but through one shared key encoder, and never has
+    exact identity at init, only near-identity from the noise scale. This candidate has both
+    properties at once and they are not in tension: displace is zero-initialised, so kd == ks
+    exactly at step 0 regardless of what dst_ext holds, while the displacement's INPUT is a
+    feature vector produced by a linear map that is free to specialise on the second path
+    argument of `mv A B`. Concretely, `mv /tmp/w/cups/g53/f149.tmp /tmp/w/cups/usr/share/misc/
+    magic.txt.1` must yield a source key equal to the key that `cat .../f149.tmp` produces and a
+    destination key equal to the key that `cat .../magic.txt.1` produces; the parent must fit
+    that difference as a function of a feature vector shared with the source computation, this
+    candidate gets a dedicated map for it. Gradient order is well defined: at step 0
+    d(loss)/d(displace.weight) = (dL/dkd) outer fd is nonzero because fd = gelu(dst_ext(c)) != 0,
+    while dst_ext receives no gradient until displace leaves zero - displace moves first, then
+    the extractor it reads from specialises.
+
+(b) The mined-example cap is split into two pools. Pool A is the one-hop pairs (exactly one
+    content-free step between the two duplicate observations), ranked by duplicate exactness,
+    capped at hop1_frac * max_examples; pool B is everything else, ranked by hops - d2o, i.e.
+    by HOW MANY content-free steps the pair spans, with duplicate distance as tiebreak. The
+    parent ranked the whole pool by exactness, which systematically prefers one-hop pairs (they
+    are the cleanest duplicates) and starves the deep chains; the partner ranked by depth alone,
+    which starves the one-hop pool the key-alignment loss needs (that loss only fires on hop==1
+    rows, and if the cap drops them all it contributes nothing). Reserving a quota for each keeps
+    the key-alignment supervision alive AND puts depth-3+ chains into the read/prediction
+    supervision, which is where the eligible windows of the measurement live.
+
+(c) The scan covers EVERY command token. Both parents compute n = L // 2 and slice the command
+    stream to n, so if the token stream ever ends with a command that has no paired observation
+    token, the LAST command - the one being scored - is dropped from the memory scan and receives
+    no memory contribution at all. The parent additionally clamps the injection to
+    pred.size(1) // 2, which drops it a second time. Here n_cmd = (L + 1) // 2 and n_pair = L // 2:
+    the trailing unpaired command gets a read (and therefore a contribution), its observation slot
+    is zero-padded and its validity is False, so it writes nothing and erases nothing. This does
+    not change behaviour on any even-length stream - training always is one - it removes a mode in
+    which the whole mechanism is switched off exactly at the position that is judged. The
+    injection stays strictly causal either way: reads[i] is taken from the memory BEFORE the write
+    at step i, so it depends only on observations at steps < i, and the read gate is a function of
+    the command alone.
+
+Nothing in this head resolves a move chain outside the model. The mining is done on embedding
+geometry only (observation duplicate distance, command duplicate distance, counts of content-free
+steps), it selects TRAINING EXAMPLES and shapes a LOSS, and it is train-time only: `aux_loss` is
+never called at scoring, and the eval forward path sees only the memory the model itself built
+from its own keys and gates. Checked against the real data in evolve/jail_data (24 sequences,
+8 images, 172 `mv` steps): every `mv` step has exit 0 and empty output, so its rendered
+observation is "cwd=<cwd> exit=0\n" and all move steps within a sequence carry literally
+identical observation text - hence identical embeddings - which is exactly what the content-free
+detector keys on; a `cat` of a moved-to path returns the moved content verbatim, which is what
+makes the duplicate-observation pair mineable.
+
+=====================================================================
+PART 2 - optim__r5_relsam_spectral_transport_keys.py (my axis)
+=====================================================================
+
+MECHANISM ADDED. Sharpness-aware minimisation (Foret et al., ICLR 2021) at one backward per
+step, with a scale-invariant per-tensor radius in the spirit of adaptive sharpness (Kwon et al.,
+ICML 2021) but applied at tensor granularity rather than elementwise.
+
+Standard SAM solves min_w max_{||eps|| <= rho} L(w + eps) and needs two backward passes per step:
+one at w to build eps, one at w + eps to build the update. This harness gives an optimizer exactly
+one backward per step, so the two-pass form is not implementable. Instead this impl keeps the
+weights displaced BETWEEN steps:
+
+    at step t the parameters sit at w_t + eps_t and the harness computes g_t = grad L(w_t + eps_t)
+    step():  w <- w - eps_t                       (restore)
+             w_{t+1} = AdamW/Muon update of w using g_t
+             spectral cap projection on the (D,D) readouts
+             eps_{t+1,p} = rho_t * ||W_p|| * g_{t+1,p} / ||g_{t+1,p}||   per parameter tensor p
+             w <- w + eps_{t+1}                   (displace)
+
+so every gradient the optimizer consumes is evaluated at a displaced point while every update is
+applied to the undisplaced iterate. This is SAM with a one-step-stale ascent direction: the
+ascent direction is the gradient at the previous perturbed iterate rather than at the current
+clean one, which is the standard cheap substitution used by the one-gradient SAM variants.
+
+Two properties I made structural rather than hoped for:
+  - the radius is RELATIVE: eps_p = rho * ||W_p|| * ghat_p, so the perturbation is 2% of each
+    tensor's own norm and does not depend on the parameter count or on the harness's global
+    gradient clipping (which rescales all gradients by a common factor and therefore cannot
+    change ghat_p at all).
+  - the radius is zero for the first sam_warm_frac of the budget (while the LR is still warming
+    and the memory recurrence is unsettled) and is annealed LINEARLY TO ZERO over the last
+    sam_tail_frac. At t = steps the radius is exactly 0, so no displacement survives the final
+    step and the weights that get scored are the clean iterate, not a perturbed one. If the
+    harness stopped early the residue would be at most 2% of a tensor's norm; the schedule makes
+    it exactly zero at the declared budget.
+
+Everything the parent's optim did is kept unchanged: AdamW with warmup-hold-cosine-floor, Muon
+with Newton-Schulz orthogonalisation on the (key_d x d) delta-rule addressing projections
+selected by the same shape-plus-sibling rule, and the soft spectral-norm cap by power iteration
+on the (D, D) latent-transition readout, projected after the update and before the displacement
+so the cap always sees the clean iterate. My head keeps key_d = 64 and gives path_key and
+displace identical (64, 256) shapes, so they form a sibling pair and route to Muon exactly as
+the parent's addressing pair did.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY. comp_ca is measured on windows held out BY IMAGE: a
+genome earns nothing unless its routing transfers to filesystems it never trained on. A memory
+that has learned "this particular key coincidence retrieves this particular content on the
+systems in the training blend" sits in a sharp minimum - small weight perturbations break the
+coincidence and the loss rises steeply - whereas a routing rule that composes (source key from
+argument one, destination key from argument two, read-then-write, erase) is a flatter solution
+because it is realised by a whole neighbourhood of weights. Penalising the worst case inside a
+ball around the weights is a direct pressure toward the second. The differential structure of the
+score is why this is worth a slot rather than a generic training trick: swap_stayed is what the
+model predicts when the same board, the same destinations and the same depth are re-encoded with
+two contents' move positions exchanged, so anything the model does that ignores WHICH content a
+move carried cancels; only a genuine gain in tracking the content shows up in native_hit -
+swap_stayed. Regularising toward the compositional solution is therefore paid out in the
+numerator of the objective and not in the part that cancels.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL.
+  - rho = 0.02 of tensor norm may be too small to change which minimum is found inside a fixed
+    step budget, in which case this is an expensive no-op (the cost is one extra pass over
+    parameters per step - no extra forward or backward - which I have NOT measured on the real
+    lane, only bounded analytically as O(number of parameters) elementwise work).
+  - Conversely the one-step-stale ascent direction can be a poor proxy for the true ascent
+    direction when consecutive gradients decorrelate; then the displacement is closer to
+    structured gradient noise than to sharpness, and could slow convergence of the slowest part
+    of the model, which here is the memory recurrence. The warmup window is the guard, but the
+    guard is a guess.
+  - On the head: if the destination argument is NOT what limits these programs - if the keys
+    already resolve both paths and the failure is downstream, in the gates or in the injection
+    gain - then the second extractor buys nothing and the two-pool cap is the only real change.
+  - If the mined deep pairs are dominated by false duplicates (two different contents whose
+    embeddings are within dup_frac of the batch's mean pairwise distance), then preferring depth
+    preferentially imports noise, and the parent's exactness-first cap was right.
+  - If the scoring stream is always even-length, the n_cmd fix is inert; it can only help or do
+    nothing, but the size of "help" is unknown to me and I did not measure it.
+  - I ran nothing. There is no torch in this jail. Every claim above is a claim about what the
+    code computes, not about what it scores.

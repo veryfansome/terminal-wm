@@ -1,0 +1,204 @@
+CANDIDATE: head = r5_closure_routing_memory (new), genome = parent x partner crossover.
+REVISION 1 — the mechanism now acts at the scored read. What changed, and the four design
+decisions the fix forced, are stated first; the original argument follows unchanged below it.
+
+WHAT WAS WRONG
+
+The first version indexed the stream by PAIR. It computed n = L // 2 and bailed to the unwrapped
+net whenever 2*n != L. The scored window is [cmd_0, obs_0, ..., cmd_r], length 2r+1, odd, because
+the read command's observation is the answer being predicted and is absent rather than padded. So
+the head returned the bare trunk at every scored forward and contributed exactly nothing. Measured
+against the bare architecture: 0.08626 of movement on an even layout, 0.0 at the scored read.
+
+WHAT THE REVISION DOES
+
+1. HOW A COMMAND WITH NO PAIR IS INDEXED. The stream is indexed by COMMAND SLOT, not by pair:
+   n = (L + 1) // 2, which is what the arch itself already uses. Command i occupies token 2i and is
+   always present; observation i occupies token 2i+1 and exists only when 2i+1 < L. Observations are
+   fitted to n rows by appending one zero row when L is odd (_fit_rows), and a per-slot boolean
+   live_o marks that appended row dead. A trailing command with no observation is an ordinary row:
+   it gets its source key, destination key, transport gate, read gate and mixing coefficients from
+   its own command embedding, exactly like every other row, and it reads.
+
+2. PARITY IS NEVER USED TO DECIDE PAIRING. Unpairedness is a per-ROW property, read from key_pad:
+   live_c = ~key_pad[:, 0::2], live_o = ~key_pad[:, 1::2], each fitted to n slots. A global length
+   test cannot see it — batch several windows of different depths to a common even L and a short
+   row's final command is unpaired while L is even. Both are now the same code path. Verified: an
+   even-length batch whose row 1 ends at command 2*(r-1) with its observation slot padded still
+   routes and still produces a nonzero contribution at that command.
+
+3. WHETHER A WRITE NEEDS AN OBSERVATION. The two writes are separated, and only one of them does.
+   The CONTENT DEPOSIT is U0 = (1 - g) * obs * live_o: it needs an observation because the content
+   deposited IS the observation, so a slot with no observation deposits nothing. TRANSPORT — the row
+   of the routing matrix M = g * (a * A_src + b * A_dst) — is a function of the command embedding
+   alone and needs no observation at all, because it moves content that is already in the register
+   from a source key to a destination key. This is not a convenience: in this data every mv
+   observation is present but content-free ("cwd=/ exit=0\n" with an empty body, 9-14 of ~30 steps
+   byte-identical within a sequence), so transport never had an observation to be a function of.
+   Which file moved where lives only in the command text, which is exactly what M is built from.
+
+4. WHAT THE READ AT THAT POSITION SEES, AND WHY THE ABSENT OBSERVATION CANNOT MATTER. Both M and
+   the read attention A_src are strictly lower triangular, so reads_i = sum_{j<i} A_src[i,j] V_j and
+   V_j depends only on U0_{j'} for j' <= j < i. Position i therefore never reads its own deposit.
+   The scored read is terminal, so its own deposit is read by nobody at all. Verified two ways:
+   perturbing obs_j leaves reads at every position <= j bit-identical (this is also what makes the
+   stream's leakage probe pass — replicated here, the four checked command predictions move by
+   exactly 0.0 after obs_3 is corrupted); and the read at the scored command is bit-identical
+   whether its own observation is absent, padded, or materialised as a large random vector. There is
+   consequently NO train/eval mismatch in the quantity that determines the scored prediction: the
+   read at the scored command is computed from the same construction as every read in training.
+
+5. WHAT THE RUNNING STATISTICS INCLUDE AT THAT POSITION. Nothing, and the forward path has no
+   pooled statistic to contaminate: every gate, key and coefficient is a per-position function of
+   one command embedding, and the only cross-position quantities are the two attention matrices,
+   which are causally masked. The train-time aux is the only place statistics are formed, and its
+   validity mask is now cmd_mask & live_c & live_o, so a slot with no observation enters neither the
+   per-sequence reference distances, nor the duplicate clusters, nor the candidate pool, nor the
+   mined targets. It has no observation, so it is neither a target nor a foil. In training this
+   intersection is a no-op, because collate clears key_pad for a command and its observation
+   together — the unpaired case arises only at the scored read, where the aux does not run.
+
+6. PLACEMENT OF THE CONTRIBUTION. The old code interleaved contrib with a zero filler and reshaped
+   to 2n, which only exists for even L. It now scatters into the command tokens by index
+   (index_copy over arange(0, L, 2)), which is parity-free. Observation positions are left exactly
+   untouched — verified 0.0 change there. The layout check is cached per sequence length instead of
+   once globally, so the odd scored length is validated on its own terms rather than inheriting a
+   verdict from training; and it no longer requires a live observation slot to exist.
+
+MEASURED AFTER THE REVISION (cpu, random weights, out_scale forced nonzero; the real box is not
+reachable from this jail): movement at the scored read of an odd layout 0.271 against the bare
+architecture, where it was 0.0; movement at observation positions 0.0; leakage probe passes with
+exact zeros; gradient reaches all 18 router parameters; route_chain forward+backward at B=64, n=32,
+hops=7 is 32 ms/step on cpu, which is a cpu number and not a claim about the GPU lane.
+
+--------------------------------------------------------------------------------
+
+WHAT THE DATA FORCES (checked against evolve/jail_data/train_sample.jsonl, 24 real sequences)
+
+Every mutating step in these trajectories carries a content-free observation. A move renders as
+"cwd=/ exit=0\n" with an empty body, and so does every redirect op; within one sequence 9-14 of the
+~30 steps share that one byte-identical observation string. So the observation channel says nothing
+at all about where anything went. The entire routing signal lives in ONE frozen mean-pooled
+embedding of the command string "mv <src> <dst>", and the model has to make the destination path
+extracted from that string collide with the source path extracted from a later "mv <dst> <dst2>"
+and with the query path of a later "cat <dst2>". That collision -- one shared path-identity space
+that a first-position extractor and a second-position extractor both land in -- is the whole task.
+The compositional reads are also visible in the data as exact observation duplicates under
+different commands (e.g. step 14 "cat /tmp/w/cups/g53/f149.tmp" and step 22
+"cat /tmp/w/cups/usr/share/misc/magic.txt.1" render identical text after two intervening moves),
+and the content-free mutating steps separate cleanly from contentful ones by duplicate-cluster
+size (9-14 vs 1-3). That is a label-free mining rule that works on this data as written.
+
+WHAT THE MECHANISM IS
+
+wrap() registers one module on the net (before the optimizer is built, so it is trained) and
+re-points net.forward, holding the original bound method in a closure; the module never holds a
+reference back to the net, so there is no parent-child cycle and .to(device) does not recurse.
+
+Per command slot, from the command embeddings c_i alone:
+  q_i = unit(path_key(gelu(src_in(c_i))))     source / query key
+  k_i = unit(path_key(gelu(dst_in(c_i))))     destination / write key
+  g_i = sigmoid(move_gate(gelu(ctl_in(c_i)))) transport gate
+  (a_i, b_i) = softmax(mix_coef(...))         mixing coefficients on the 2-simplex
+src_in and dst_in are initialised to the same weights plus small noise and share the final
+projection path_key, which is what lets "the second path of command i" and "the only path of
+command j" land on the same key.
+
+Two causal attention matrices over the same write keys, both with a learned recency decay
+-softplus(log_decay)*(i-j) and a LEARNED NULL COLUMN appended before the softmax and dropped after:
+  A_src[i,j] = attn(q_i . k_j),   A_dst[i,j] = attn(k_i . k_j),   both strictly j < i.
+The null column is what makes "nothing is at this path yet" representable: without it a softmax
+over a single unrelated earlier step returns that step with weight 1. Rows with no admissible j
+put all mass on null and read exactly zero, so no NaN and no spurious read.
+
+Routing matrix and content register:
+  M = g * (a * A_src + b * A_dst)                    strictly lower triangular
+  U0 = (1 - g) * obs * live_obs
+  V = sum_{p=0..hops} M^p U0                         computed by `hops` batched matmuls
+  reads = A_src V
+  contribution to the arch's prediction at command position i = rg_i * reads_i * out_scale
+This is the Neumann series for V = M V + U0, i.e. the transitive closure of the routing graph.
+A depth-d move chain is resolved by the d-th term of the series, in d matmuls, rather than by a
+32-iteration python recurrence with an unnormalised outer-product memory. I verified the algebra by
+hand-simulating it on a 6-step board with ideal keys: with commands
+  cat A(=X) / cat P(=Y) / mv A B / mv B C / cat Q(=Z) / cat C
+the read at the final step is exactly X, and the reads at the two moves are X as well.
+a and b live on the 2-simplex because the correct content algebra is convex: a move is (1,0) and an
+append "cat s >> acc" is a length-weighted mixture of the source content and what was already at
+the destination, which in a mean-pooled embedding space is approximately a convex combination of
+the two observation embeddings. Those append steps are ~40% of the ops in this data, and the r2
+prior's single source read cannot express them at all.
+
+WHAT NEITHER PARENT COMPUTES
+
+Both programs run the same head, r18_transition_forwardmodel_consistency, which is a TRAIN-ONLY
+auxiliary and is switched off entirely unless the arch exposes transition_from_emb; neither
+program's arch is the r18 latent-transition arch. Neither program computes, at prediction time, a
+path-addressed store of which content currently sits where. This candidate adds exactly that, and
+keeps the parent head's principle -- a shared transition operator supervised label-free from
+within-batch structure -- by supervising this router's operator the same way.
+
+The train-time aux mines, with no labels, pairs (j < i) where obs_i duplicates obs_j (squared
+distance under 3% of the sequence's mean pairwise distance) while cmd_i does NOT duplicate cmd_j,
+and where both steps' duplicate clusters are small (<= max_dup), which excludes the content-free
+mutating steps. Deeper mined reads (larger i - first matching j) are preferred when capping. The
+read at i, and the arch's own prediction at i, are then trained with a multi-positive InfoNCE whose
+logits are NEGATIVE SQUARED L2 over the sequence's other contentful observations -- the same
+geometry the forced-foil measurement ranks in -- plus a small MSE anchor that keeps the read in the
+raw observation scale it is being added in.
+
+WHY THIS SHOULD MOVE comp_ca, WHICH IS A PAIRED DIFFERENCE
+
+comp_ca cancels anything that keys on which location is being read: that read command is the same
+token in both arms. This router's read at the scored position is A_src[scored, :] V, and V is a
+function of the MOVE commands' source and destination keys. Role-swapping the chain re-encodes
+those move commands, which changes k_j and q_j, which changes M, which changes V, which changes
+what the read returns -- to the partner's content. So native_hit rises and swap_stayed falls, which
+is the differential, rather than raising both arms together. A first-mover or move-order heuristic
+cannot be expressed here: position enters only as a monotone recency decay shared by both arms.
+That the read at the scored command genuinely depends on the interior command encodings, and not
+only on the read command, is verified directly: exchanging two interior command embeddings over the
+same board moves the read at the scored command by 0.82.
+
+HOW IT FAILS
+
+1. The frozen mean-pooled encoder may not linearly separate "first path" from "second path" in a
+   two-path command. If src_in and dst_in cannot pull the two paths apart, q and k collapse onto
+   each other, A_src and A_dst become the same matrix, and the router degenerates to a
+   recency-weighted average of prior contents. Then out_scale stays near zero and the candidate
+   scores like its parent rather than below it -- but it will not beat it.
+2. The mined supervision covers exposure/re-read duplicates. If most such pairs in the training
+   split are depth-0 re-reads rather than post-move reads, the router can satisfy the aux with a
+   plain "same path, no moves" lookup and never learn the transport gate. The span-preferring cap
+   is meant to counter this; if it does not, comp_ca will not move even with a healthy aux curve.
+3. Cost: routing adds hops+3 batched matmuls of [B,n,n] x [B,n,768] per forward. The only figure I
+   have is the cpu one above; the GPU lane is unmeasured from here, and if the eval's n is far
+   larger than the ~30 steps in this data the n^2 term grows and the budget claim weakens.
+4. The objective swap is the one unmeasured genome element. If r22_exact_target_equivalence_quotient
+   is worse than r4_dupclass_ring_negatives in this arch's context, that cost is charged against
+   the head's gain and could hide it.
+5. New with the revision: the router now runs at a length it never saw in training. The recency
+   decay, the null column and the keys are all length-free, and the read is built from the same
+   causal construction as in training, so I expect no shift -- but the scored windows are shorter
+   and denser in moves than the ~30-step training sequences, and if the learned decay is tuned to
+   the training length distribution it will be mis-scaled there. That is untested from this jail.
+
+THE CROSSOVER
+
+The two programs differ in objective, arch, target and batcher. I keep the parent's arch
+(r4_fingerprint_conditioned_composition), its transport-chain batcher with its parameters, its
+target (identity -- required, because the routed content is injected in raw observation space and a
+retargeted prediction space would misalign the injection), and the optim and stream both programs
+share. From the partner I take r22_exact_target_equivalence_quotient as the objective: it is the
+partner's one mechanism that is loss-level and therefore arch-agnostic, and it is the one that
+matches this head, because the routed content at a post-move read is byte-identical to an earlier
+exposure's target, so a loss that treats exactly-equal targets as one equivalence class is the
+right pressure for a router whose output is precisely a previously-seen observation.
+
+Nothing resolves the chain outside the model. The head never parses a command string, never looks
+at a path, and has no access to text -- it sees only the frozen 768-d embeddings the harness
+already feeds the trunk, and every key, gate and coefficient is a learned function of them trained
+by gradient descent. The mined aux uses observation duplicates only to CHOOSE which steps to
+supervise and as the contrastive target, never as an input.
+
+AXES CHANGED: head (new impl), objective (from the partner).

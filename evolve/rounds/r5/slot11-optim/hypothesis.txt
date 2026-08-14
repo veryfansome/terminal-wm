@@ -1,0 +1,174 @@
+CANDIDATE: crossover of r4-17-trajectory-transport-contrast (parent) with the second program,
+plus one new optim mechanism.
+
+AXES CHANGED
+  optim   r18_spectral_capped_transition_readout -> r5_lagged_adaptive_sharpness_muon_cap  (NEW CODE)
+  head    r18_transition_forwardmodel_consistency -> r3_occupancy_routed_copy_transport     (partner's)
+  batcher r6_sysblock_hardneg_curriculum          -> r2_routed_collision_depth_batcher      (partner's)
+KEPT FROM THE PARENT
+  arch      r23_dual_address_transport_pointer
+  objective r4_trajectory_transport_contrast
+  target    identity
+  stream    baseline_interleave
+
+------------------------------------------------------------------------------------------------
+1. THE NEW MECHANISM ON MY AXIS: a zero-extra-backward adaptive sharpness step
+------------------------------------------------------------------------------------------------
+
+WHAT THE PARENT'S OPTIM COMPUTES. AdamW with a warmup-hold-cosine-floor schedule on everything
+except the identical-shape (key_d x d) addressing projection pairs, Muon (Newton-Schulz
+orthogonalisation of the momentum buffer) on those pairs, and after every update a power-iteration
+estimate of the top singular value of each (D,D) readout with a multiplicative projection back to a
+cap. Every one of those quantities is a function of the CURRENT parameter point only. It is a pure
+descent method: the gradient it applies is always the gradient measured at the point it is applied.
+
+WHAT I ADD, AS AN EQUATION. Let theta_t be the parameters after update t, g_t the gradient the
+harness has just produced (already clipped to global norm 1.0 by the harness), and
+
+    m_t = beta * m_{t-1} + (1 - beta) * g_t                      (beta = sharp_beta, default 0.6)
+    T_t = |theta_t| + eta                                        (elementwise, eta = 0.01)
+    eps_t = rho_t * (T_t * T_t * m_t) / || T_t * m_t ||_2         (norm taken GLOBALLY over all params)
+
+At the END of optimizer step t I set theta_t <- theta_t + eps_t and remember eps_t. The harness then
+runs the NEXT minibatch's forward and backward at theta_t + eps_t, producing g_{t+1} = grad L_{t+1}
+(theta_t + eps_t). At the START of optimizer step t+1 I subtract eps_t back off, and only then run
+AdamW/Muon/cap. So the update actually applied is
+
+    theta_{t+1} = AdamWStep( theta_t ,  grad L_{t+1}(theta_t + eps_t) )
+
+which is Sharpness-Aware Minimization (Foret et al., ICLR 2021) with the ASAM elementwise
+|theta|-rescaling (Kwon et al., ICML 2021) that makes the perturbation radius scale-invariant --
+except that the ascent direction is a filtered gradient from the previous minibatch rather than a
+second backward pass on the current one. That substitution is what makes it FREE: this optimizer
+costs one backward per step, exactly like the parent, because the harness never passes a closure and
+a true two-point SAM is not expressible under this axis contract. The precedent for reusing the
+ascent direction across steps is LookSAM (Liu et al., CVPR 2022), which recomputes the SAM direction
+only every k steps (k=5) and reuses it in between with essentially no loss of the SAM benefit; my
+staleness is one step, and the EMA with beta=0.6 low-passes the minibatch noise in the direction.
+
+MECHANICAL DETAILS THAT MATTER FOR REVIEW.
+  * rho_t is 0 for the first `warm` steps (the same warm as the LR schedule) and then smoothsteps
+    up to rho over sharp_ramp_frac * steps. Early training is untouched.
+  * The displacement is SKIPPED on the final step (`if self.taken < self.total_steps`). `steps` is
+    the number of optimizer steps the harness will take, so training ends, and the probe's forward
+    runs, on undisplaced weights. This is the one correctness property the whole mechanism hangs on
+    and it is enforced by construction, not by a heuristic.
+  * revert() is unconditional at the top of every step, so the descent is always applied at the base
+    point and AdamW's decoupled weight decay always acts on the base point.
+  * The cap projection runs on the base weights (after the update, before the new displacement), so
+    the spectral cap still means what it meant in the parent.
+  * rho = 0 makes this file numerically identical to the parent's optimizer apart from a fixed
+    latent bug (the parent's _SpectralCap references `v` from the power-iteration loop, which is
+    unbound if spectral_iters were ever set to 0; iters is now clamped to >= 1).
+  * Non-finite gradients, a zero global norm, or a non-finite displacement all fall through to
+    "displace nothing", so a bad step degrades to the parent's behaviour rather than to NaN.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY. comp_ca is measured on windows held out BY IMAGE: the
+model has never seen the filesystem it is asked to route on. The gap between "this net has fit the
+training systems" and "this net routes correctly on a new system" is a generalisation gap, and
+sharpness of the minimum is the single best-supported predictor of that gap. It matters more than
+usual for THIS genome specifically: the r23 arch routes content through a bank of sigmoid gates
+(move/write/erase, plus the alpha and tp_gate blend) whose decisions are piecewise-constant in the
+weights. A sharp minimum in that gate landscape is exactly a minimum in which the gate thresholds
+have been fitted to the particular command-embedding statistics of the training images -- a lookup.
+A flat minimum is one where the same gate decision survives a |theta|-relative perturbation of the
+weights, i.e. a decision made on a margin rather than on a coincidence. Sharpness-aware training
+selects the second kind. Because comp_ca is a DIFFERENCE (native minus role-swapped), it is
+insensitive to anything the model does that is identical across the two arms; making the gate
+decisions robust rather than memorised is one of the few things that is not identical across arms,
+because the two arms differ precisely in which content the gates should move where.
+
+WHAT WOULD HAVE TO BE TRUE FOR THE OPTIM MECHANISM TO FAIL.
+  (a) The one-step-stale, EMA-filtered direction m_t is nearly orthogonal to the true local sharpest
+      direction at theta_t. Then eps_t is effectively a scaled random weight perturbation: still a
+      regulariser, but a much weaker one, and the gain shrinks toward noise. This is the most likely
+      failure and it is the honest risk of the design; the objective here is a high-variance
+      listwise contrastive, so consecutive minibatch gradients may be less correlated than they are
+      in the image-classification settings LookSAM measured.
+  (b) The model is under-fitted at this step budget rather than over-fitted. If the bottleneck is
+      that the transport pathway has not yet converged, adding an ascent perturbation slows the
+      effective descent and costs accuracy on both arms. The ramp (no perturbation until after
+      warmup) and the modest rho are the hedge, but they do not eliminate this.
+  (c) rho = 0.5 with eta = 0.01 is calibrated for ASAM's usual regime; if the displacement is large
+      relative to the zero-initialised readouts (tp_out starts at exactly 0, so T = eta = 0.01 there
+      and the displacement on that tensor is tiny by construction) the perturbation lands almost
+      entirely on the trunk. That is intended, but it means the mechanism regularises the trunk more
+      than the readout.
+  I have NOT measured any of this. There is no torch in this jail; nothing here was run.
+
+------------------------------------------------------------------------------------------------
+2. THE CROSSOVER: which mechanism I took from each program, and why
+------------------------------------------------------------------------------------------------
+
+FROM THE PARENT I KEEP the r23 dual-address transport arch and the r4 trajectory-transport-contrast
+objective. r23 is the only arch of the two that separates a SOURCE address from a DESTINATION
+address per command and performs an explicit read-move-erase as one rank-2 delta-rule update, which
+is the operation the score is about. r4 is the only objective of the two that recovers, inside the
+loss and from the batch alone, which rows are TRANSPORTED (target duplicates a non-generic target
+seen earlier in the same trajectory under a DIFFERENT command, gated by command cosine distance so a
+re-read of the same path does not count) and puts 6x listwise mass plus a restricted-candidate
+cross-entropy plus a margin hinge on exactly those rows. The partner's r22 objective is a good
+general exact-target quotient contrastive but has no notion of transport. So: parent's arch, parent's
+objective.
+
+FROM THE PARTNER I TAKE the r3_occupancy_routed_copy_transport head and the
+r2_routed_collision_depth_batcher.
+
+The head is the important one, and the reason is the mechanical fact in the brief: the scored
+position is a command whose own observation is withheld. The parent's head,
+r18_transition_forwardmodel_consistency, is a TRAIN-ONLY auxiliary that is switched off entirely
+unless the net exposes `transition_from_emb` (`cfg["_disabled"] = not callable(getattr(net,
+"transition_from_emb", None))`, and every aux_loss path returns 0.0 when it is). It contributes
+nothing at eval under any circumstances. r3 does two things instead:
+  * It is live in the FORWARD, not only in the loss: wrap() replaces net.forward so the retrieved
+    content is added at every command position through a zero-initialised per-dimension scale (so
+    the wrapped net is bit-identical to the unwrapped net at initialisation, and the r23
+    contribution it sits alongside is also zero-init -- the two additions do not fight at step 0).
+  * Its read path is built from the COMMAND EMBEDDING ALONE. It splits the axes deliberately:
+    (L+1)//2 read positions, one per command, against L//2 write slots, one per COMPLETED
+    (command, observation) pair. A final command whose observation has not happened still issues its
+    own query and still retrieves. That is precisely the position comp_ca reads, and it is the
+    property the brief warns has already been fatal to a proposal that gated on an observation being
+    present. I checked this in the code rather than inferring it: `read_ok = live[:, 0::2]` and
+    `write_ok = read_ok[:, :n_write] & live[:, 1::2]`, and the query comes from `cf = gelu(cmd_feat(c))`
+    with no observation term.
+  * It does not lose the parent head's supervision: r3's aux ALSO supervises
+    `net.transition_from_emb` when the arch exposes one (trans_weight = 0.5, cosine + MSE toward the
+    duplicated content). So swapping r18 -> r3 is a strict superset of what the parent's head could
+    have contributed, in both the disabled and the enabled case.
+  * Its value recursion is solved as one unit-lower-triangular system over the write slots, so a
+    retrieved value can itself be a retrieval of a retrieval -- depth composes in a single pass
+    rather than being bounded by the number of memory writes. The eligible slice is d3 60 / d4+ 29,
+    i.e. the majority of it is depth >= 3, so an unbounded-depth read path is the right shape.
+
+The batcher, r2, replays each training sequence's command list through a symbolic mv/cp/redirect
+tracker to label each read with how many hops routed its content there, then tilts batch composition
+toward buckets keyed by (image, normalised path shape, hop count) with an exp(0.8 * depth) weight.
+This is sample selection from parsed commands, which the brief explicitly names as legitimate: no
+resolved routing is placed in the model's input, nothing is fed to the net that it did not have to
+learn, and the labels are used only to decide WHICH training sequences co-occur in a batch. The
+parent's r6 blocks only by image; it densifies same-system negatives but is blind to depth. Since
+r4's transported-row boost and its restricted-candidate cross-entropy only fire when a batch
+actually contains transported rows and their same-trajectory alternatives, feeding r4 a
+depth-tilted, collision-grouped batch stream should raise the fraction of steps on which its
+transport terms carry any gradient at all. r6 raises it only incidentally.
+
+INTERACTIONS I CHECKED BY HAND (no torch here, so these are static checks, not runs):
+  * Muon routing under the new head. My optim routes to Muon only 2-D params with shape[0] == key_d
+    == 64 whose exact shape occurs at least twice. r23 supplies addr_src and addr_dst, both
+    (64, addr_hidden=256): a pair, routed. r3's memory adds `addr` = Linear(hid=128 -> key_d=64,
+    bias=False), weight (64, 128): a LONE tensor of that shape, so the sibling rule excludes it and
+    it goes to AdamW. That is the intended behaviour of the sibling rule and the head does not
+    perturb the parent's routing.
+  * Spectral cap targets. (D,D) = (768,768) params are r23's tp_out.weight only; r3's head adds no
+    (D,D) matrix (its out_scale is 1-D). So the cap means the same thing it meant for the parent.
+  * Head wrap ordering. The harness calls head.wrap(net, D) BEFORE net.to(device) and builds the
+    optimizer from net.parameters() AFTER, so r3's `copy_transport` submodule is on-device and its
+    parameters are in the optimizer, including under my displacement (which iterates the same
+    `params` list `make` was given).
+  * Cost. The added optimizer work is O(#params) elementwise per step plus one scalar
+    device-to-host sync for the global norm -- the same order as the spectral cap's existing
+    per-step sync. It adds no forward, no backward, and no allocation that scales with batch or
+    sequence length. Memory grows by two parameter-sized buffers (the EMA direction and the stored
+    displacement) on top of AdamW's two. This is an unmeasured estimate from reading the code, not a
+    profile.

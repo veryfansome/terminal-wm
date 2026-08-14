@@ -163,3 +163,37 @@ So this is a sound objective to *search* on — the ranking signal is a paired d
 ## 10. Changing any of this
 
 The eligible slice, the metric form, and every guard threshold are single named constants in `evolve/cups_ca.py`. Changing one changes what the search means and makes everything scored before it incomparable. That is a dated note in this file and a fresh baseline, not a tweak.
+
+## 11. Measured properties of the frozen slice and layout (2026-08-10)
+
+These are facts about the instrument as it currently stands, recorded here because they are easy to re-derive incorrectly and because none of them belongs in a channel that reaches an inventor. Each was measured, not reasoned about.
+
+**Earnable cells exist only at depths 3 and 4, so the depth floor selects nothing.** Of the 100 cells in the frozen ceiling table, 11 are earnable at depth 3 and 4 at depth 4; depths 1, 2, 5, 6 and 7 have none. The shallow depths are excluded by the ceiling filter before the depth floor is consulted, so `DEPTH_MIN = 3` currently removes zero windows and is a statement of intent rather than an active filter. The deep depths are empty for the reason recorded in section 9: earnability needs `R >= 2*depth + (m-2)`, and the frozen move-count grid stops at 8. A re-mint that extends the grid changes this, which is why the slice is described to inventors in terms of the mechanism rather than in terms of a depth number that is contingent on the mint.
+
+**The scored layout has at most one command position without an observation, and it is the read.** `build_cups_layout` writes both a command and an observation for every step before the read and then the read command alone, at `2r`, with `Lmax = 2*max(r)+1`. So `valid_cmd & ~valid_obs` is true at exactly one pair per row — the read — for every window whose `r` is below the slice maximum, and at no pair at all for a window whose read sits at the maximum. In training the same condition is identically false everywhere, because `collate` clears `key_pad` for a command and its observation together. A mechanism gated on that condition is therefore untrained, and at scoring it fires once, after the value the read consumes has been taken. `eval/guard_reach.py` catches the subset of these that own parameters — measured, 2 of the 9 retracted carriers, and the discarded round-1 optim slot whose transport is trained by a synthetic auxiliary geometry and still cannot reach the scored read. It cannot catch a branch that is parameter-free, or one that shares its projections with a live path. Retirement and retraction removed this family; the gate is a partial net for the next one.
+
+**A move's observation is present and constant.** All 23,874 move steps in the pack render to the identical string: exit 0, empty output. The observation is not missing; it carries no information about which file moved where, and that identity exists only in the command text. This is the real difficulty the objective poses, and it is distinct from the absent-observation condition above, which does not occur.
+
+**The masked-endpoint detector is inert on the scored path and live elsewhere.** `_detect_masked_endpoint`, carried by five head impls, needs a live token after the key-padded observation slot. The cups layout never provides one, because the read is the last token, so the helper returns `None` on every scored window — verified by running all three variants against a real layout. It does fire on the cd-history probe's key-padded arm, which is reported and never scored. That asymmetry is why the mechanism family reads as plausible from its own source: it is not dead everywhere, only where the score is taken. The family is retired in `evolve/retired_impls.json` and the founders selecting it are retracted.
+
+**A first-mover lookup outscores every measured mechanism on this slice.** The analytic band on the 89-window inner slice reads `h_first +0.1685`, `h_last -0.0899`, `h_lastmv +0.0337`, `deepest +0.0337`, and exactly `0.0` for `at_name`, `trace_h1` and `trace_h2`. The best real candidate is `+0.0300`. Name-keying cancels structurally, per window; chain-position arms cancel only in expectation, and this slice is one frozen realization. The band is reported beside every score and never subtracted, and each candidate's own differential is now also split by what the paying arms score on the same windows, in `private.shortcut_leaning`, because the per-window rows are not persisted and the split cannot be recovered afterwards.
+
+## 12. The eval is not deterministic, and the noise floor already accounts for it (2026-08-12)
+
+Re-measuring the nine selectable founders under identical conditions established two things that had never been tested by remeasurement.
+
+**The same (genome, seed) does not reproduce.** Running `g0-00-baseline` twice on the same box, same code, same seeds: seed 1 gave `-0.011236` then `0.0`, seed 2 gave `+0.022472` then `-0.011236`. Every observed difference is an integer multiple of `1/89`, which identifies the mechanism — the metric picks the nearest exposure candidate by squared distance, so a floating-point difference of order `1e-7` in a GPU reduction flips a near-tied `argmin`, and a continuous perturbation becomes a discrete score change of one whole window. Roughly 1.5% of window picks moved between runs. This is a property of the instrument, not of any candidate or of any change made to the harness: the arms are structurally identical for a genome whose stream declares no `code_cmds`, which is all nine.
+
+**The noise floor is nevertheless correct.** It was derived from the observed per-seed spread, which already contains this run-to-run component, so it does not need widening. Two independent three-seed measurements of the same nine genomes:
+
+| quantity | value |
+|---|---|
+| pooled per-seed sd, both campaigns | 0.02525 |
+| se of a three-seed mean | 0.01458 |
+| predicted rms difference between two such means | 0.02062 |
+| observed rms difference over the nine | 0.02122 |
+| ratio | 1.03 |
+
+One of nine moved by more than the floor, which is what a calibrated floor predicts. Treat `fitness.noise_floor = 0.0227` as measured rather than assumed, and treat any single ordering of the leaderboard as one realization: across the two campaigns the nominal best changed genome, and two genomes that differed by `0.026` in one campaign tied in the other.
+
+The practical consequence for a round is that a candidate's number is a draw, not a reading. A difference smaller than the floor is not evidence, and re-measuring the same id is cheap insurance rather than duplicated work: it is the only thing that distinguishes a mechanism from a draw from the tail, and the archive keeps every measurement so the estimates combine. Two independent three-seed runs of one candidate give a six-seed mean at standard error 0.0103 rather than 0.0146.

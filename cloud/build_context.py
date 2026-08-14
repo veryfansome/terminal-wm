@@ -127,6 +127,9 @@ def resolve_frame_root(train_root, blend, frame_root):
     return frame
 
 
+CONTEXT_SCHEMA = 2
+
+
 def build(root, eye, split, swap_seed, cdh_root=None, train_root=None, frame_root=None):
     device = M.pick_device()
     train_root = train_root or root
@@ -159,7 +162,8 @@ def build(root, eye, split, swap_seed, cdh_root=None, train_root=None, frame_roo
         if cdh is None:
             raise SystemExit(f"no cd-history windows in the {split} split of {cdh_root}")
 
-    return {"train_full": train_full, "ctx": ctx, "swap": swap, "cdh": cdh,
+    return {"schema": CONTEXT_SCHEMA,
+            "train_full": train_full, "ctx": ctx, "swap": swap, "cdh": cdh,
             "root": root, "eye": eye, "split": split, "swap_seed": swap_seed,
             "cdh_root": cdh_root, "train_root": train_root, "frame_root": frame,
             "blend": (None if blend is None else

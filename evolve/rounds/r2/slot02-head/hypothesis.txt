@@ -1,0 +1,55 @@
+head__r2_dualaddress_move_transport — axis changed: head only.
+
+WHAT THE DATA SAYS, AND WHY IT DICTATES THE DESIGN
+
+I read evolve/jail_data/train_sample.jsonl before designing. A cups/cvar window is: some `cat <path>` steps whose observation IS the content; then a chain of `mv <src> <dst>` steps whose observation is the string "cwd=/ exit=0\n" and nothing else; then a `cat <final_path>` whose observation is byte-identical to one of the earlier exposures. Two mechanical facts follow, and both parents ignore at least one of them.
+
+(1) The observation of a move step carries ZERO information about the move. Every mutation step in a trajectory renders to exactly the same text, so its embedding is exactly the same vector. All routing information lives in the COMMAND embedding, which names both the source and the destination path.
+
+(2) The observation at the end of a chain is byte-identical to the observation at the start of the chain, so it is exactly equal as an embedding. Same content, different command, with content-free steps in between. That is a free, label-free signature of "a transport happened", visible inside any training batch without touching the eval, the split, or any metadata.
+
+WHAT I ADDED
+
+A dual-address transport memory, installed by wrapping net.forward (the original bound method is saved first; the transport module is registered as a child of net so the optimizer built after wrap() owns its parameters, and the module never holds a reference back to net, so .to(device) does not recurse).
+
+Per command embedding c_i the module computes two path descriptors through two separate extractors and then ONE SHARED path-to-key encoder:
+    k_src_i = unit(P(gelu(A_src c_i))),  k_dst_i = unit(P(gelu(A_dst c_i)))
+A_dst is initialised as a copy of A_src plus small noise, so at init every command addresses a single slot and the src/dst split is learned. P is shared on purpose: the whole design turns on k_dst(emb("mv A B")) landing on the same slot as k_src(emb("mv B C")), and a shared encoder makes that agreement a statement about the descriptors rather than about two unrelated matrices.
+
+An outer-product memory M [B, 48, 768] is then run causally over steps, delta-rule style:
+    r_i     = k_src_i M                                   (read at the SOURCE address)
+    v_i     = m_i * r_i + (1 - m_i) * obs_i                (m_i = sigmoid gate on cmd_i AND obs_i)
+    M      <- M + k_dst_i ((v_i - k_dst_i M) * beta_i * active_i)
+r_i is taken strictly before the step-i write, so the read at command i depends only on obs_{<i}: the stream's leakage probe passes (verified — corrupting obs_3 leaves the predictions at cmd 0..3 bit-unchanged, while cmd 4+ move). The move gate may see obs_i because obs_i only enters the write, which only affects reads after i; that matters, because "this step produced no content" is exactly what distinguishes a relocation from a read, and it is trivially visible in obs_i.
+
+The read is injected into the arch's own prediction at command positions as rgate(cmd_i) * (r_i * s), with s a per-dimension scale initialised to zeros — so the wrapped net is bit-identical to the unwrapped net at initialisation (verified: max abs difference 0.0 on both the r18 arch and the plain transformer).
+
+WHAT IT COMPUTES THAT NEITHER PARENT COMPUTES
+
+The parent's r18 arch and its head both address memory with ONE key per step. Its transition operator is a self-loop: the value at key(cmd_i) is replaced by f(value at key(cmd_i), cmd_i). One address per command cannot express "the thing at A is now at B", which is the only thing a move step means. The parent's head aux compounds this: it mines triples by command cosine and then REQUIRES the observation to have changed by at least change_floor=0.25 between the two ends. In this data a transport chain ends with a byte-identical observation, i.e. change exactly 0 — so the windows the objective is about are the windows that filter removes. The crossover partner (plain transformer + MSE) computes no memory at all; what it contributes here is its one real virtue, direct regression of the actual observation vector in standardised latent space, which is the space the probe scores in.
+
+My head keeps the parent's whole stack (arch, optim, objective, batcher untouched) and adds the two-address read-modify-write the parent's memory cannot express, then supervises it with the partner's direct-regression idea sharpened into a within-window discrimination:
+
+The aux mines, per batch and with no labels, every step j such that (a) obs_j duplicates some earlier obs_i at a relative squared distance under dup_frac of that sequence's mean pairwise distance, (b) cmd_j is NOT a duplicate of cmd_i (different location), (c) neither observation belongs to a large duplicate cluster (the content-free mutation cluster is excluded by max_dup), and (d) at least one member of that mutation cluster lies strictly between i and j. Condition (d) is what separates a real transport from the repeated-config-file case where the same content is simply read twice.
+
+For each mined j the loss is a squared-L2 InfoNCE — the probe's own decision variable — of the memory read r_j against the observations of all content-bearing steps at or before j in the same sequence, with every duplicate of obs_j as the positive set; the same InfoNCE on the model's final prediction at j; and a small MSE anchor of r_j to obs_j. Candidates are restricted to steps <= j, so the aux never uses a future observation even as a negative. The head-state stash lets the aux reuse the prediction and reads from the training step's own forward pass, so there is no second forward.
+
+I checked the miner against the real trajectories in this jail (with a proxy embedding that reproduces the one property that matters — identical rendered text gives an identical vector). Over the 24 sample trajectories it selects 69 steps: 61 are exactly the steps labelled cvar_test / cups_test, 8 are benign (a directory listing re-read under a different command), and the mined chain depths run from 2 to 31. The steps it misses are the accumulator reads (`cat acc.dat`) and directory listings, whose content is genuinely new rather than transported — correctly out of scope.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca is (native_hit - swap_stayed) per window. Anything that keys on WHICH LOCATION is read cancels exactly, because the read command is the same token in both arms. Only the move commands are re-encoded. My mechanism's answer at the read location is, by construction, whatever value the chain of destination writes deposited at that address — and under the role swap the two contents exchange their move-position sets, so the chain feeding the read address terminates on the other content and the prediction changes. It is not a first-mover or chain-position heuristic: nothing in the recurrence is a function of the ordinal position of a content in the move order; the value at an address is determined by the src/dst keys of the commands, so a swap of which command carries which path changes the answer.
+
+The naming in this data is adversarial in a way that makes this the only honest route: the final destination in the sample window is `/tmp/w/cups/etc/ssh/sshd_config.cfg.8`, a suffix-extension of a DIFFERENT content's original path, while the content actually routed there came from `/tmp/w/cups/g72/f654.dat`. A lexical "answer with the content of the most similarly named exposure" heuristic returns the wrong content and returns it identically in both arms, contributing exactly zero. Address-based transport is what separates them.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+1. The load-bearing bet: that a mean-pooled 768-d embedding of "mv A B" contains linearly-then-nonlinearly separable source and destination components. If pooling mixes them irrecoverably, A_src and A_dst converge to the same map, k_src == k_dst, and the memory degenerates to the single-address memory the parent already has — in which case this costs about 17% wall-clock (measured, CPU, r18 arch at B=64/N=31) and buys nothing. I have not measured the separability; the encoder is contextual, so source and destination tokens do not have identical representations, but that is an argument, not a measurement.
+
+2. Address resolution. Destinations in a window differ from each other by a suffix (`...cfg.6`, `...cfg.7`, `...cfg.8`). If the key encoder cannot resolve those, all writes in a window land on one slot and the read returns a mixture of the window's contents — which is precisely the state the InfoNCE aux penalises, so the aux is the mechanism's repair path, but only if the embedding contains the distinction at all.
+
+3. Mining thresholds. dup_frac / cmd_dup_frac / max_dup are relative to each sequence's own mean pairwise distance, which should transfer across encoders, but they were tuned against a proxy embedding, not the real one. If dup_frac is too tight on the real encoder, exact duplicates still pass (distance exactly 0) and the aux only loses recall; if too loose, distinct contents get mined as duplicates and the aux teaches noise. The former is the safer failure and the thresholds are set on that side.
+
+4. The pred-side InfoNCE (weight 0.5) competes with the main contrastive objective. If the two disagree about the geometry, training could get worse overall while the transport itself improves.
+
+5. Memory. The recurrence keeps 31 tensors of B x 48 x 768 alive for backward (~290 MB at B=64) on top of what the r18 arch already holds. If the lane's GPU is tight, key_d is the dial.

@@ -1,0 +1,29 @@
+{
+  "chunks": {
+    "objective": {"impl": "r12_antiretrieval_ring_negatives", "params": {}},
+    "arch": {"impl": "r22_prefix_content_xattention", "params": {}},
+    "optim": {"impl": "r18_spectral_capped_transition_readout", "params": {}},
+    "target": {"impl": "confusable_pair_scatter_metric", "params": {}},
+    "batcher": {
+      "impl": "r5_identityreach_geocells_dupaware_sweep",
+      "params": {
+        "avoid_frac": 0.25,
+        "copy_w": 0.5,
+        "demand_share": 0.25,
+        "depth_beta": 0.9,
+        "depth_cap": 4,
+        "dup_frac": 0.4,
+        "dup_tol": 3,
+        "geo_share": 0.45,
+        "group_size": 4,
+        "hard_frac_max": 0.65,
+        "min_cell": 3,
+        "ramp_buckets": 32,
+        "ramp_frac": 0.3,
+        "size_pow": 0.5
+      }
+    },
+    "stream": {"impl": "r3_srcdst_hashslot_coding", "params": {}},
+    "head": {"impl": "r2_dualaddress_move_transport", "params": {"pred_weight": 0.0}}
+  }
+}

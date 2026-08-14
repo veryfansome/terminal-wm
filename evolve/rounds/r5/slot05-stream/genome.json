@@ -1,0 +1,12 @@
+{
+  "chunks": {
+    "objective": {"impl": "whitened_metric_ring_mse"},
+    "arch": {"impl": "r19_obspresent_imagination_worldmodel"},
+    "optim": {"impl": "r18_spectral_capped_transition_readout", "bs": 64},
+    "target": {"impl": "ridge_zca_whitened_obs"},
+    "batcher": {"impl": "r6_sysblock_hardneg_curriculum",
+                "params": {"hard_frac_max": 0.75, "n_block_images": 1, "ramp_frac": 0.3}},
+    "stream": {"impl": "r5_shared_pathid_signed_role_binding"},
+    "head": {"impl": "r3_rename_registry_occupancy_routing"}
+  }
+}

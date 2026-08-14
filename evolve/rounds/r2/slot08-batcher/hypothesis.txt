@@ -1,0 +1,126 @@
+WHAT THE CROSSOVER KEEPS
+
+The two programs I was given differ on exactly one axis: the parent runs arch
+r18_pathstate_latent_transition_worldmodel, the partner runs r22_retrieval_composition_renderer.
+r22 subclasses r18, constructs its extra modules after the whole inherited __init__ so the
+inherited parameters draw the identical init RNG stream, and zero-inits comp_out, so at
+initialisation r22 computes exactly the r18 function and then can learn a vector-wise interaction
+between the retrieved-content channels on top of it. The union of the two programs is therefore
+well defined rather than a compromise: r22 arch (which contains the parent's path-state latent
+transition operator, the delta-rule file/path memories and the transition_from_emb entry point the
+head aux supervises) plus everything else the two share — objective r12_antiretrieval_ring_negatives,
+optim r18_spectral_capped_transition_readout, head r18_transition_forwardmodel_consistency. That is
+the arch/optim/head/objective half of this proposal, and it is a selection, not new code.
+
+The parent's batcher mechanism I keep is system blocking: part of every batch is drawn from a
+single image so the in-batch negatives are same-system observations. It survives as one of the two
+block families below, and my sampler reduces exactly to it when alpha = 0.
+
+WHAT THE NEW BATCHER COMPUTES THAT NEITHER PROGRAM COMPUTES
+
+Both programs sample sequences by image only. Neither program looks at what a sequence's commands
+actually do. Mine parses, once at make_batcher time and only from the strings in s["cmds"], the
+mv-reachability graph of each training trajectory:
+
+  edges  = {(t, src, dst) : cmds[t] == "mv src dst"}
+  wrote[dst] = [(t, src) ...]
+  for every read step "cat P" at time t:
+      cur, ct, d = P, t, 0
+      while some (j, s) in wrote[cur] has j < ct:
+          (ct, cur) = the latest such (j, s);  d += 1
+      hop count of that read = d
+  depth(sequence) = max d over its reads;  read_at(sequence) = the step index attaining it
+
+d is literally the number of mv hops between the location being read and the file the content
+started in. I checked this against the 24 real trajectories in evolve/jail_data/train_sample.jsonl:
+the value this walk returns equals the meta["cups"]["depth"] recorded on that trajectory's
+cups_test step in 24 of 24 sequences. So a batcher can recover the exact compositional depth of
+a training window from command text alone, with no access to meta (which the encoded fit dicts do
+not carry anyway — they carry only z_obs, z_cmd, cmds, image, ok). The distribution of that depth
+in the sample is 1:4, 2:8, 3:4, 4:5, 5:2, 6:1 — half the trajectories are depth 1 or 2, and each
+trajectory contributes exactly one deepest routed read out of ~30 steps.
+
+Two things are then built on that quantity.
+
+(1) A Boltzmann tilt on structural difficulty. z is the per-sequence depth, centred and scaled to
+unit RMS and clipped to [-4, 4]. Inside a block, members are drawn with probability proportional to
+exp(alpha * z), alpha ramping linearly 0 -> alpha_max over the first ramp_frac of training, and the
+blocked share of the batch ramping 0 -> hard_frac_max on the same schedule. At step 1 alpha = 0 and
+the blocked share is 0, so the sampler starts at the plain uniform stream and anneals into a
+hard-example distribution — a competence-style curriculum whose difficulty measure is exact and
+structural rather than loss-derived (the contract gives the batcher no loss feedback, so a
+prioritised-replay-style online priority is not available; this is its static structural analogue).
+A uniform component of size bs*(1 - hard_frac_max*ramp) is kept for the whole run so coverage of
+the corpus is never lost.
+
+(2) Read-collision blocks. For every sequence with at least one routed read I take the command
+embedding q = z_cmd[read_at] and the answer embedding a = z_obs[read_at], project both through one
+fixed Gaussian matrix to 128 dims (Johnson-Lindenstrauss; drawn from a private generator seeded
+from `seed`), L2-normalise, and for each centre take its top-16 neighbours with cosine(q_i, q_j) >=
+0.85 after masking out any j with cosine(a_i, a_j) > 0.995. A collision pool is therefore a set of
+trajectories whose deepest routed read is asked with a near-indistinguishable command while the
+correct answers are demonstrably not the same content. On the sample these pools come out as
+exactly what they should: several distinct trajectories all ending in `cat
+/tmp/w/cups/usr/local/etc/app.ini.6`, or all in `cat /tmp/w/cups/usr/share/misc/magic.txt.1`, each
+holding a different blob.
+
+Each batch is a uniform part plus n_blocks blocks; every block is drawn as a collision pool with
+probability coll_share and as one image pool otherwise, and members within it are drawn with the
+exp(alpha*z) tilt.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca = native_hit - swap_stayed. A predictor that keys on which location is being read predicts
+identically in both arms and contributes exactly zero per window; the score is only paid to a model
+whose answer is determined by which content the chain actually routed to that location. The
+training loss is a listwise contrastive over every cmd position in the batch — with bs = 64 and
+~30 steps per trajectory that is a softmax over roughly 1900 targets, of which the routed reads are
+about 64, and only about half of those sit at the depth-3-and-up band the scored slice is drawn
+from. Two things follow, and this batcher attacks both.
+
+First, signal share. Measured on a 960-sequence corpus built from the real trajectories, the batch
+composition moves the fraction of sampled sequences with depth >= 3 from 0.506 (uniform) to 0.774,
+and depth >= 4 from 0.338 to 0.640, while still touching 959 of the 960 distinct sequences over the
+window measured. Roughly a 1.9x increase in the density of depth-4-and-up routing examples per
+gradient step, at a fixed step budget, on the exact structure the eligible slice consists of.
+
+Second, and this is the part the metric's own construction argues for: the collision pools force
+the name-keyed solution to be loss-bearing during training rather than merely unrewarded at eval.
+When k trajectories whose read command is the same string sit in one batch, their k targets are
+different contents inside one softmax. A model that answers from the read location alone assigns
+them the same logits and cannot do better than 1/k on that group; the only representation that
+separates them is one that followed each trajectory's own move chain. That is the training-time
+image of the role-swap arm. On the same 960-sequence corpus the number of same-read-command pairs
+co-present in a batch goes from 117 (uniform) to 636.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- If the depth-3+ examples are not the binding constraint — if the model is capacity- or
+  optimisation-limited rather than signal-limited — then a 1.9x density change buys nothing and
+  the score moves inside the noise band. This is the most likely failure.
+- Windows are held out by IMAGE. Concentrating 75% of each batch on a tilted, blocked distribution
+  narrows the effective training set; if the concentration costs more in transfer to unseen systems
+  than it gains in depth density, comp_ca can go down. The 25% uniform floor and the coverage figure
+  above (959/960 distinct sequences touched) bound this but do not eliminate it.
+- The collision pools depend on the destination paths of routed reads recurring across trajectories.
+  In the 24-sequence sample 6 of 27 routed-read paths recur, and the recurring ones are the canonical
+  decoy destinations (app.ini, magic.txt, sshd_config.cfg, backup.job). If the real train split
+  randomises those far more than the sample suggests, pools shrink or vanish; the code then falls
+  back to image blocks (have_coll requires at least 8 pools) and the proposal degrades to tilt-only,
+  which is a smaller effect.
+- If the frozen encoder places all cups read commands close together anyway, the 0.85 cosine
+  threshold admits neighbours that are not really the same location, and the collision pressure
+  becomes ordinary hard-negative mining rather than a location-name counterfactual.
+- Everything above is a claim about batch composition, which I measured directly. Nothing here is a
+  measured claim about comp_ca; no training run was performed from this jail.
+
+CONTRACT AND COST
+
+make_batcher(fit, bs, seed, **params) -> next_batch(step, total_steps) -> list[int] of exactly bs
+ints in [0, len(fit)). Two private torch.Generators (one seeded `seed` for sampling, one seeded
+seed ^ 0x9E3779B9 for the projection matrix and the centre subsample); the global torch RNG is
+never touched and fit is never mutated — both checked. Degenerate inputs (n < 2, no cmds, a single
+image with no routed reads, fewer than 8 collision pools and fewer than 2 images) fall back to the
+plain uniform stream. Setup on a 960-sequence corpus is 0.018 s and a batch costs 47 microseconds;
+the neighbour search is chunked and capped at max_centers=8000 rows in the projected 128-dim space,
+so it stays O(n * max_centers * 128) rather than O(n^2 * 768).

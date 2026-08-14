@@ -1,0 +1,40 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r22_exact_target_equivalence_quotient"
+  },
+  "arch": {
+   "impl": "r24_backward_multihop_pointer_chase",
+   "params": {
+    "chase_hops": 6,
+    "addr_hidden": 256,
+    "n_addr": 2,
+    "content_proj": 32,
+    "hop_emb": 16,
+    "chase_logit_scale": 8.0,
+    "chase_step_bias": 1.0,
+    "chase_gate_bias": -2.0
+   }
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout"
+  },
+  "target": {
+   "impl": "within_sequence_contrast_equalizer"
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave"
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency"
+  }
+ }
+}

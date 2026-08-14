@@ -1,0 +1,81 @@
+AXES CHANGED: batcher only. The other six axes (arch, head, objective, optim, stream, target) are
+the parent's impls and params verbatim. The mechanism is entirely a change to which sequences are
+put in the same batch; it introduces no learnable parameters, touches no tokens, and therefore
+needs no companion change on any other axis. Changing more would confound the measurement of the
+one thing being tested.
+
+MECHANISM. The parent groups a batch by SYSTEM: it picks one image and draws sequences from it,
+tilted toward long rename chains. This candidate throws that out and groups a batch by QUESTION,
+using PK sampling from metric learning (P classes x K instances per class, Hermans et al.'s batch
+construction for batch-hard mining) with the class redefined as "the read being asked".
+
+Setup, once, from command strings only. Each train sequence is parsed into a content-forwarding
+graph: `mv src dst` is an edge, and `cat src > dst` is an edge (overwrite preserves content
+identity) while `cat src >> dst` is not (append does not). Every two-token read is walked backwards
+through the edges that wrote its path earlier in the same trajectory; the deepest such read is the
+sequence's routed read. The sequence is filed under one key: that read's verbatim command string
+when the exact string has at least min_members members, otherwise a digit-masked template of it
+that preserves the trailing numeric component (`cat /tmp/w/cups/g#/f#.tmp.8`). The backoff exists
+because roughly half of the boards live under randomised directory/file names that never repeat
+verbatim; masking their digits keeps them in a contrast set instead of exiling them to the uniform
+remainder. The suffix component is deliberately KEPT in the key, because it encodes chain length.
+
+Per step: draw P distinct keys without replacement with weight member_count^0.5 * (1 + mean key
+depth)^(depth_pow * ramp), then take K = 8 members of each. So the hard part of every late batch is
+a handful of groups in which eight sequences carry the same read command, the same board template
+and the same chain length, with eight different answers. Within a key the K members are a random
+cyclic window over a round-robin interleaving of the members by ORANK class -- the rank of the
+routed content among the contents exposed on its board (the connected component of the move graph,
+widened to its common directory prefix so contents that were never moved still count) before that
+board's first move. The window is contiguous in the interleaved order, so consecutive slots come
+from different ORANK classes, and the group therefore spans "which of the exposed contents turns
+out to be the answer" instead of repeating one exposure order.
+
+WHY IT SHOULD MOVE comp_ca. The objective is a paired difference: a predictor that keys on WHICH
+LOCATION is read contributes exactly zero, and a predictor that keys on WHERE IN THE MOVE ORDER a
+content sits cancels only in expectation. Both are shortcuts a batch of unrelated sequences leaves
+unpunished, because in a mixed batch the read command alone is usually enough to separate a row
+from its in-batch negatives, so the listwise contrastive term is satisfied without any content
+being carried. A PK group inverts that: eight rows in the same softmax pool share (nearly) the same
+command token, so a location-keyed model emits (nearly) the same prediction for all eight and can
+do no better than splitting probability mass across them -- a loss floor of about log K that only
+disappears if the prediction is conditioned on the trajectory's own exposure history. The same
+group holds chain length fixed and spans exposure rank, so "answer = the content exposed first" and
+"answer = the content whose chain is longest" are, within each batch, uninformative about which
+target is correct. The gradient the model can still reduce is the one that binds a specific
+content, observed at expose time, to the location its chain routed it to. The depth tilt is kept
+because the scored windows are d3 and d4+, but it is now expressed as a key-level weight rather
+than a per-sequence weight, so it selects hard QUESTIONS rather than hard sequences.
+
+FALSIFIABLE PREDICTION. If this is right, native_hit should rise while swap_stayed falls -- the
+signature of content carriage rather than of a lookup -- so comp_ca should exceed the parent's
++0.0262, and private.shortcut_leaning should not be what carries it. If instead the effect is only
+a difficulty tilt, native_hit and swap_stayed move together and comp_ca lands near the parent. If
+the concentration is harmful, the absolute pick rate against the analytic ceiling drops while
+comp_ca stays flat. The measurable discriminator between the two designs is that this one shows a
+comp_ca change with no change in the per-sequence depth distribution the parent already tilted for.
+
+RISKS AND WHAT I DID ABOUT THEM. (1) Concentration: 75% of every late batch sits inside a few
+question groups, so per-batch diversity drops; the 25% uniform remainder plus the ~25 unrelated
+rows every selected sequence still contributes keep general coverage, and the blocked fraction
+ramps in over the first 25% of steps. (2) False negatives: two members of a key can have
+near-identical answers; the objective's ring already zeroes the weight of near-duplicate targets,
+so those pairs are ignored rather than fought. (3) Backoff granularity: on the cvar boards the
+template collapses g0..g3 and s0..s2 into one broad key -- those are depth-1 reads and the depth
+tilt pushes weight away from them anyway. (4) Parsing fragility: a data root whose reads carry
+flags, or which uses cp/ln instead of mv, yields no routed read, in which case the impl returns the
+uniform batcher unchanged rather than something degenerate.
+
+PERFORMANCE, UNMEASURED. Setup is one linear pass over the command strings plus one shuffle per
+key; per step it is one multinomial over the key list, P randint draws, and one randperm. I could
+not run the real harness from the jail, so the training-time cost is asserted from the operation
+count, not measured; nothing here scales with the number of steps or with the sequence length at
+step time.
+
+CONTRACT CHECKS DONE. Returns exactly bs ints in [0, n) for every step, including step 1, step >
+total_steps and total_steps = 0; deterministic given the seed and varying with it; two private
+torch.Generators (one for setup shuffles, one for the step stream) and no global RNG; `fit` is only
+read (verified byte-equal after 4000 steps against a deep copy); degrades to the baseline uniform
+batcher when n < 2, bs <= 0, hard_frac_max <= 0, no sequence has a routed read, or no key reaches
+min_members. The impl adds no parameters, so there is nothing for the reachability gate to reach,
+and it never indexes into a sequence, so the odd-length scored layout is untouched.

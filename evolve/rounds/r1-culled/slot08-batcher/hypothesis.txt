@@ -1,0 +1,165 @@
+CANDIDATE: r21 skeleton-twin transport curriculum + dual-pre/transport-gain head
+AXES CHANGED: batcher (assigned), head, arch
+  batcher -> r21_skeleton_twin_transport_curriculum   (new)
+  head    -> r21_dualpre_transport_gain_consistency   (new)
+  arch    -> r20_interventional_gain_shell_worldmodel (taken from the crossover partner;
+             it is a subclass of my parent's r18 arch and is byte-for-byte the r18 forward
+             on even-length inputs, which is every training forward)
+  objective / optim / target / stream: inherited unchanged from both parents (they agree).
+
+---------------------------------------------------------------------------
+1. THE MECHANISM — what this code computes that neither parent does
+---------------------------------------------------------------------------
+
+BATCHER. At construction it parses each train sequence's `cmds` once (read-only) and
+computes two things.
+
+  (a) A lexical move-chain counter. For a move-like verb (mv/cp/ln/install/rsync/rename)
+      with at least two non-flag arguments, it sets
+          hop = max(chain[base(src)], chain[base(dst)]) + 1
+          chain[base(src)] = chain[base(dst)] = hop
+      For a read-like verb (cat/ls/head/stat/grep/wc/...), each argument basename with
+      chain >= 1 adds min(hop, read_cap) to the sequence's `transport` score. So a
+      sequence that renames a file twice and then reads the final name scores 2; a
+      sequence with no read-after-move scores 0.
+
+  (b) A skeleton key: the tuple of verbs, and a content key: the tuple of non-flag
+      argument tuples.
+
+Each step then builds the batch from two pools.
+  - Background pool: multinomial with weights exp(r * log(1 + depth_tilt*min(transport,
+    depth_cap))), where r = min(1, step / (ramp_frac * total_steps)). At r=0 this is
+    uniform; at r=1 the weight ratio is bounded by 1 + depth_tilt*depth_cap = 7:1.
+  - TWIN pool: a fraction of the batch, ramped to twin_frac_max, is filled with PAIRS.
+    A pair is two DISTINCT sequences drawn from one group, where a group is all
+    sequences sharing (image, verb-skeleton) and containing at least two distinct
+    content keys. Groups are drawn proportional to the sum of their members' weights.
+    If no such group exists, a fallback cascade tries (skeleton) across images, then
+    (image, sorted verb multiset), then (image,) — which is exactly the parent's
+    same-system blocking — and finally plain weighted sampling.
+
+So the new object in the batch is a STRUCTURE-MATCHED, CONTENT-DIFFERENT NEGATIVE:
+two trajectories on the same system with the same verb at every position, differing
+only in which files the commands name. Neither parent batcher can produce this; both
+key only on `s["image"]`.
+
+HEAD. My parent's head (r20_dualpre) and the partner's head (r20_interventional_gain
+_shell) both extend the same r18 forward-model consistency aux, and neither contains
+the other. The new head runs BOTH arms over one shared transition operator:
+  - the dual-pre arm: supervise f(s_pre, cmd) -> future same-path observation with
+    s_pre taken BOTH from the raw earlier observation AND from the arch's own memory
+    read (the composed state it actually holds at depth);
+  - the interventional gain arm: build [prefix, c_m, PAD, c_r], get the no-write and
+    full-write hypotheses, and train the 12.5K calibrator (alpha, beta) with the eval's
+    own squared-L2 geometry.
+It also replaces the gain arm's pair miner. The partner mines any same-path pair
+(k, j) with k < j. Mine instead a TRANSPORT triple i < k < j: the same path must
+already have been read at i (which lands inside the constructed prefix), and the
+observation must have materially changed, (obs_i - obs_j)^2.mean() >= 0.25 — the same
+quantity and the same threshold the sibling r18 miner already uses. If fewer than 4
+such pairs exist in a batch, it falls back to the partner's ungated miner, so the
+calibrator's training density is never starved.
+
+---------------------------------------------------------------------------
+2. WHY THIS SHOULD MOVE comp_ca SPECIFICALLY
+---------------------------------------------------------------------------
+
+The score is a paired difference between the native move chain and a chain where two
+files exchange their moves. The two boards have the same commands, the same locations,
+the same queried name, and the same first and last mover. Everything except "which
+content is bound to which mover across the hops" is invariant, so anything a model
+learns about structure contributes exactly zero.
+
+That is precisely the failure mode a uniform or image-blocked batch invites. In
+r12_antiretrieval_ring_negatives the in-batch negatives are the other targets in the
+batch; under uniform or image-blocked sampling those come from trajectories with
+DIFFERENT command structure, so the cheapest direction for the log-softmax is to encode
+the trajectory's structural signature — which verbs at which positions, which system,
+how long the sequence is. That direction is free loss reduction and metric-invariant.
+Skeleton twins delete it: for the twin pair, structure is identical by construction, and
+the only feature that separates the two targets is the content each command touched.
+The gradient the twin pair contributes is therefore, by construction, a
+content-discrimination gradient. This is the mechanism I claim earns; it is expressible
+only through batch composition, which is why it belongs on this axis.
+
+The transport tilt attacks a second, quieter loss. Both aux arms are miners: the r18/
+dual-pre arm needs an i<k<j same-path triple inside the sampled rows, and the gain arm
+needs a same-path readback. When the sampled sequences have no read-after-move, the aux
+returns 0.0 and that step trains nothing that carries identity across hops. Tilting the
+background pool toward sequences that actually read a path at the end of a multi-hop
+chain raises the number of mined examples per step, so the fixed step budget buys more
+gradient on the operator that does the carrying. The tilt is capped at 7:1 and ramped,
+so early training still sees the natural distribution.
+
+The head union supplies the two halves the metric needs and that each parent has only
+one of. Depth needs (i) the operator to be correct on the composed memory state, not
+just on a raw observation — the dual-pre arm; and (ii) a correct write at a hop whose
+observation carries no content, which in shell data is every `mv` (it prints nothing) —
+the gain calibrator's alpha. Composition without a silent-hop write loses the chain at
+the first move; a silent-hop write without composition gets one hop right and then
+drifts. The transport gate on the gain miner is the same "content, not disturbance"
+rule applied to the calibrator's own training set: an ungated pair whose observation did
+not change teaches alpha nothing identifiable and supplies a near-duplicate InfoNCE
+target.
+
+---------------------------------------------------------------------------
+3. WHAT I EXPECT TO SEE IF I AM WRONG, AND THE CHEAPEST CHECK
+---------------------------------------------------------------------------
+
+(a) The twin mechanism may never fire, because exact verb skeletons do not repeat
+    within an image on this train split. Then the cascade lands at (image,) and my
+    batcher IS the parent's blocking with a tilt, and the score should land near the
+    parent's +0.0000. CHEAPEST CHECK: at construction, print which cascade level
+    produced `groups` and len(groups) on the real train split. One line, no training.
+    If level 4 fires, this candidate's batcher half is dead and only the head half is
+    live.
+
+(b) The twins may fire and still not help: the model gets better at same-verb
+    discrimination but stays swap-blind. Signature: comp_ca stays ~0.00 while
+    next-obs retrieval health (top1_sameverb) rises. CHEAPEST CHECK: the eval feedback
+    line already splits the role-swap behaviour into "the same pick is held" vs
+    "follows the swapped content" — if "held" stays ~1.0, no content is being carried
+    and the twin gradient is being absorbed somewhere metric-invariant.
+
+(c) The transport tilt may narrow the effective training set enough to cost transfer.
+    Eval holds out whole IMAGES, so a narrower slice of systems is a real risk.
+    Signature: retrieval health falls versus the parent at the same step budget while
+    the deep-window count is unchanged. CHEAPEST CHECK: compare next-obs retrieval
+    health against the parent's run; if it drops, re-run with depth_tilt=0.0, which
+    turns the tilt off and leaves the twin mechanism intact — that isolates the two.
+
+---------------------------------------------------------------------------
+4. THE RISK I SEE IN MY OWN DESIGN
+---------------------------------------------------------------------------
+
+The single biggest risk is diversity collapse. Twin blocks at up to 50% of the batch
+PLUS a 7:1 transport tilt both concentrate sampling, and they concentrate it along
+correlated directions (deep sequences within an image are likely to share skeletons).
+Because the metric is measured on systems the model never trained on, anything that
+narrows the training slice can cost more transfer than the sharper negatives buy, and
+the parent's own aggressive same-image blocking (hard_frac 0.75, one image per batch)
+scoring +0.0000 against a +0.0037 unmodified baseline is at least consistent with
+over-concentration already hurting on this axis. My caps and ramps bound the effect but
+do not remove it, and I have not measured the real group statistics.
+
+Secondary risks: (i) the lexical chain heuristic is crude — `mv a dir/` credits the
+basename "dir" rather than the moved file, `cd` is ignored, quoting and globs are not
+handled — so `transport` is a noisy proxy; it only ever steers a sampling weight and
+never a label, so a wrong score costs efficiency, not correctness, but it could make
+the tilt near-uninformative. (ii) The transport-gated gain miner returns fewer pairs
+than the partner's; the fallback keeps density, but in the regime where the fallback
+fires often, that half of the head reduces to the partner's.
+
+MEASUREMENT STATUS. Nothing here is measured on the real harness or the real data root.
+What I did verify by running the code on synthetic sequences: the batcher returns
+exactly bs in-range integer indices for bs in {1,2,3,7,64}, is bit-identical across two
+constructions with the same seed and differs across seeds, leaves the global torch RNG
+state unchanged, does not mutate `fit`, handles sequences with no `cmds` key and n=1,
+and costs 0.02 s for 800 steps at bs=64 over 180 sequences; the deep-sequence share of
+the batch rose from 0.31 at step 1 to 0.55 at the end of the ramp (natural 0.33). The
+full genome (objective+arch+optim+target+stream+head+batcher) loads through
+evolve.genome, trains 12 steps with a finite loss, and the interventional calibrator's
+output layer receives non-zero gradient and moves off its zero init, while the head
+correctly self-disables its gain arm on the plain r18 arch. All per-step and per-second
+figures above are from a miniature synthetic probe and say nothing about the real
+ranking.

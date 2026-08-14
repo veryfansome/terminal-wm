@@ -1,0 +1,99 @@
+CANDIDATE: batcher = r4_hopdepth_scaffold_stratified_quota
+AXES CHANGED: batcher only. Every other axis is inherited from the parent unchanged.
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+
+From the parent's batcher (r6_sysblock_hardneg_curriculum) I keep image blocking: the non-uniform
+part of a batch is restricted to a small number of system images sampled per batch (default 1, the
+parent's tuned setting), so the negatives the objective sees inside a batch come from the same
+system rather than from a mix of distributions.
+
+From the partner's batcher (r2_routed_collision_depth_batcher) I keep the symbolic content tracker:
+each sequence's command list is replayed to find, for every read, how many hops of routing put the
+content there. My tracker is written fresh but obeys the same physics: `mv A B` retires A and gives
+B the content one hop further; `cp A B` and `cat A > B` give B the content one hop further while A
+keeps its own; `cat A >> B` takes max(hops(B), hops(A)+1); a bare `cat/head/tail A` reports the hop
+count currently standing at A. I dropped the partner's path-shape normalization: bucket identity
+plays no role in my design, only the hop number does.
+
+WHAT I ADD THAT NEITHER PARENT COMPUTES
+
+Both parents treat depth as a static tilt realized by i.i.d. sampling: they anneal only HOW MUCH of
+each batch is drawn from the non-uniform pool, never WHICH part of the hop scale that pool sits on,
+and both leave the realized depth content of any individual batch to chance. Mine computes two
+things neither computes:
+
+1. A MOVING FRONTIER OVER THE HOP SCALE. f(step) walks linearly from 1 hop to d_top (the deepest
+   stratum holding at least min_stratum sequences) over the opening ramp_frac of training. Stratum
+   shares come from an asymmetric kernel around f: exp(-(d-f)/tau_up) above the frontier (sharp,
+   so chains deeper than the current frontier are held back) and exp(-(f-d)*lam_down) below it
+   (mild, so every already-passed depth keeps a permanent share instead of being displaced). The
+   mixture is therefore ORDERED easy-to-hard and CUMULATIVE, not merely more concentrated over
+   time.
+
+2. AN EXACT PER-BATCH DEPTH QUOTA. The shares are turned into integer counts by largest-remainder
+   allocation and each stratum's count is drawn from that stratum, so every single batch carries
+   the scheduled depth spectrum. This is stratified allocation replacing i.i.d. sampling: it does
+   not change the intended mixture, it removes the between-batch variance of the mixture. A count
+   is capped at its stratum's size and the freed slots go to the uniform part, so a thin stratum
+   is never resampled to fill a large quota.
+
+The remaining (1 - curr_frac) of every batch stays uniform over the whole split so the rest of the
+pack keeps training and the composed blend does not collapse onto routing sequences.
+
+WHY THIS SHOULD MOVE THE MEASURED QUANTITY
+
+comp_ca is a paired difference on windows of hop depth 3 and deeper: to score, the model must
+follow a chain of at least three silent moves and return the content the NATIVE chain routed there,
+and must stop returning it when the same board is re-chained so that a different content lands
+there. Resolving a k-hop chain reuses the (k-1)-hop resolution as a subroutine, and training is a
+fixed step budget on frozen embeddings, so what matters is not only how much deep-chain gradient
+arrives but whether the shallow-hop copy is already reliable when the deep chains start to dominate
+the update. That ordering is exactly what neither parent controls.
+
+The second effect is variance. Deep windows are the rare and informative part of the signal: in the
+real trajectories in this jail one sequence carries one cups window plus a few shallow cvar groups,
+so a whole sequence contributes a single deep routed read. Under i.i.d. block sampling a sizeable
+share of batches carry almost no deep window at all, and those updates move the shared transition
+machinery without any deep-chain constraint on it. A guaranteed quota removes those batches.
+Measured on the jail's 24 real training trajectories replicated to 1920 sequences: uniform sampling
+gives 50% of a batch at depth>=3 and 4% at the deepest stratum; after the ramp my batches hold
+about 78% at depth>=3 and 25% at the deepest stratum while still holding about 20% at depths 1-2.
+That is a roughly six-fold enrichment of the deepest stratum with the shallow scaffold retained.
+No claim is made here about the resulting score; it is unmeasured.
+
+WHAT HAD TO BE TRUE, AND WHAT WOULD MAKE IT FAIL
+
+The hop labels must be right. I checked the tracker against the recorded ground truth in the jail's
+sample: on all 24 sequences the hop count it computes for the window's test read equals the depth
+recorded in that step's metadata (24/24, no mismatches). If the real split's command mix contains
+routing forms the parser does not model, the strata become noise and the design degrades toward a
+noisier version of the parents.
+
+It fails if the routing circuit is not order-sensitive - if a model that sees deep chains from step
+one learns them just as well. Then the early phase has spent its steps on the shallowest stratum
+for nothing, and the candidate should land below both parents rather than between them.
+
+It fails if the deep strata in the real split are small. The quota then repeatedly draws the same
+few sequences within one image block, and because the eval holds out images, memorizing them buys
+nothing. The stratum-size cap and the uniform remainder bound this but do not remove it; a smaller
+curr_frac or a larger min_stratum is the lever.
+
+It fails if the ~80% of reads that are not routed at all dominate the loss whatever the sequence
+mixture is - the batcher can choose sequences but not steps, so its leverage on the per-step
+gradient mix is bounded by how much of a sequence is routing.
+
+WHY NOT MORE AXES
+
+The partner's arch, head and objective are co-adapted with each other and I cannot run the harness
+to check an interaction, so importing one of them would put the result at the mercy of an untested
+pairing. The partner's contribution that belongs on my axis - the symbolic hop tracker - is the one
+I took.
+
+COST
+
+Setup replays every sequence's commands once: 0.03 s for 1920 sequences here, linear in total
+commands. Steady state is a handful of small multinomial draws per step: 0.19 s for 4000 steps at
+bs=64. Determinism, bounds, exact length, and non-mutation of fit were exercised over the real
+sample and over degenerate inputs (bs=1, bs>n, n=1, single image, empty command lists,
+unparseable commands, no routed read anywhere, curr_frac=0).

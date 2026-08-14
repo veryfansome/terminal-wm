@@ -1,0 +1,110 @@
+CANDIDATE  head = r21_slotdisplacement_transport_roles   (only the head axis changes)
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+
+From the parent (g0-05-dualpre-transition) I keep the whole genome and the whole aux it was built
+around: the forward-model consistency loss on the arch's shared transition operator
+(transition_from_emb), with both the raw-observation pre-state arm and the mem-pre arm that reads
+the arch's own _transition_reads content, mined the same way and weighted the same way. It is
+inlined here (module is self-contained), auto-disables on an arch without that surface, and still
+draws exactly one randperm per aux call.
+
+From the partner (baseline_passthrough / plain MSE readout) I keep the property that made it the
+partner: the scored forward pass is the arch's own readout, untouched. My addition enters the
+prediction only through a per-dimension gain initialised to zero, so the wrapped net is bit-equal
+to the unwrapped net at initialisation (verified: eval-mode forward before and after wrap is
+allclose at 1e-6), and the readout is never recomputed from the trunk hidden state.
+
+WHAT I ADD THAT NEITHER PROGRAM COMPUTES
+
+A path-slot transport memory with an ASYMMETRIC address, plus label-free supervision of that
+asymmetry.
+
+1. Addressing. For every command embedding c the module computes f = gelu(addr_in(c)),
+   base = addr_key(f), and
+
+       source key   ks(c) = unit(base)
+       dest   key   kd(c) = unit(base + displace(f))
+
+   displace is a Linear with weight initialised to ZERO, so at init kd == ks exactly: every
+   command is a single slot and the memory is an ordinary content-addressable store. A command
+   becomes a MOVE only insofar as the displacement grows — the destination is a learned
+   translation of the source in key space, produced from the same command's features.
+
+2. Causal scan (_SlotDisplacementTransport.run). At step i, in this order: read r_i = mem[ks_i];
+   read cur_d = mem[kd_i]; write into the destination slot by the delta rule the move-gated blend
+   v_i = m_i*r_i + (1-m_i)*o_i; erase the source slot in proportion to m_i * sigmoid(erase_gate).
+   The read precedes both writes, so r_i never contains o_i. The injected contribution is
+   rgate(c_i) * out_scale * r_i where rgate is a function of the COMMAND ONLY. Consequence, and it
+   is the point of the ordering: the prediction at a command position is invariant to that step's
+   own observation, which is the observation withheld at the scored position (verified numerically
+   — perturbing o_t changes the prediction at cmd position t by exactly 0).
+
+3. Role supervision, which is the part neither parent nor r2_dualaddress has. From the batch alone
+   the aux computes pairwise duplicate masks over observations (dup_o) and commands (dup_c), and
+   calls a step CONTENT-FREE when its observation duplicates >= blank_min other steps' under a
+   DIFFERENT command. It then mines ordered pairs (i, j), i<j, with duplicated observations,
+   different commands, and 1..max_hops content-free steps strictly between them. On those pairs:
+
+   (a) align (hops == 1 only): let k be the single content-free step between i and j. One softmax
+       over the row's own read commands scores ks(c_k) against every candidate's ks, with the
+       positives being the commands duplicating c_i; a second scores kd(c_k) with positives the
+       commands duplicating c_j. Both i and j are candidates in both softmaxes, so the loss is
+       minimised only by an assignment that puts the source key on the EARLIER-read location and
+       the destination key on the LATER-read one. That is the symmetry breaker: nothing else in
+       the design can tell the two arguments of a two-path command apart.
+   (b) transport (any hops in 1..max_hops): the memory read at j must select observation i among
+       the row's observations up to j (squared-L2 InfoNCE), plus a small MSE anchor. When two or
+       three content-free steps intervene this supervises the COMPOSITION of hops end to end,
+       through whichever writes actually occurred, without labelling which hop is which.
+   (c) sym: on single-path read commands ks and kd are tied by a cosine penalty, so "write where
+       you read" stays the default and only two-path commands acquire a displacement.
+   (d) a small InfoNCE on the net's own prediction at j over the same candidates.
+
+WHY THIS SHOULD MOVE comp_ca
+
+The measured quantity is whether the trained model returns the content the chain actually routed
+to a location. In this data (checked in evolve/jail_data/train_sample.jsonl) a move step's
+observation is EMPTY — "cwd=/ exit=0" — so all routing information lives in the move command's
+embedding and nowhere else, and the test read's observation is byte-identical to the exposure
+observation of the routed content, i.e. to its embedding. A memory that writes the value read at
+the source key into the destination key therefore has the exact target vector available at the
+read, and the role-swapped arm re-encodes the move commands, which changes which value is written
+where — so a model that genuinely transports differs between the arms and a model that keys on the
+read location cancels. The r18 arch cannot do this today: both of its memories write a value at
+the SAME key they read (path_read/path_write over one hidden state, and _transition_reads writing
+an edit of the slot's own content back into that slot), so it can model an in-place edit but not a
+change of WHICH slot holds a content. The parent's aux trains that in-place operator harder; it
+does not add the missing source-to-destination write.
+
+Audited on the real trajectories in the jail (24 sequences, 724 steps, a deterministic stand-in
+encoder since the frozen encoder is not in the jail): the content-free detector flagged 262 of 262
+empty-output steps with zero false positives; 62 pairs were mined, 61 of them with byte-identical
+observations, and their later ends were cvar_test (37) and cups_test (19) — the transport tests
+themselves; all 23 hops==1 cases put a cvar_op / mv step in the middle whose source path is the
+i-command's path and whose destination path is the j-command's path. So the supervision the align
+term receives is, on this data, exactly the source/destination labelling it is meant to be.
+
+WHAT WOULD HAVE TO BE TRUE FOR IT TO FAIL
+
+- The frozen mean-pooled command embedding may not linearly expose argument ORDER. If "mv A B" and
+  "mv B A" pool to nearly the same vector, no addr_in/displace can produce different source and
+  destination keys and the align loss saturates at chance. This is the load-bearing bet.
+- The align term only ever sees depth-1 hops, because deeper hops have no read at the intermediate
+  path. Depth 3-4 must come from the extractors generalising (the dest key of hop t must land on
+  the source key of hop t+1) and from the multi-hop transport term. If the keys are memorised per
+  command rather than computed from the path, depth-1 improves and the scored depth-3/4 windows
+  do not.
+- The content-free detector is a per-row rule: a row whose only two empty-output steps carry
+  different commands gives blank counts below blank_min and mines nothing (a loss of examples,
+  not wrong examples); conversely a content read repeated under three or more different commands
+  would be misread as content-free. The real-data audit above found neither failure mode, but it
+  used a stand-in encoder, so the relative duplicate thresholds (2% and 1% of the row's mean
+  pairwise distance) may sit differently under the real encoder's geometry.
+- The aux is roughly the size of the main loss at full ramp (measured ~0.7-1.8 on real-structured
+  batches, against a main MSE near 1). Since gradients are globally clipped to norm 1.0, an aux
+  that stays large could starve the trunk; aux_weight 0.5 and ramp_steps 300 are set against that,
+  but it is not measured under the real budget.
+- Cost: 1.42x wall-clock per training step versus the bare arch at B=64, n=32 on CPU. The arch
+  already pays two sequential scans; this adds a third of the same shape. Unmeasured on the GPU
+  lane.

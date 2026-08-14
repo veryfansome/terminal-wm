@@ -1,0 +1,121 @@
+CANDIDATE: confusable-contrast metric target, on a crossover trunk.
+
+WHAT THE CROSSOVER KEEPS FROM EACH PROGRAM
+
+From the parent I keep the two ROUTING mechanisms it already carries: the arch
+r24_backchain_pointer_resolution (the K-hop backward pointer chase, which is the only mechanism in
+either genome that composes several address matches into one retrieval, i.e. that can span a chain
+of depth > 1) and the head r2_dualaddress_move_transport (a dual-address delta-rule transport
+memory injected into the prediction, which is the same transport mechanism the partner's arch
+r23_dual_address_transport_pointer embodies, so keeping it keeps the partner's memory idea too).
+
+From the partner I keep its LOSS, r4_relocation_address_ring_quotient, in place of the parent's
+r12_antiretrieval_ring_negatives. r12 is a batch-wide contrast over confusable targets. r4 is r12
+plus command-orthogonalization plus a second head that is exactly the shape of the scored decision:
+it discovers, label-free and from the batch alone, RELOCATION ROWS -- a row whose target is an exact
+duplicate of an earlier target in the SAME trajectory under a DIFFERENT command, with the large
+duplicate class (the silent no-output observation every mv and every redirect shares) excluded --
+and forces a within-trajectory choice on those rows against candidates ranked by an address ring
+over command-embedding similarity. In this data a relocation row is literally "cat <path> after the
+content that now lives at <path> was moved there", which is the event comp_ca reads. Nothing in the
+parent's loss singles those rows out. r4 needs WANTS_CTX plumbing, which baseline_interleave
+supplies via extract_cmd_input, and it reads trajectory boundaries off the strict-causal previous
+observation, which is untouched by anything below.
+
+WHAT I ADDED, AND WHAT IT COMPUTES THAT NEITHER PROGRAM COMPUTES
+
+Both programs train with target = identity: the loss charges prediction error uniformly across all
+768 observation dimensions. My target impl replaces that with a global symmetric linear map and its
+exact inverse. The map is built from a quantity neither program forms anywhere: C, the covariance of
+UNIT DIFFERENCE DIRECTIONS between mutually confusable observations.
+
+Estimation, every accum_every steps, from the batch of next-observation targets only: subsample up
+to sub_rows of them, form all pairwise squared distances, drop each row's near-duplicate partners by
+a per-row relative floor (dup_frac x that row's mean distance), take the k nearest surviving
+partners per row, then keep only the closest keep_q fraction of those collected pairs BY RANK. Each
+kept pair contributes (z_i - z_j)/||z_i - z_j||; C is the running EMA of the mean outer product of
+those unit differences, so trace(C) = 1 by construction. The two prunes matter and are not
+decoration. The duplicate floor removes the silent-observation cluster's internal pairs and the
+same-content-read-twice pairs, whose difference is ~0 and whose normalized direction would be pure
+noise. The rank prune removes the pairs that survive the floor only because a row has no close
+non-duplicate neighbour at all -- for a silent row every non-duplicate neighbour is a contentful
+observation, and admitting those would load C with the huge silent-vs-content direction, which is
+shared by every candidate in a window and therefore contributes exactly nothing to any forced
+choice.
+
+C is then rescaled to unit mean eigenvalue, shrunk toward the identity, eigendecomposed in float64
+on CPU, and split into fwd = V diag(lam^(p/2)) V^T and inv = V diag(lam^(-p/2)) V^T, with one common
+scalar chosen so that the mean of lam^p is 1 (the transformed target keeps unit average
+per-dimension second moment). fwd and inv are mutually exact inverses by eigenvalue construction,
+not by an iterative approximation. make_target left-multiplies the target by fwd; to_obs
+left-multiplies the prediction by inv and hands back the fixed observation space the retrieval eval
+uses.
+
+WHY THIS SHOULD CHANGE THE MEASURED QUANTITY
+
+The retrieval decision is not "how close is the prediction to the truth". For a prediction p, a true
+content z_t and a foil z_f, the eval's decision variable difference is
+||p - z_t||^2 - ||p - z_f||^2 = -2 p.(z_t - z_f) + ||z_t||^2 - ||z_f||^2, so with e = p - z_t and
+delta = z_t - z_f the choice flips exactly when e.delta > ||delta||^2 / 2. Every component of the
+prediction error orthogonal to delta cancels identically and cannot cost a single window. Under
+target = identity the loss charges ||e||^2, which spends the model's capacity in proportion to the
+total variance of the observation distribution -- dominated by silent-vs-contentful, by image and by
+file-format directions, all of which are shared across the candidates a window forces a choice
+between and all of which therefore cancel. Training in the fwd metric charges e^T C^p e, and at p = 1
+that is exactly E over confusable pairs of (e.delta_hat)^2, the mean squared perturbation of the very
+statistic that flips the forced choice. p interpolates: p = 0 is the untouched loss, p = 1 is the
+decision-variable metric, and I run p = 0.7 with shrinkage 0.1 because I cannot tune here and want
+the map's condition number bounded (with those settings it is single-digit). The amplification
+inv applies to the model's output in low-contrast directions is harmless for the measurement by the
+same cancellation identity above -- it is common to true and foil.
+
+This is the discriminative / matched-filter weighting move from detection theory, and the
+neighbourhood-difference estimator is the chunklet-difference construction of Relevant Component
+Analysis run with the sign reversed: RCA whitens by a difference covariance to suppress it, here the
+difference covariance is between the things that must be told apart, so it is COLORED rather than
+whitened. That sign is the whole design, and it is the opposite of the archived
+zca_shrunk_target_whitening, which colors by the inverse of the GLOBAL second moment -- a matrix
+whose leading directions are precisely the ones that cancel in this measurement.
+
+Mechanistically the effect is a re-allocation of loss pressure, not a new input. It should raise
+native_hit only through the model becoming better at saying WHICH content the routing landed on --
+which is what comp_ca isolates, since a predictor keyed on the location being read is identical in
+both arms and differences to exactly zero however sharp its content geometry is.
+
+WHERE THE MECHANISM SITS RELATIVE TO THE SCORED POSITION
+
+Nothing here is gated on an observation being present. make_target runs at train time only (it is
+additionally guarded on self.training and torch.is_grad_enabled()). to_obs is a single unconditional
+matrix multiply of the prediction; it ignores z_prev entirely, so it cannot switch off at the scored
+command whose own observation is withheld. No resolved routing enters the model's input: the model
+sees exactly the token stream it saw before, and the mv chain is still something it must resolve
+from the command embeddings alone. The map is one global matrix, identical for every step, every
+window, every candidate and both arms of the role swap, so it cannot express any per-window
+information and cannot move a paired difference by favouring one arm.
+
+The module registers buffers only, no parameters, so the optim chunk's Muon key-shape router and its
+(D,D) spectral cap see nothing new, and reg() is 0.0.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+1. If the bottleneck is routing rather than readout -- if the backchain chase and the transport
+   memory are not actually identifying which content ended up at the read location -- then sharpening
+   the metric of the readout changes nothing and the number does not move.
+2. If the frozen encoder places the difference between two confusable cups contents in directions
+   that are dominated by incidental variation (line count, punctuation, file length) rather than the
+   canary token, then C is loaded with nuisance and coloring by it amplifies the wrong axes. My
+   defence is that the foils at score time ARE other confusable observations, so the directions that
+   separate them are by definition the directions the decision uses; but if the encoder makes those
+   directions unlearnable, the extra pressure is wasted and could hurt.
+3. If the step budget is short enough that warmup_accum x accum_every steps (192 steps by default)
+   is a large fraction of training, the map is the identity for most of the run and the candidate
+   degenerates to the crossover with no target effect.
+4. If the objective swap from r12 to r4 is itself a regression on this trunk, the target mechanism
+   has to carry both changes. That is the deliberate risk of a crossover rather than a point
+   mutation; r4's relocation head is the single most on-objective mechanism in either program and is
+   worth the coupling.
+
+UNMEASURED. Nothing in this jail can be run: there is no torch here and no way to train. Every claim
+above is an argument about what the code computes, not a result. The cost estimate for the
+eigendecomposition (float64 eigh on 768x768, roughly one per 80 steps after warmup) is a projection
+from the archived zca_shrunk_target_whitening's identical refresh pattern, not a timing I took.

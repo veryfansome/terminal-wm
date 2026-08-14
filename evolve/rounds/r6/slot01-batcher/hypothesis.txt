@@ -1,0 +1,113 @@
+AXES CHANGED: batcher only (rewrite). Every other axis keeps the parent's impl and params
+verbatim. The mechanism is entirely about which sequences co-occur in a contrastive batch and
+how often each sequence is visited; it needs no change to the arch, objective, head, optim,
+stream or target to work, and changing any of those would confound the reading.
+
+WHAT I FOUND IN THE REAL TRAJECTORIES
+
+Checking evolve/jail_data/train_sample.jsonl rather than assuming: the destination paths of the
+mv chains are drawn from a small shared vocabulary that recurs across trajectories and across
+system images -- /tmp/w/cups/usr/share/misc/magic.txt.1, /tmp/w/cups/usr/local/etc/app.ini.6,
+/tmp/w/cups/etc/ssh/sshd_config.cfg.7, /tmp/w/cvar/g0/s1.dat and so on -- while the file
+contents are per-system random tokens ("cv-6e330e2ed64c19c4", a different hash in every
+trajectory). In the 24-sequence sample, `cat /tmp/w/cvar/g0/s0.dat` appears in 21 trajectories
+and returns 21 different answers; 33 distinct read paths are shared by two or more trajectories.
+
+So the data already contains, for free, the exact dissociation the metric is built on: a
+byte-identical read command whose answer is decided only by what the preceding chain put there.
+Two sequences that share such a path are a training-time analogue of the native/role-swapped
+pair -- same question, different content delivered.
+
+THE MECHANISM
+
+Call the exact destination path string of a routed read (a read whose path is reached by walking
+backwards at least one hop through the mv edges written earlier in the same trajectory) a SLOT
+KEY. The sequences sharing a slot key form a CONFLICT CLIQUE. The batcher places several members
+of one clique in the same batch. Because the objective's listwise contrastive term draws its
+negatives from all command positions in the batch, a batch containing four members of a clique
+contains four rows whose command embedding is identical and whose target is not. A predictor that
+maps command to observation cannot separate them at all; the only information that can is the
+move history in the prefix. That is the pressure I want, and it is the same pressure the score
+measures, because a predictor keyed on the location being read contributes exactly zero to
+comp_ca per window.
+
+Two blocks are not equally worth building. A slot key carried by a fraction p of the split
+already collides bs*p times per batch under plain uniform sampling, so blocking a common key buys
+nothing. Each clique's quantum is therefore proportional to its COLLISION DEFICIT,
+max(eps, block_size - bs*size_c/n), times its number of distinct system images -- cross-image
+conflicts are the ones whose resolution has to transfer to the held-out images. Common keys get
+near-zero quantum automatically; the rare suffixed cups destinations, which are exactly the read
+locations the pack scores, get nearly all of it.
+
+The scheduler is the part borrowed from outside the field. Deficit round robin (Shreedhar and
+Varghese, SIGCOMM 1996) is a packet scheduler that gives each queue service proportional to its
+quantum with a bounded worst-case deviation, rather than proportional in expectation. Each clique
+c holds a deficit D_c; on a step that serves S slots, D_c += q_c * S with q_c the normalized
+quantum, and a served clique pays D_c -= m for the m members it contributed. Service goes to the
+k = budget/block_size largest deficits. Injection and payment are exactly conserved, so the
+deficits stay bounded and every clique's realized share tracks q_c with bounded discrepancy.
+Members inside a clique come off a rotating cursor over a seeded permutation, so all members of a
+clique get exposed in turn.
+
+The remaining slots are apportioned over four chain-depth strata by Neyman allocation from survey
+sampling (Neyman 1934): n_h proportional to N_h * sigma_h^beta, with sigma_h the per-dimension
+within-stratum spread of the deepest routed read's observation embedding, so strata whose routed
+answers are more heterogeneous get more of the budget. The apportionment is realized by
+largest-remainder with a carried remainder vector -- deficit round robin again, on counts -- and
+each stratum is drawn from a shuffled epoch without replacement. There is no multinomial and no
+iid draw anywhere in the composition; the only randomness is the seeded permutations and a 1e-4
+tie-break jitter, all from a private torch.Generator.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca is the paired difference between the native chain and the role-swapped chain. Anything
+the model does that depends only on which location is read cancels to zero by construction. Only
+carrying a particular content's identity through the moves survives both arms. Conflict blocks
+make the command-to-observation lookup an actively losing strategy on a growing fraction of the
+batch, while the base half keeps the rest of the distribution covered so the net does not simply
+narrow onto move-heavy trajectories.
+
+The second, quieter claim is about variance rather than pressure. Routed reads are rare: in the
+sample, 37 of 365 reads have depth >= 1 and only 12 have depth >= 3. Under the parent's iid
+randint plus multinomial, how much deep-chain and how much rare-slot gradient a run receives is a
+lottery, and the objective is read on one frozen slice with n=89 windows. Deficit round robin and
+epoch sampling remove that lottery: exposure is a bounded-discrepancy realization of the intended
+distribution instead of a draw from it. If the parent's +0.0037 sits inside seed noise driven by
+that lottery, this should tighten the across-seed spread even where it does not raise the mean.
+
+WHAT I EXPECT TO SEE
+
+comp_ca above the parent's +0.0037, driven by the native arm rising while the swapped-arm
+"held" rate does not rise with it -- if both arms move together, the batcher has bought a
+first-mover or chain-position shortcut rather than content carrying, and private.shortcut_leaning
+should show it. I also expect a smaller across-seed spread than the parent, and no change in
+wall-clock: setup parses every sequence once and the per-step work is one topk plus a handful of
+slices.
+
+MEASURED IN THE JAIL (mechanical checks only, on synthetic embeddings with the real command
+strings; no fitness claim is implied and none of this was run against the real harness):
+returns exactly bs indices in range for bs in {1,3,64,256}, including bs > n and bs < block_size;
+total_steps = 1; sequences with no mv at all; missing "cmds"; missing "z_obs"; n in {1,2}; and the
+extremes of every declared parameter. Bit-identical across repeated construction with the same
+seed, different across seeds, leaves the global torch RNG untouched, and does not mutate fit.
+3000 steps of composition over 1440 sequences take 0.19 s and setup 0.024 s. On a 1440-sequence
+mock built by renaming the per-system files of the real trajectories while keeping the shared slot
+vocabulary, the mean number of same-slot-key co-occurring pairs per batch is 3.5x the uniform
+sampler's on the rare keys, and every sequence is visited (min 102, max 210 visits over 2000
+steps, against a Poisson spread under iid).
+
+UNMEASURED. The fitness effect is unmeasured; the jail cannot run the real harness and this
+project has seen miniature probes invert rank in both directions.
+
+BIGGEST RISK
+
+Dilution. The batcher chooses whole sequences, and the loss is flattened over every command
+position in the batch -- roughly thirty per sequence -- so the conflict rows are a minority of the
+rows even when every block lands. If the real train split is large enough that the scored slot
+keys already collide several times per batch under uniform sampling, the collision-deficit
+weighting will correctly assign them near-zero quantum and the conflict half will spend itself on
+keys the probe never reads, leaving only the exposure-variance effect. The second risk is the
+opposite one: at conf_frac_max = 0.6 the majority of each late batch comes from sequences that
+contain routed reads, which narrows the training distribution and could cost transfer to the
+held-out images; the stratified base half and the cross-image factor in the quantum are the hedge,
+and if the candidate lands below its parent, lowering conf_frac_max is the first thing to try.

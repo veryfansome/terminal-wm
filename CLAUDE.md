@@ -38,13 +38,17 @@ The point is what cancels. A model that keys on the *name* being asked about pre
 | `evolve/cdh_probe.py` | a second capability pack — does a read route through the navigation history that actually happened. Reported for every candidate, never scored. |
 | `evolve/cups_ca.py` | **the objective** — `comp_ca`, built by intersecting the two arms per window |
 | `eval/adapter.py` | the fitness oracle the engine calls: one net per seed, one `metrics.json` |
-| `eval/smoke.py`, `eval/guard_leakage.py` | the pre-eval gates every candidate pays |
+| `eval/smoke.py`, `eval/guard_leakage.py`, `eval/guard_stream.py`, `eval/guard_reach.py` | the gates: it builds, it cannot see the future, its tokens are ones the instrument can reproduce, and the parameters it introduces can actually affect something. Which path pays which differs — `evolve score` runs all four in its guardrail phase, while the pack lane calls `eval/adapter.py` directly, so there only the stream and reachability gates (called from the adapter, pre-training) and the leakage check (post-training) run |
 | `evolve/evolve.json` | the contract (engine-owned format) |
+| `evolve/retired_impls.json` | impls whose mechanism is retired — kept on disk so archived genomes stay resolvable, but never offered to a new candidate. Retiring an impl and retracting the candidates selecting it are two separate acts; doing only the first leaves the mechanism reachable as a parent |
+| `evolve/jail_sample.py` | writes the real trajectories an inventor reads inside its jail, from the train split only |
+| `evolve/capture_round.py` | copies a round's hypotheses, genomes and impls into `evolve/rounds/` the moment the inventors finish, before anything is scored |
 | `evolve/genomes/` | the starting population |
 | `evolve/blend_root.py` | writes a blend **spec**: the constituent packs, their ratios, the seed and the sampled indices for a training set composed at load time |
 | `cloud/build_context.py` | derives the shared lane context once — the composed training set, standardized splits, window layouts, role-swap chains — so no candidate re-pays it. Resolves a blend spec and pins the standardization frame |
 | `cloud/runner.py` | runs (genome, seed) jobs concurrently against that shared context |
-| `cloud/pack_lane.sh` | the GPU lane: pull + pin the eye, encode the root, measure, ingest |
+| `cloud/pack_lane.sh` | the GPU lane: pull + pin the eye, encode the root, measure, fold each genome into a record |
+| `cloud/lane.sh` | **how to run a campaign** — provision, measure, bring results home, stop the box. `verify` gates `terminate`, so a pod is never stopped before its records are on local disk, and a failure leaves the box running and says so. Running the stages by hand is how a campaign was lost and how a box billed for eleven idle hours |
 | `research/compositional-selection-design.md` | why the objective is shaped this way |
 
 ## Rules
@@ -54,7 +58,9 @@ The point is what cancels. A model that keys on the *name* being asked about pre
 - **Never score the `final` split for selection.** It exists for one-shot, report-only validation before an external claim. The engine firewalls it; don't route around it.
 - **No step-reduced proxy.** The cheap tier is fewer *seeds* at full step count. A shortened proxy has been measured to invert the ranking of exactly the slow-converging memory and architecture mechanisms this objective is about. `eval/adapter.py` ignores the tier when choosing the step budget, structurally.
 - **Scores compare only within one environment.** Remote results come back through `evolve ingest --env <tag>`. Measure comparability with `evolve doctor --measure-env-offset` before folding two environments; don't assume it.
-- **Failed traits stay live.** Deprioritize, don't foreclose — a trait that failed alone can win recombined into a changed context.
+- **Failed traits stay live.** Deprioritize, don't foreclose — a trait that failed alone can win recombined into a changed context. Retiring an impl is the exception and it is about *reachability*, not about a score: a mechanism keyed on a condition the instrument never produces cannot be measured at all, so leaving it in circulation spends slots on a question no run can answer.
+- **A measurement the instrument cannot reproduce is not a measurement.** The probe builds its own tokens from the embedding cache, so anything a stream does to command tokens must also be a pure `code_cmds(cmds, z_cmd)` it can replay — on the native chain and on the role-swapped chain separately. Coding one arm inflates the differential, coding the swapped arm from native strings deflates it, and both are silent.
+- **The brief states how the metric cancels, never what will score.** Location-keying cancels exactly, per window; chain-position keying does not, and on this frozen slice a first-mover lookup outscores every mechanism measured so far. That is a fact about the instrument and belongs in `jail_notes`. Whether a candidate leaned on it is detected in measurement (`private.shortcut_leaning`), not legislated in the brief — the rule that once tried to legislate it stated the opposite of the truth.
 
 ## Doc-sync triggers
 

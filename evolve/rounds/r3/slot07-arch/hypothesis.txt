@@ -1,0 +1,94 @@
+MECHANISM: pointer unbinding transport (arch), crossed with the partner's whitened content target.
+
+What the data forces. A trajectory step is one pooled 768-d command embedding and one pooled 768-d
+observation embedding (realenv/seq_worldmodel.py: mean pooling over the tokenizer's tokens, then a
+per-dimension affine standardization). There is no token-level access to a path string. A cups
+window in evolve/jail_data/train_sample.jsonl exposes N contents with `cat <path_i>` steps whose
+observation IS the content, interleaves `mv <src> <dst>` steps whose observation is the EMPTY
+string, and ends with one `cat <final_path>` read. So every routing fact the model can use lives
+in the pooled embedding of `mv <src> <dst>`, which — because mean pooling is a convex combination
+and standardization is affine — is very close to a weighted SUPERPOSITION of a verb/boilerplate
+part, a src-path part, and a dst-path part in one vector.
+
+What neither program computes. Both the parent (r22_retrieval_composition_renderer over the r18
+path-state model) and the shown r23 dual-address arch read a source key and a destination key from
+the SAME command vector through TWO INDEPENDENT learned heads. Nothing ties the destination head's
+output to the source head's output, and nothing ties either to what is actually stored. r18's
+transition memory then edits the CONTENT held at a path slot; it never moves a content's ADDRESS.
+Composition over a depth-3/4 chain therefore requires the two independent heads to spontaneously
+learn dst_head(emb("mv A B")) == src_head(emb("mv B C")) for every pair of adjacent moves on a
+system never seen in training, with no structural pressure toward that identity.
+
+What this candidate adds. One address head, not two, and a table of items that are RE-ADDRESSED
+rather than rewritten.
+  1. One affine head maps the raw pooled command embedding to a ptr_dim code, which is quotiented
+     against a learned orthonormal basis (removing the verb/boilerplate/shared-prefix directions
+     that every path in a window has in common) and unit-normalized: g_i.
+  2. Item j is the pair (immutable value v_j = the raw observation embedding of step j, mutable
+     unit address a_j initialized to g_j).
+  3. At command i the model soft-matches g_i against {a_j : j < i} with a learned temperature, a
+     learned existence bias log(ex_j), and a NULL slot that absorbs the softmax mass when nothing
+     matches. read_i = sum_j w_ij v_j.
+  4. UNBINDING: src_i = unit(sum_j w_ij a_j); dst_i = unit(g_i - lambda * <g_i, src_i> src_i).
+     This is Gram-Schmidt removal of the matched source component from the command's superposition,
+     leaving the destination component. lambda is learned.
+  5. RE-ADDRESSING: a_j <- unit(a_j + mu_i * w_ij * (dst_i - a_j)), where mu_i is a learned
+     per-command move gate read off the causal trunk state. The value v_j is untouched. Existence
+     ex_j = (1 - mu_j) * live_j, so a step the model judges to be a move contributes no content
+     item (its observation is empty) while re-addressing an existing one.
+  6. read_i enters the command-position prediction through a sigmoid gate over the trunk state plus
+     three scalars (real-slot mass, peak weight, read RMS) and a ZERO-INIT (D,D) readout, so the
+     forward is identical to r22's at initialization and the parent's composition renderer,
+     path-state memory, transition readout and `transition_from_emb` entry point are all inherited
+     unchanged.
+
+Why this should move the measured quantity. comp_ca rewards returning the content the NATIVE chain
+routed to the read location and not returning it under the role-swapped chain. Step 5 is literally
+that: a content vector is carried from address to address across the chain and never re-encoded, so
+a read at the final location returns the observation embedding of whichever content actually
+arrived. Depth composes for a structural reason, not a learned coincidence: the destination of move
+i is produced by removing the source from the command code, so it lives in the same quotiented code
+space as the path codes; the source of move i+1 is that same path appearing in a new command's
+superposition, so the same single head addresses it. One head serving both roles is what makes
+dst(i) and src(i+1) agree by construction rather than by luck, and that is the exact place a
+depth-3/4 chain breaks for two independent heads. Under the role swap the mv commands are
+re-encoded, matching resolves the partner item, and the read follows the partner — so the paired
+difference is driven by carried identity rather than by move-order position.
+
+Crossover. The arch keeps the parent's whole stack (r18 path-state + r22 composition renderer) by
+subclassing it, and takes from the crossover partner its distinguishing pieces: the shrunk-ZCA
+content target metric and the explicit baseline_interleave stream. The ZCA target is kept because
+it is synergistic with this arch rather than merely inherited: the pointer path carries a raw
+observation embedding verbatim, and a whitened content metric puts the loss weight on the
+low-variance directions that separate one canary content from another instead of on the bulk
+direction shared by all shell outputs. The parent's anti-retrieval ring-negatives objective is kept
+over the partner's equivalence-quotient objective because it penalizes returning the WRONG prefix
+content, which is the failure mode a soft address match produces and the pressure that sharpens the
+match. Trunk shape, optim, batcher and head are unchanged from both.
+
+What would have to be true for this to fail.
+  - The superposition premise. If the frozen encoder's pooled embedding of `mv A B` is not close
+    enough to additive in its two path components — contextualization dominating, or the shared
+    `/tmp/w/cups/` prefix swamping the discriminative tail after only a 6-dimensional quotient —
+    then the residual after removing the source is not the destination code, and the chain does not
+    link. A larger ptr_basis would help; I could not measure the right size from inside the jail.
+  - Gate learning. mu must become large on move commands and small on reads, and the injection gate
+    must stay shut at exposure steps (where the item does not yet exist and the read is the null
+    slot's zero). Both are learned only through the end task; if they do not separate inside the
+    fixed step budget the readout stays near zero and the candidate reduces to its parent.
+  - Soft-match diffusion. With N contents whose paths share a long prefix, the softmax may stay
+    diffuse; a diffuse w drags several addresses part-way and blurs the values, which at depth 4
+    could be worse than the parent's separate keying. The learned temperature is the only remedy in
+    the design.
+  - Credit assignment length. The gradient that makes step 5 useful arrives at the read step and
+    must flow back through up to four address updates. This is differentiable throughout, but it is
+    a long path on a fixed step budget.
+  - Cost, unmeasured. The routing loop is n_cmd iterations of [B, n_cmd, ptr_dim] and
+    [B, n_cmd, 768] products, the same order as r18's existing per-step transition loop, so the
+    step budget should hold; I could not profile it from inside the jail and state this as
+    unmeasured rather than verified.
+
+Nothing in this design resolves the move chain outside the model. No path string is parsed, no
+step metadata is read, no `mv` is interpreted by the implementation. The addresses are projections
+of the model's own frozen embeddings, the match is a learned softmax, and the move gate, unbinding
+strength, temperature and existence bias are all parameters trained by the main loss.

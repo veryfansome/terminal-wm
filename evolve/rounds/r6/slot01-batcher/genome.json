@@ -1,0 +1,20 @@
+{
+  "chunks": {
+    "arch": {"impl": "r22_retrieval_composition_renderer", "params": {}},
+    "batcher": {
+      "impl": "r6_slotconflict_deficit_scheduler",
+      "params": {
+        "conf_frac_max": 0.6,
+        "ramp_frac": 0.25,
+        "block_size": 4,
+        "clique_gamma": 1.0,
+        "neyman_beta": 1.0
+      }
+    },
+    "head": {"impl": "r18_transition_forwardmodel_consistency", "params": {}},
+    "objective": {"impl": "r12_antiretrieval_ring_negatives", "params": {}},
+    "optim": {"impl": "r18_spectral_capped_transition_readout", "params": {}},
+    "stream": {"impl": "baseline_interleave", "params": {}},
+    "target": {"impl": "identity", "params": {}}
+  }
+}

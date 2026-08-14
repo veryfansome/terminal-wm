@@ -1,0 +1,144 @@
+CANDIDATE: zca_shrunk_target_whitening (new target impl) + the parent's arch/stream/head crossed
+with the partner's batcher.
+
+WHAT THE MECHANISM IS
+
+The target axis is an invertible reparameterisation of the space the model is trained to predict.
+It cannot add information (the inverse is exact), so the only thing it can change is (a) the metric
+in which the training loss measures error and (b) the coordinates the readout has to produce. This
+impl chooses that metric from the data instead of accepting the encoder's own.
+
+A buffer holds a running second moment M of the standardized next-observation targets (EMA,
+momentum 0.95, updated only in training mode under grad). Every 50 steps after a 150-step warmup,
+M is shrunk toward the identity, S = 0.95*M + 0.05*I, eigendecomposed on CPU in float64, and turned
+into the symmetric pair
+
+    W = c * S^(-p/2),        W_inv = (1/c) * S^(p/2),        p = 0.75,
+    c  = sqrt( D / sum_i lambda_i^(1-p) )
+
+make_target returns z_obs @ W^T; to_obs returns pred @ W_inv^T. W W_inv = I by construction (the two
+matrices come from one eigendecomposition of one symmetric matrix), so the round trip is exact to
+float32; measured 1.5e-5 absolute / 7e-7 relative on a 768-d synthetic target set, and exactly 0
+before the first refresh, where both maps are the identity — i.e. the candidate starts as its parent
+and departs smoothly.
+
+Three deliberate choices. The SYMMETRIC (ZCA) branch of the matrix power, not a Cholesky factor,
+because among all whitening maps it is the one closest to the identity in Frobenius norm; the arch's
+content channels inject RAW retrieved observation embeddings into the prediction, so the map the
+readout has to compensate for should be as close to the identity as the whitening allows. The
+SHRINKAGE toward I bounds how much any direction can be amplified (at p=0.75 the cap is
+(1/0.05)^0.375 = 3.05), so the near-null directions of a rank-poor estimate cannot be blown up. The
+partial power p=0.75 rather than full whitening, and the rescale by c, which fixes the average
+per-dimension variance of the transformed target at 1, so the objective's absolute constants
+(r12's _DELTA, _MARGIN, the precision clamps) stay in the regime they were tuned in.
+
+WHAT IT COMPUTES THAT NEITHER PARENT COMPUTES
+
+Neither program touches the target space: both train on the raw standardized observation embedding
+under identity. Their loss therefore weights every direction of the target distribution by that
+distribution's own spread. That spread is grossly anisotropic here, and the anisotropy is not
+incidental — it is a property of this data that I checked in the jail sample rather than assumed:
+
+    evolve/jail_data/train_sample.jsonl, 24 trajectories, 724 steps: 446 cat, 172 mv, 106 ls.
+    262 of the 724 steps (36.2%) have empty output. render_obs turns those into exactly TWO
+    distinct strings — "cwd=/ exit=0\n" (227 steps) and "cwd=/data exit=0\n" (35) — because every
+    mv and every redirect produces no stdout and does not change the cwd.
+
+So better than a third of the training targets are two point masses. Two point masses carrying ~36%
+of the probability at a large separation put an enormous eigenvalue on one direction of the target
+covariance: "did this command emit content at all". That direction is (i) perfectly predictable from
+the command token alone, (ii) responsible for a large share of the squared-error gradient under
+identity, and (iii) exactly zero use at the scored position, where every candidate the probe ranks
+is a non-empty file content. The direction that DOES decide the score — which of the N board
+contents this location now holds — is one of the many small-eigenvalue directions, because contents
+of the same board are the same kind of text differing in their idiosyncratic bytes.
+
+W divides each direction by its own spread to the power 0.75. On a synthetic set built to match the
+measured shape (36% exact point mass, anisotropic remainder) the gain along the point-mass direction
+came out 0.145 and the gain along a random direction 1.92, i.e. that one nuisance direction loses
+~47x of its weight in the squared error while the rest gain; the target spectrum went from
+max 242 / median 0.28 to max 5.3 / median 0.70. That is the whole mechanism: reallocate the finite
+step budget from a direction the eval never looks at to the directions it decides on.
+
+WHY THAT SHOULD MOVE comp_ca RATHER THAN THE GATE
+
+comp_ca is native_hit minus swap_stayed on the same board, and the read command is byte-identical in
+both arms, so nothing that keys on the location cancels anything but zero. A point is earned only
+when the prediction lands nearer the content the chain actually routed there than the content the
+role-swapped chain routes there. Both are non-empty file contents from the same board; they differ
+in precisely the low-variance directions this map amplifies, and they are identical in the
+high-variance ones it suppresses. The eval decision itself is untouched: to_obs returns the fixed
+observation space and the probe's nearest-candidate rule runs there as always, on one global matrix
+that is the same for every window, every candidate and both arms. The map is applied to the model's
+OUTPUT, never to its input, and it is chain-agnostic by construction — it cannot carry, and does not
+contain, any routing fact. What improves has to improve inside the trained net.
+
+WHY THIS CROSSOVER
+
+From the parent I keep the three mechanisms that make address-keyed carrying possible at all:
+r3_srcdst_hashslot_coding (the command token carries a SHAKE-256 sparse code of its source path in
+one coordinate block and its destination path in a second, at the same relative offsets, so one path
+has one pattern recoverable from either role — the only handle on an unseen image, since paths, not
+contents, are what a chain permutes), r2_dualaddress_move_transport (the only mechanism in either
+program that literally writes, at the destination key, the value currently read at the source key —
+mv steps carry no observation, so transport has to be driven by the command alone, which is what the
+src/dst blocks feed it), and r22_prefix_content_xattention (a softmax over strictly-earlier raw
+observations through a full (D,D) readout: the one channel that can both select an earlier content
+and apply a linear map to it, which is exactly what a whitened output space asks of a retrieval
+arch).
+
+From the partner I take r2_routedepth_tilt_readcollision_blocks with its own params. It is the
+partner mechanism that most directly serves this objective and it subsumes the parent's batcher
+(image-blocking is one of its two block types). It parses the mv graph out of the command strings,
+walks each `cat P` back through the mv edges that wrote P, and tilts sampling toward sequences whose
+deepest routed read is deep — this raises the density of the only steps that supply gradient for
+carrying. Its second block type puts sequences whose deepest routed reads carry NEAR-DUPLICATE read
+commands but non-duplicate answers into the same batch. Those are in-batch negatives with the same
+question and different answers, which is the exact confusion the role-swap arm tests, and they are
+also the pairs whose targets differ only in the small directions W amplifies. The three parts
+compose: the batcher supplies same-command-different-content pairs, the whitening makes the loss
+care about the direction in which they differ, the transport head and the src/dst coding give the
+net a way to resolve them.
+
+One parameter change for coherence: head params pred_weight 0.0. The r2 head's aux has three terms;
+two of them (read_weight, mse_weight) supervise the transport memory's READ, which is built from raw
+observation tokens and stays raw-space correct. The third pulls the arch's own prediction toward raw
+observation embeddings in an InfoNCE. That term now lives in a different space from the main loss
+and would fight it. Zeroing it removes the only space-conflicting term and leaves the head's
+mechanism — the dual-address transport memory and its label-free duplicate mining — intact.
+
+WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+1. If the contents a single scored window puts on the board differ along HIGH-variance directions of
+   the global target distribution rather than low-variance ones, W attenuates the decision direction
+   instead of amplifying it and the candidate should lose. The board in the sample holds a shell
+   config, a log fragment and a CSV — visibly different text — so this is the main way the argument
+   could be wrong; my claim is only that "empty vs content", "listing vs file", "long vs short"
+   dominate the global spectrum ahead of them, which is what the 36.2% empty share and the
+   two-distinct-strings fact make likely but do not prove.
+2. If the arch's inductive prior really needs its prediction to BE a raw retrieved observation, the
+   scalar-gated direct injection path (target_read added to pred through direct_gate) is now
+   mis-scaled by W and can only be corrected per-dimension by the FiLM gamma/shift, not rotated. The
+   net can shut that gate and route content through x_out or tr_read, both full (D,D) maps whose
+   spectral cap of 4.0 comfortably contains ||W||_2 = 3.37 as measured on the synthetic frame — but
+   if it does not learn to, capacity is wasted rather than reallocated.
+3. If the target metric drifts too long, the net chases a moving target. Mitigated: identity for the
+   first 150 steps, EMA momentum 0.95 over batches of ~2000 rows (so the estimate is built from tens
+   of thousands of rows for a 768-d matrix), refresh every 50 steps thereafter.
+4. If the eval does not route a LEARNED target through net.target_module.to_obs, the predictions are
+   never mapped back and everything is garbage. The contract states learned targets are evaluated
+   through their own inverse and harness.py routes make_target through net.target_module, so this is
+   the assumption I cannot check from inside the jail. I deliberately did NOT define module-level
+   make_target/to_obs fallbacks: if that assumption is wrong I want a loud failure, not a silent
+   identity mismatch.
+
+COST, MEASURED IN THE JAIL, NOT EXTRAPOLATED TO SCORE
+
+Per step: one [n,768]x[768,768] matmul for the target and one for the second moment, n ~ bs*steps
+per batch. Measured on CPU with n=2000: mean 4.4 ms/step over 400 steps, worst step 45 ms (the
+float64 eigendecomposition, once every 50 steps), 5.1 s total for 400 steps — on the GPU lane both
+matmuls are ~1.2 GFLOP and the eigendecomposition stays on CPU. Nothing here endangers the step
+budget. Full stack (this genome's arch + stream + head + objective + optim, real command strings,
+20 and 80 steps) runs finite and decreasing, stream.leakage_ok passes, and to_obs applied to
+flatten_predictions output returns finite [n,768]. I have NOT measured comp_ca; every claim above
+about the score is unmeasured.

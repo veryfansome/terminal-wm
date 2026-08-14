@@ -1,0 +1,180 @@
+CANDIDATE: confusion-discriminant target metric, on the routed-copy x path-change crossover stack.
+
+AXES CHANGED: target (new impl, the main invention), head (new impl, the crossover of the two
+programs' aux mechanisms), batcher (new impl, the crossover of the two programs' batch
+composition rules). objective / arch / optim / stream are inherited from the parent unchanged.
+The parent's arch (r22_retrieval_composition_renderer) is already a subclass of the partner's
+arch (r18_pathstate_latent_transition_worldmodel), so on that axis the crossover is a no-op:
+keeping the parent's arch already keeps the partner's whole forward path plus the composition
+renderer on top of it.
+
+
+1. THE FACT ABOUT THE DATA THIS IS BUILT ON
+
+I read evolve/jail_data/train_sample.jsonl. A cups window looks like:
+
+  cat /tmp/w/cups/etc/cron.d/backup.job      -> "...canary=ba02a233a74dddf1 rows=2459..."
+  cat /tmp/w/cups/g35/f385.tmp               -> "#!/bin/sh\n# canary 1a689166857cd315\n..."
+  mv  .../backup.job .../f385.tmp.1          -> output ""      (observation "cwd=/ exit=0\n")
+  ls  /etc/network/if-post-up.d              -> distractor
+  mv  .../f385.tmp .../backup.job.2          -> output ""
+  ... six more mv steps, output "" every time ...
+  cat /tmp/w/cups/etc/cron.d/backup.job.7    -> the SCORED read
+
+Two facts follow, and the whole design turns on them.
+
+(a) Every mutating step's observation is the same near-constant vector, because render_obs()
+    concatenates cwd + exit + output and the output is empty. About a third of all training
+    targets in this sample are that one exactly-duplicated vector. The moves carry no
+    information in the observation channel at all; the only trace of a move is its command
+    embedding. Nothing in my mechanism reads or resolves those commands: the batcher parses
+    commands to CHOOSE SEQUENCES, never to build model input, and the target module never sees a
+    command at all.
+
+(b) The candidates that must be told apart at a scored read are the contents exposed in the same
+    window. They are the same KIND of text (same file format, same log shape, same length) and
+    differ only in a canary token. In a mean-pooled 768-d sentence embedding, that difference is
+    a small-norm direction sitting inside a much larger shared component. Under the identity
+    target, squared error and every distance in the loss are dominated by the shared component,
+    which is predictable WITHOUT tracking anything. The routing-dependent part of the target is a
+    small fraction of the loss, so the gradient pressure to actually carry a content's identity
+    through the chain is a small fraction of the training signal.
+
+
+2. WHAT THE TARGET MODULE ADDS (the mechanism neither program has)
+
+target__confusion_discriminant_metric.py trains the model in a globally re-metrized observation
+space and reads it back through the algebraically exact inverse. It maintains two running
+second-moment buffers over the standardized next-observation targets:
+
+  S = EMA of E[t t^T]                                     (total moment)
+  G = EMA of E[(t_i - t_j)(t_i - t_j)^T]                  (confusion moment)
+
+where in G the pair (i,j) ranges over each subsampled target and its k nearest NON-DUPLICATE
+neighbours inside the same flattened batch, and each pair is weighted by 1/(c_i * c_j) with c the
+size of the endpoint's exact-duplicate class in the subsample. Exact duplicates are excluded by a
+relative tolerance (1e-4 of the mean pairwise distance), so the one constant empty-output vector
+never contributes a zero difference, and the inverse-duplicate-class weighting stops the third of
+the batch that shares that one vector from dominating G with a single direction.
+
+Every refresh, on CPU in float64:
+
+  S_n = trace-normalize(S), shrunk 5% toward I;  eigh -> B = S_n^-1/2, B^-1 = S_n^+1/2
+  C   = B G_n B, trace-normalized, shrunk 10% toward I;  eigh -> C = V diag(mu) V^T
+  gain g = (mu / mean(mu))^(p/2), p = 1, clamped to [1/3, 3]
+  F     = c * V diag(g) V^T B          (make_target: t -> F t)
+  F^-1  = (1/c) * B^-1 V diag(1/g) V^T (to_obs:      y -> F^-1 y)
+  c chosen so the transformed targets keep unit average per-dimension variance.
+
+F F^-1 = I identically, because B B^-1 = I and V diag(g) diag(1/g) V^T = I; the pair is exact by
+construction, not by a fitted approximation.
+
+This is the whitened-discriminant (Fisher / generalized eigenproblem G v = lambda S v)
+construction from discriminant analysis and from the within-class-covariance-normalization step
+of speaker-verification pipelines, with one substitution that is specific to this problem: there
+are no class labels here, and there cannot be, because two observations of the same content in
+this data are byte-identical, so a within-class scatter is exactly zero. So instead of a
+within-class scatter I estimate a CONFUSION scatter -- the covariance of the differences between
+targets that are already nearest neighbours and are not duplicates -- and I stretch those
+directions instead of shrinking them.
+
+Interpretation: mu measures how much the differences between confusable observations project onto
+a whitened direction. A direction with large mu is one along which the eval's hard candidates
+actually differ; a direction with small mu is one they share. The map multiplies squared error
+along a direction by g^2 = (mu/mean(mu))^p, so up to a bounded factor 9 between the most and the
+least discriminative direction. The shared component of the target -- which the model can already
+predict from the read command alone, with no tracking -- is compressed, and the component that
+distinguishes one exposed content from another is expanded.
+
+WHY THAT SHOULD MOVE comp_ca. comp_ca = native_hit - swap_stayed is a paired difference over the
+same board, so anything that predicts from the read location alone, or from any statistic shared
+by the two arms, contributes exactly zero. The only thing that earns a positive number is the
+model's prediction moving with which content the chain routed. Under the identity target the
+training loss is mostly the shared component, so a model that never routes still gets most of the
+loss down and the routing gradient is a small residual; the trained net sits near the analytic
+non-tracker band, which is where the parent sits. Re-metrizing the target makes the
+content-distinguishing subspace the majority of the loss, so the cheapest remaining way to lower
+the loss is to identify WHICH exposed content the read returns -- which, for a read after a chain
+of silent moves, is exactly the routing computation the arch's delta-rule memory, the head's copy
+transport and the transition operator are all built to perform but currently have little
+incentive to use. The retrieval decision variable at scoring time is untouched: to_obs puts the
+prediction back in the fixed observation space before anything is measured.
+
+CRITICALLY, AND BY DESIGN, THE MAP IS SWITCHED ON AT THE SCORED POSITION. to_obs is a single
+global matrix multiply. It does not read z_prev, it does not read any observation, it does not
+branch on anything per step, per window or per arm. It is bit-identically the same matrix for the
+native chain and the role-swapped chain, for every genome-independent window, and it is applied
+unchanged at a command whose own observation is withheld. Nothing here can be switched off
+exactly where it is judged, and nothing here can leak routing: the map is one 768x768 matrix
+estimated from the marginal geometry of the training target distribution.
+
+
+3. WHAT THE HEAD ADDS (the crossover proper)
+
+Parent head: mines steps whose observation DUPLICATES an earlier step's observation with at least
+one contentless step in between, and supervises the arch's shared transition operator toward
+reproducing that content from the last contentless command before the read. Partner head: mines,
+per command, the nearest earlier and nearest later commands whose embeddings are cosine-similar
+above a threshold (a same-path signature), keeps only triples whose two observations DIFFER by
+more than a floor, and supervises the same operator to map the earlier observation through that
+command to the later one, weighted by the two path similarities times the amount of change.
+
+Those two rules are DISJOINT by construction -- one requires the observation to be unchanged, the
+other requires it to change by at least change_floor -- and on this data they cover disjoint halves
+of it. In the cups windows the exposed content and the post-chain read are byte-identical, so
+change = 0 and the partner's rule structurally rejects every cups triple; only the parent's rule
+sees them. In the cvar windows (`cat s0 >> acc`, `cat s1 >> acc`, then `cat acc`) the content at
+the accumulator path changes at every step, so no observation ever duplicates and the parent's
+rule structurally rejects every cvar triple; only the partner's rule sees them. In the sample I
+read, cvar steps are about 40% of all steps, and the parent's head mines none of them.
+
+head__routed_copy_pathchange_transport.py runs both rules against the same operator in the same
+batch, under one ramp and one aux weight. The claim is not "two losses are better than one". It
+is that a transition operator supervised only on preserving triples learns the identity map and
+gains nothing from being command-conditioned, while one supervised on both learns WHEN a command
+carries content unchanged (mv) and WHEN it rewrites it (redirect-append) -- and only a
+command-conditioned operator can carry a specific content through a chain of moves rather than
+through a chain of positions. The copy-transport read path, the null column, the occupancy gate
+and the zero-init output scale are kept exactly as in the parent, so the wrapped net is still the
+unwrapped net at initialization.
+
+
+4. WHAT THE BATCHER ADDS, AND WHY IT IS LOAD-BEARING RATHER THAN DECORATION
+
+Parent batcher: depth-tilted collision groups -- sequences bucketed by (image, normalized routed
+path shape, hop count), bucket choice tilted toward deep hop counts. Partner batcher: anneal from
+uniform toward batches drawn from a few image pools, to match the eval's same-system foil
+geometry. batcher__routed_depth_sysblock_batcher.py layers them: collision groups first, then an
+annealed share of the REMAINDER from a handful of per-batch image pools, then uniform.
+
+This is not a free extra: my target module estimates G from nearest-neighbour pairs found INSIDE
+the batch. If the remainder of the batch is uniform over all systems, a target's nearest
+non-duplicate neighbour is often a step from an unrelated image, and G then measures
+between-system differences rather than the within-window content differences the eval's forced
+foils are made of. Image-blocking the remainder makes the in-batch nearest neighbours the same
+kind of confusable the scored position faces, so G estimates the right subspace. The collision
+groups do the same job for the deep-routing windows specifically.
+
+
+5. WHAT WOULD HAVE TO BE TRUE FOR THIS TO FAIL
+
+- If the top eigen-directions of C are float noise rather than content differences -- for
+  instance if nearest-neighbour pairs that survive the duplicate tolerance are mostly
+  near-identical observations differing by encoder jitter -- the map amplifies noise and the loss
+  gets worse, not better. The 1e-4 relative duplicate tolerance, the 10% shrinkage of C toward I
+  and the [1/3, 3] gain clamp bound this but do not prove it away. I did not measure the spectrum
+  of C; there is no torch in this jail and I ran nothing.
+- The inherited objective r22 computes its own per-DIMENSION inverse-error precision weighting,
+  clamped to [0.25, 4]. That weighting partially fights any anisotropy I introduce. It is
+  axis-aligned and my map is a full rotation, so it can damp but not cancel the reweighting; if
+  the damping is stronger than I expect, the effect shrinks toward zero rather than reversing.
+- If the model's failure at the scored position is not "no incentive to route" but "cannot route
+  at all under this architecture", then reweighting the loss changes which errors it makes
+  without producing tracking, and comp_ca stays in the non-tracker band.
+- The two head rules both write into one operator. If the preserving and changing supervisions
+  are not in fact separable by the command embedding, they average into a single blurred operator
+  and both terms lose, which would show as a candidate below the parent rather than above it.
+- Cost, unmeasured: the target module adds one [n,768]^T[n,768] gram per step plus a 192x192
+  neighbour search, and two float64 768x768 eigendecompositions per refresh (warmup 300 steps,
+  then every 150). I expect this to be small against the main forward/backward but I could not
+  profile it here.

@@ -1,0 +1,135 @@
+AXIS CHANGED: target only (identity -> r6_gls_rotated_frame, LEARNED). Every other axis keeps
+the parent's impl and params verbatim. The crossover reasoning for why nothing else moved is at
+the bottom, and it is a mechanical compatibility argument, not a preference.
+
+THE MECHANISM
+
+The target becomes a learned, exactly invertible, volume-preserving linear frame:
+
+    make_target(z_obs, z_prev) = S . R(z_obs)
+    to_obs(pred,   z_prev)     = R^-1(pred / S)
+
+R is a stack of 12 Givens-rotation layers. Each layer holds a fixed random pairing of the 768
+coordinates (drawn once from a fixed seed, stored as buffers, identical in every process and on
+every seed) and one learned angle per pair; a layer rotates each pair by its angle. R^-1 replays
+the layers in reverse order with negated angles, in closed form. S is a diagonal whose log-scales
+are 0.35*tanh(raw) and then mean-centred, so sum(log s) = 0 exactly: det(S) = 1 and det(R) = 1,
+so the whole map is volume preserving and cannot collapse. All angles and log-scales start at
+zero, so at initialisation the target is exactly z_obs and this candidate is exactly its parent;
+the frame moves only where the training loss pays for it. 5376 parameters, no matrices, so the
+optimiser routes them to plain AdamW (they match neither the (key_d, .) Muon signature nor the
+(D,D) spectral-cap signature).
+
+WHY IT SHOULD MOVE THE OBJECTIVE
+
+The genome's objective already reweights squared error per coordinate by a detached inverse-error
+precision, clamped and renormalised to mean one. That is weighted least squares: an axis-aligned
+metric. It is axis aligned in whatever frame the target happens to live in, and the frame it
+currently lives in is an accident of the frozen encoder plus per-dimension standardisation. Per-
+dimension standardisation equalises marginal variances but leaves the correlation structure
+untouched, so the direction that separates a content-bearing observation from the empty-output
+boilerplate observation, and the directions that separate one file's content from another's, are
+oblique to the coordinate axes. A diagonal reweighting cannot express a preference for an oblique
+direction; a rotation of the target frame can, and composing the two gives a full anisotropic
+metric M = R^T S^2 W R in observation space. Moving from a diagonal weighting to a rotated one is
+exactly the generalized-least-squares correction for correlated residuals (Aitken): with
+correlated errors, diagonal weighting is consistent but inefficient, and the efficient weighting
+is the inverse residual covariance, which is not diagonal in the given basis. The claim is that
+letting the objective's own equalising precision act on a learned basis buys the compositional
+read the error budget that currently leaks into directions along which no two candidate contents
+differ, which is the part of the prediction error that cannot change any retrieval ranking.
+
+WHY THIS PARTICULAR TRANSFORM AND NOT A RICHER ONE
+
+Three properties were required and each ruled something out.
+
+1. It must be a global bijection of z_obs alone, with no dependence on z_prev. A residual /
+   control-variate target z_obs - g(z_prev) is the obvious move on this axis and it is the wrong
+   move here: roughly forty percent of the training steps produce an empty-output observation, so
+   their z_obs are numerically identical and the objective deliberately collapses them into one
+   exact-equivalence class carrying one unit of measure. Subtracting anything that varies with
+   z_prev shatters that class into dozens of rows that are then mutual negatives, reallocating a
+   large share of the loss onto a distinction that has nothing to do with which content is where.
+   Any per-row-varying transform has this defect; only a global one does not. Verified on
+   synthetic duplicates: under the transformed target the maximum distance inside a duplicate
+   class is exactly 0.0, so the objective's equivalence quotient, its duplicate ring mask and its
+   class measures are bit-preserved.
+
+2. The determinant must be one by construction rather than by penalty, because the transform is
+   trained jointly with the prediction and a free scale is a free loss reduction. Mean-centred
+   log-scales and rotations give det = 1 with no reg term doing the work. Measured slogdet of the
+   assembled 768x768 map with randomly perturbed parameters: sign +1, log |det| = 2.4e-5.
+
+3. The distortion must be bounded. The scale range is capped so s lies in about [0.5, 2.0]; the
+   rotation is an isometry. So the worst-case metric distortion the target itself can introduce
+   is about 4x in squared distance, on top of the objective's own 16x precision range. A NICE-
+   style nonlinear coupling would also be det-1 and exactly invertible but its distortion is not
+   bounded, and an unbounded warp trained against a contrastive loss has an obvious bad attractor
+   (blow up the trivial empty-versus-content direction, flatten content-versus-content). Bounding
+   it is the difference between a metric correction and a new failure mode.
+
+WHAT I EXPECT TO SEE, AND WHAT WOULD FALSIFY IT
+
+Unmeasured: I cannot run the harness from the jail, so no performance number here is measured.
+Prediction: comp_ca above the parent's +0.0262, with the native pick rate up and the swapped-arm
+hold rate not up by as much - the transform is a global bijection, so it cannot manufacture the
+role-swap asymmetry by itself; it can only make the content-carrying signal cheaper to fit.
+Diagnostics that would show the mechanism was live rather than inert: the learned angles should
+leave zero by a substantial fraction of a radian, and the log-scale spread should saturate toward
+its tanh bound. If the angles stay near zero the candidate is a null result and the identity
+frame was already right. Falsification of the reasoning, not just the result: comp_ca at or below
+parent WITH large learned angles would say the frame moved somewhere the retrieval geometry does
+not want, and the most likely such place is the trivial empty-output-versus-content direction -
+the contrastive term rewards expanding directions with a high ratio of between-target spread to
+prediction error, and that direction has the highest such ratio in the data by a wide margin. The
+bounded scale range limits how much of the loss it can capture but does not forbid it. That is
+the single biggest risk in this proposal and it is not designed out, only capped.
+
+CROSSOVER: WHAT I TOOK AND WHAT I REFUSED
+
+Partner design: backchain pointer resolution, whose distinguishing parts are the r24 arch (a
+K-hop backward chase over a follow matrix of command addresses) and the r2 dual-address move
+transport head. Parent: the r25 role-addressed transport store with the r18 transition
+forward-model consistency head. Both lineages already carry the same idea - resolve a read by
+following a chain of address matches to the observation that was deposited - implemented once as
+a chase over a follow matrix and once as a store whose destination write carries whatever the
+source address currently holds. Only one can occupy the arch slot, and I kept the parent's,
+because the parent's head trains the very transition operator that r25's transport store calls
+inside its write path, so the pair is one mechanism, and because the partner's arch derives from
+a class this jail does not grant, which makes a hand-merged arch a guess rather than a
+construction.
+
+The partner's head is the part I actively refused, and the reason is specific to this proposal:
+r2_dualaddress_move_transport's auxiliary loss runs an InfoNCE on pred_cmd, the net's command-
+position output, against raw observation embeddings drawn from the batch. Under a non-identity
+target the net's output does not live in observation space - it lives in the target frame - so
+that aux would pull the prediction toward S.R(z) and z at the same time and the two objectives
+would fight over the same tensor. The parent's head has no such coupling: its aux applies the
+arch's internal transition operator to raw observation embeddings and never touches the
+prediction, so it is invariant to the target frame. That is the crossover judgement - between two
+plausible transport heads, the target axis can only be exercised behind the one whose auxiliary
+supervision is expressed in an internal space rather than in the prediction space. Objective and
+batcher were kept at the parent's because in each case the parent's impl is the partner's plus a
+strictly added device (the exact-target equivalence quotient over r12; the depth tilt over r6),
+and the equivalence quotient is precisely the invariant this target transform was designed to
+preserve. Optim and stream are identical in both parents.
+
+CORRECTNESS NOTES
+
+Shapes: make_target and to_obs operate on the trailing dimension only and were exercised on
+[0,768], [1,768], [3,768] and [2,5,768]; nothing indexes a sequence, so the odd-length scored
+layout [cmd_0, obs_0, ..., cmd_r] with no trailing observation cannot reach a degenerate branch -
+the transform never sees the layout, only the flattened rows the harness masks out for it.
+z_prev is accepted and ignored, including the all-zero first-step case, so the inverse holds
+there too. Roundtrip to_obs(make_target(x)) with strongly perturbed parameters: max absolute
+error 1.4e-6, relative 2.4e-7 in float32. Every parameter takes gradient from the training loss
+through make_target, and additionally through reg(), which is added to the loss each step; the
+det-1 diagonal keeps the map non-isometric so the parameters take gradient even under a plain
+MSE objective, where a pure rotation would have had exactly zero gradient. Every parameter
+reaches the scored prediction through to_obs, which is applied to the read-position output before
+retrieval. Parameters and buffers are cast to the incoming tensor's device and dtype at use, so
+the module is safe if the instrument applies to_obs to predictions that have already been moved
+to CPU while the net is on GPU. No attribute shadows an nn.Module internal (frame_d, n_layers,
+n_pairs, rot_width, angles, log_scale_raw, perm_i, unperm_i). Cost measured on CPU: 19 ms per
+call on a [640,768] batch, twelve layers of gather / pair-rotate / scatter, no matmul - a fixed
+additive cost per step that does not scale with the model.
