@@ -7,20 +7,25 @@ import torch.nn.functional as F
 NAME = "r5_closure_routing_memory"
 DESCRIPTION = (
     "Content routing solved as a truncated Neumann series over a causal path-match matrix, added "
-    "to the arch's own prediction. Each command embedding is mapped by two extractors through one "
-    "shared path projection into a source key and a destination key; a causal softmax with a "
-    "learned null slot and a learned recency decay yields two attention matrices (read-at-source, "
-    "read-at-destination). A per-step transport gate and a simplex pair of mixing coefficients "
-    "build a strictly lower-triangular routing matrix M, and the per-step content register "
-    "V = sum_p M^p ((1-gate)*obs) is formed by `hops` batched matmuls, so a move chain of depth d "
-    "is resolved by the d-th term instead of by a per-step loop. The read at a command position is "
-    "the source-key attention over V, gated and scaled by a zero-initialised per-dimension vector, "
-    "so the wrapped net equals the unwrapped net at initialisation. Routing uses command "
-    "embeddings and observations strictly earlier than the position being predicted; a position "
-    "whose own observation is missing or padded still reads. Train-time aux mines, label-free, "
-    "steps whose observation duplicates an earlier step's observation under a different command, "
-    "and trains the read and the arch's prediction at those steps with a within-sequence "
-    "multi-positive squared-L2 InfoNCE over the sequence's other observations plus an MSE anchor."
+    "to the arch's own prediction. The stream is indexed by COMMAND SLOT, n = (L + 1) // 2, so a "
+    "trailing command whose observation is absent -- the scored read -- is a first-class row; "
+    "pairing is never inferred from the length parity and is read per row from key_pad. Each "
+    "command embedding is mapped by two extractors through one shared path projection into a "
+    "source key and a destination key; a causal softmax with a learned null slot and a learned "
+    "recency decay yields two attention matrices (read-at-source, read-at-destination). A per-step "
+    "transport gate and a simplex pair of mixing coefficients build a strictly lower-triangular "
+    "routing matrix M from command embeddings alone, and the per-step content register "
+    "V = sum_p M^p ((1-gate)*obs*obs_live) is formed by `hops` batched matmuls, so a move chain of "
+    "depth d is resolved by the d-th term instead of by a per-step loop. Transport needs no "
+    "observation; only the content deposit does, and a slot with no observation deposits nothing "
+    "and is read by nobody, since M and the read attention are both strictly lower triangular. The "
+    "read at a command position is the source-key attention over V, gated and scaled by a "
+    "zero-initialised per-dimension vector, so the wrapped net equals the unwrapped net at "
+    "initialisation. No pooled statistic enters the forward path. Train-time aux mines, "
+    "label-free, steps whose observation duplicates an earlier step's observation under a "
+    "different command, and trains the read and the arch's prediction at those steps with a "
+    "within-sequence multi-positive squared-L2 InfoNCE over the sequence's other observations plus "
+    "an MSE anchor; every statistic it forms is restricted to slots that carry an observation."
 )
 
 _DEFAULTS = {
@@ -60,6 +65,36 @@ def _clean(x):
     return torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
 
 
+def _cmd_slots(length):
+    return (int(length) + 1) // 2
+
+
+def _fit_rows(x, n):
+    m = x.size(1)
+    if m == n:
+        return x
+    if m > n:
+        return x[:, :n]
+    pad = x.new_zeros(x.size(0), n - m, *tuple(x.shape[2:]))
+    return torch.cat([x, pad], dim=1)
+
+
+def _split_stream(tok, key_pad, n):
+    B = tok.size(0)
+    L = tok.size(1)
+    dev = tok.device
+    c = _fit_rows(_clean(tok[:, 0::2, :]), n)
+    o = _fit_rows(_clean(tok[:, 1::2, :]), n)
+    if key_pad is None:
+        live_c = torch.ones(B, n, dtype=torch.bool, device=dev)
+        live_o = (torch.arange(n, device=dev).view(1, n) < (L // 2)).expand(B, n)
+    else:
+        lv = ~key_pad.bool()
+        live_c = _fit_rows(lv[:, 0::2], n)
+        live_o = _fit_rows(lv[:, 1::2], n)
+    return c, o, live_c, live_o
+
+
 def _shapes_ok(b):
     for k in ("tok", "types", "key_pad", "tgt", "cmd_mask"):
         if k not in b:
@@ -71,7 +106,7 @@ def _shapes_ok(b):
         return False
     if cmd_mask.shape != tgt.shape[:2] or tok.shape[0] != tgt.shape[0]:
         return False
-    return tok.shape[1] == 2 * tgt.shape[1]
+    return tgt.shape[1] == _cmd_slots(tok.shape[1])
 
 
 def _types_interleaved(types, key_pad):
@@ -84,9 +119,22 @@ def _types_interleaved(types, key_pad):
         live = ~key_pad.bool()
         even = types[:, 0::2][live[:, 0::2]]
         odd = types[:, 1::2][live[:, 1::2]]
-    if even.numel() == 0 or odd.numel() == 0:
+    if even.numel() == 0:
         return False
-    return bool((even == 0).all().item()) and bool((odd == 1).all().item())
+    if not bool((even == 0).all().item()):
+        return False
+    if odd.numel() == 0:
+        return True
+    return bool((odd == 1).all().item())
+
+
+def _layout_for(cache, length, types, key_pad):
+    key = int(length)
+    known = cache.get(key)
+    if known is None:
+        known = _types_interleaved(types, key_pad)
+        cache[key] = known
+    return known
 
 
 class _ClosureRouter(nn.Module):
@@ -127,22 +175,16 @@ class _ClosureRouter(nn.Module):
     def route_chain(self, tok, key_pad):
         if tok is None or tok.dim() != 3 or tok.size(-1) != self.d_model:
             return None
-        B, L, Dm = tok.shape
-        n = L // 2
-        if n < 2 or 2 * n != L:
+        n = _cmd_slots(tok.size(1))
+        if n < 2:
             return None
+        B = tok.size(0)
         dev = tok.device
         dt = tok.dtype
 
-        c = _clean(tok[:, 0::2, :]).float()
-        o = _clean(tok[:, 1::2, :]).float()
-        if key_pad is None:
-            live_c = torch.ones(B, n, dtype=torch.bool, device=dev)
-            live_o = live_c
-        else:
-            lv = ~key_pad.bool()
-            live_c = lv[:, 0::2]
-            live_o = lv[:, 1::2]
+        c_raw, o_raw, live_c, live_o = _split_stream(tok, key_pad, n)
+        c = c_raw.float()
+        o = o_raw.float()
 
         cf = F.gelu(self.ctl_in(c))
         g = torch.sigmoid(self.move_gate(cf))
@@ -196,7 +238,7 @@ def wrap(net, D, **params):
                          float(cfg["init_null"]), float(cfg["sym_init_noise"]))
     net.closure_router = mod
 
-    state = {"cfg": cfg, "mod": mod, "step": 0, "stash": None, "D": int(D), "layout": None}
+    state = {"cfg": cfg, "mod": mod, "step": 0, "stash": None, "D": int(D), "layout": {}}
     orig_forward = net.forward
 
     def _forward(tok_emb, types, key_pad, *extra, **kw):
@@ -210,24 +252,22 @@ def wrap(net, D, **params):
         if not torch.is_tensor(tok_emb) or tok_emb.dim() != 3 or tok_emb.size(-1) != state["D"]:
             return out
         L = tok_emb.size(1)
-        n = L // 2
-        if n < 2 or 2 * n != L:
+        n = _cmd_slots(L)
+        if n < 2:
             return out
-        if state["layout"] is None:
-            state["layout"] = _types_interleaved(types, key_pad)
-        if not state["layout"]:
+        if not _layout_for(state["layout"], L, types, key_pad):
             return out
         routed = mod.route_chain(tok_emb, key_pad)
         if routed is None:
             return out
         reads, contrib = routed
         if pred.size(1) == L:
-            filler = torch.zeros_like(contrib)
-            spread = torch.stack([contrib, filler], dim=2).reshape(contrib.size(0), 2 * n, -1)
+            slots = torch.arange(0, L, 2, device=pred.device)
+            spread = torch.zeros_like(pred).index_copy(1, slots, contrib.to(pred.dtype))
             new_pred = pred + spread
             pred_cmd = new_pred[:, 0::2, :]
         elif pred.size(1) == n:
-            new_pred = pred + contrib
+            new_pred = pred + contrib.to(pred.dtype)
             pred_cmd = new_pred
         else:
             return out
@@ -253,9 +293,9 @@ def aux_loss(head_state, batch, net, device):
         return 0.0
     if not _shapes_ok(batch):
         return 0.0
-    if st.get("layout") is None:
-        st["layout"] = _types_interleaved(batch["types"], batch["key_pad"])
-    if not st["layout"]:
+
+    tok = batch["tok"]
+    if not _layout_for(st["layout"], tok.size(1), batch["types"], batch["key_pad"]):
         return 0.0
 
     st["step"] = int(st.get("step", 0)) + 1
@@ -263,10 +303,13 @@ def aux_loss(head_state, batch, net, device):
     if ramp <= 0.0:
         return 0.0
 
-    tok = batch["tok"]
-    valid = batch["cmd_mask"].bool()
-    B, n = valid.shape
+    B, n = batch["cmd_mask"].shape
     if n < 3:
+        return 0.0
+
+    c_raw, o_raw, live_c, live_o = _split_stream(tok, batch["key_pad"], n)
+    valid = batch["cmd_mask"].bool() & live_c & live_o
+    if not bool(valid.any().item()):
         return 0.0
 
     pred_cmd = None
@@ -286,8 +329,8 @@ def aux_loss(head_state, batch, net, device):
     else:
         pred_cmd = None
 
-    c = _clean(tok[:, 0::2, :][:, :n, :]).float()
-    o = _clean(tok[:, 1::2, :][:, :n, :]).float()
+    c = c_raw.float()
+    o = o_raw.float()
     Dm = float(o.size(-1))
     dev = o.device
 
