@@ -1,0 +1,107 @@
+MECHANISM (one axis changed: optim; impl r6_crossenv_agreement_gate)
+
+Imported from outside the domain: the AND-mask / Invariant Learning Consistency rule
+(Parascandolo et al., "Learning explanations that are hard to vary"). There, a gradient
+component is followed only when the environments agree on its sign,
+    m_j = 1[ |sum_e sign(g_j^e)| >= tau * E ],
+and the update is m (elementwise-times) sum_e g^e. The claim it makes is precisely the claim
+this search needs: a direction that lowers the loss in only a few environments is an
+environment-specific explanation (memorisation of one system's surface statistics), while a
+direction the environments agree on is a mechanism. Our eval holds windows out BY IMAGE, so
+only the second kind of direction can pay.
+
+We cannot form per-environment gradients: the harness gives the optimiser one aggregate
+gradient per step and passes no closure. But this genome's batcher is
+r6_sysblock_hardneg_curriculum with n_block_images=1 and hard_frac_max=0.75, so after the ramp
+three quarters of every batch is drawn from ONE system image, and the image is redrawn each
+step. I confirmed against evolve/jail_data/train_sample.jsonl that the "image" key is present
+and that the sample carries 8 distinct images, so the batcher takes its blocked path rather
+than its uniform fallback. Consecutive steps are therefore consecutive ENVIRONMENTS, and the
+AND-mask consensus statistic can be accumulated over time instead of over a batch dimension:
+
+    s_j  <- agree_beta * s_j + (1 - agree_beta) * sign(g_j)          (a third moment, beside m and v)
+    a_j  =  |s_j| / (1 - agree_beta^t)                                (debiased, in [0,1])
+    gate_j = agree_floor + (1 - agree_floor) * clip((a_j - agree_tau)/(1 - agree_tau), 0, 1)
+    gate  <- gate / mean(gate),  clipped to agree_cap                 (mean-preserving)
+    dtheta_j = -lr * gate_j * adamw_update_j
+
+a_j is the exponentially weighted form of |mean_e sign(g_j^e)| over roughly the last
+1/(1-agree_beta) ~ 33 environments. The gate multiplies the AdamW UPDATE, not the gradient, so
+the second-moment statistics are untouched and the gate cannot feed back into its own
+normaliser. The per-tensor mean division is deliberate and is what makes this an experiment
+about direction rather than about step size: the average update magnitude per tensor is
+preserved, and the step is only redistributed from coordinates the systems disagree about
+toward coordinates they agree about. If every coordinate in a tensor has the same agreement,
+the gate is uniformly 1 and the step is bit-comparable to the parent's.
+
+WHY IT SHOULD MOVE comp_ca
+
+comp_ca is the paired difference between the native chain and the role-swapped chain. A
+predictor that keys on which location is read contributes exactly zero. What is left is the
+part of the model that actually carries a content's identity through the moves. Carrying
+identity is a mechanism that must hold on a system the model has never seen: the same
+delta-rule write/read geometry, the same transition operator, on alpine and on postgres. Its
+gradient should therefore point the same way in image after image. Predicting from remembered
+surface statistics of a particular image's filesystem lowers the training loss just as well
+but points a different way in each image, so its sign EMA decays toward zero. Under the gate,
+the first kind of direction gets up to agree_cap = 2.5x of the tensor's step budget and the
+second kind gets pushed toward agree_floor. The prediction is that the trunk, the FiLM/fuse
+path and the (D,D) transition readout — all of which sit in the gated group — spend more of
+a fixed step budget on the transferable part of the fit.
+
+WHAT I EXPECT TO SEE
+
+comp_ca above the parent's +0.0225, driven by a higher native_hit on held-out images with
+swap_stayed roughly unchanged (the gate has no reason to move the chain-position shortcut,
+which is exactly why it is worth measuring: if the gain arrives as a drop in swap_stayed
+instead, the mechanism did something other than what I claim). Training loss at the end of the
+budget should be equal to or slightly WORSE than the parent's — the gate deliberately declines
+to spend the budget on directions that only fit some systems — while the held-out measurement
+improves. If final training loss improves too, the gate is probably acting as a plain
+preconditioner and the invariance story is not what happened. All of this is UNMEASURED; I
+cannot run the harness from the jail.
+
+WHY NO OTHER AXIS CHANGES
+
+The mechanism is a statement about the optimiser's update rule only. It needs the batcher to
+keep blocking batches by image, which the parent's batcher already does with the parameters it
+already has, so the batcher is kept verbatim rather than co-designed; changing it would
+confound the gate with a change in what "an environment" means. Every other axis is the
+parent's, verbatim.
+
+WHAT I KEPT FROM THE PARENT AND WHY
+
+Everything else in the flat-basin regime is unchanged and untouched: Muon on the (key_d x d)
+addressing projections, the soft spectral cap on the (D,D) transition readout, the carried
+layerwise sharpness-aware displacement, the warmup/hold/cosine/floor schedule, and the
+constant-LR tail averaging. This is a targeted edit; only the bulk optimiser's update rule
+changed. In particular the Muon group is NOT gated: Muon's update is orthogonalised, and a
+coordinatewise multiplier would destroy the spectral property that is the whole point of using
+it on the addressing pairs. Gating there is a separate experiment, not this one.
+
+CORRECTNESS NOTES
+
+- No new model parameters are introduced, so there is nothing that could fail reachability by
+  living under no_grad or on an untaken branch. The optimiser hyperparameters this impl adds
+  all act on the live update of parameters that already receive gradient from the training
+  loss and already affect the prediction at the scored read position; none of them is inert at
+  the values the genome sets (agree_floor 0.2 < 1 and agree_renorm 1 keep the gate live).
+- Nothing here indexes the token sequence, so the odd-length [cmd_0, obs_0, ..., cmd_r] layout
+  is not a hazard for this axis; the impl only ever sees a flat parameter list.
+- _AgreementAdamW subclasses torch.optim.Optimizer (required: LambdaLR type-checks its
+  argument) and adds only gate_clock / gate_start / gate_ramp / _ramp, none of which collide
+  with Optimizer's own names. It is not an nn.Module.
+- With the gate branch skipped the update is arithmetically identical to torch.optim.AdamW:
+  m/(1-b1^t) divided by sqrt(v/(1-b2^t)) + eps, with decoupled decay p *= 1 - lr*wd applied
+  ungated. Bias correction is per-parameter (state "n"), as in torch.
+- The gate is exactly 1 for the first gate_start steps and ramps linearly over gate_ramp
+  steps, so it never acts on a sign EMA that has not filled; gate_start is floored at the end
+  of LR warmup.
+- No host synchronisation is added: there is no .item()/float() on any gated quantity, and the
+  gate is built from elementwise ops and one reduction that stays on device. Cost per step is
+  one extra sign, one EMA, and a handful of elementwise ops per bulk tensor, plus one extra
+  state tensor per bulk parameter. This is negligible against the forward/backward, so the
+  fixed step budget is unaffected — UNMEASURED, but bounded by inspection.
+- Non-finite gradients are skipped per parameter, as the parent's Muon already does, and the
+  gate is passed through nan_to_num with a fill of 1.0 so a degenerate tensor falls back to the
+  ungated update rather than to a zero step.

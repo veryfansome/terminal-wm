@@ -1,0 +1,83 @@
+AXES CHANGED: stream only (r3_srcdst_hashslot_coding -> r6_generation_slot_address_coding).
+objective / arch / optim / target / batcher / head keep the parent's impls and params verbatim.
+The mechanism is entirely a change to what a command token says about its two path arguments;
+it introduces no parameters and needs no cooperating change elsewhere, so touching a second axis
+would only add confounds to the comparison against the parent.
+
+WHAT THE PARENT DOES AND WHERE I THINK IT RUNS OUT
+The parent codes each command as its standardized embedding PLUS a k-sparse signed hash of the
+source path in one 352-wide block and the same hash of the destination path in a second block at
+aligned offsets, so a fixed coordinate permutation turns "the path I read from" into "the path
+somebody wrote to". That makes one hop of a move chain a dot product. Two properties of that
+address bother me. First, it is ADDED on top of the standardized command embedding, so the block
+still carries the carrier: two mv commands over near-identical path strings have strongly
+correlated carriers, and the carrier term sits in the same coordinates as the address term, so the
+match statistic is the address inner product plus a large, command-similarity-driven nuisance.
+Second, the alphabet is fresh noise per window: every path in every image draws its own random
+pattern, so the addressing map (in this genome, file_read / file_write and path_read / path_write,
+which are LINEAR maps of the command token into a 64-dim key) has to be a generic
+compare-two-random-codes operator that must hold up on images it never trained on, learned inside
+a fixed 4000-step budget on a 176-wide trunk.
+
+THE MECHANISM I ADD
+Every destination this environment writes is the string `<some existing path>.<n>`, and n is the
+move's ordinal inside the window: I checked all 134 mv steps in evolve/jail_data/train_sample.jsonl
+and the trailing integer of the destination equals that step's move index plus one in 134 of 134.
+The source of the next move in a chain is that same string, so the trailing integer is a complete,
+purely lexical GENERATION number: 0 means "an original location", k means "the location created by
+the k-th move of this window", and inside a window a generation k >= 1 names exactly one location.
+Nothing but the command's own string is needed to read it off.
+
+So I narrow the two path blocks to 312 coordinates each and spend the freed 80 coordinates on a
+generation channel that is OVERWRITTEN rather than added: coordinates 624-663 carry the source
+generation and 664-703 the destination generation, index for index, drawn from ONE shared 16-entry
+codebook. A codebook entry is a row of a 16-point Sylvester-Hadamard matrix written twice under a
+fixed column permutation (so two distinct generations are EXACTLY orthogonal over those 32
+coordinates, not orthogonal-in-expectation) followed by a present flag, a linear ramp and a
+half-period sine/cosine pair so ordinal distance stays linearly readable. Everything else --
+interleave layout, observation tokens, the sparse path hash, the verb block, the seven form flags,
+the gains -- is the parent's.
+
+WHY IT SHOULD MOVE comp_ca
+It converts the pointer alphabet the chain is chased through from per-window random to a global
+fixed set of 16 vectors that is identical in every trajectory and every held-out image. The
+addressing maps no longer have to be a generic random-code comparator that generalizes across
+images; they have to separate 16 recurring, mutually orthogonal directions, which is a far smaller
+thing to learn inside the step budget and cannot be broken by an unseen filesystem. And because
+the channel replaces the carrier instead of riding on it, the hop statistic is clean. On the real
+depth-5 window I reconstructed from the sample, the read command's source-generation code scores
+137 against the destination-generation code of the move that actually created the location it
+reads, and at most 9 against every other move in the window; the parent's path channel scores 103
+against that same move but 53 and -49 against two unrelated moves, purely from carrier overlap.
+That is the per-hop signal-to-nuisance ratio the differential is built on. I expect the gain, if
+there is one, to show up mostly in the d4+ windows, where the number of hops is what fails.
+
+WHAT WOULD FALSIFY IT
+comp_ca at or below the parent's -0.0037 with native pick rate unchanged would say the hops were
+never the binding constraint and the address was already good enough. comp_ca up but native pick
+rate down would say I bought hop sharpness with the 80 coordinates of carrier I deleted and the 40
+coordinates of path hash I gave up, and the trade is not worth it. All performance statements here
+are unmeasured: nothing has been trained, and the numbers above are properties of the coding, not
+of a model.
+
+WHY IT CANNOT HAND OVER THE ANSWER
+The generation of a path is a pure function of that path's own string, so the coding is
+position-wise and prefix-causal, and the token at the READ position is bit-identical under the
+native chain and under a chain in which two contents exchange their moves -- verified directly on
+a reconstructed depth-5 window: only the two re-encoded move rows change, the read row does not.
+It also means any predictor that keys on the read command alone, generation included, still
+contributes exactly zero to the differential. The chain itself is not resolved anywhere in the
+stream: the generation channel says which slot a command reads from and which slot it writes to,
+and the model still has to carry a content across every one of those slots.
+
+RISKS
+The generation number is also a move ordinal, so this channel makes chain POSITION more legible
+than the parent made it, and chain-position keying cancels only in expectation on a frozen slice.
+Position embeddings already expose move order to this arch, so I expect the marginal effect to be
+small, but if comp_ca rises together with shortcut_leaning, that is the explanation to check
+first. Second risk: I assume the role-swapped arm keeps the same destination strings attached to
+the same move positions, so generations stay consistent in both arms; if instead a swap can
+produce a chain whose source generation exceeds its destination generation -- a configuration
+never seen in training -- part of any measured difference would be the model reacting to an
+impossible input rather than tracking content. Third, real system paths ending in `.<digits>`
+(three in the whole sample) pick up a spurious generation; the path hash still separates them.

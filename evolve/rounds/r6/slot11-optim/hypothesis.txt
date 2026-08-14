@@ -1,0 +1,116 @@
+CROSSOVER: parent g0-16-retrieval-composition (arch r22_retrieval_composition_renderer,
+head r18_transition_forwardmodel_consistency) x partner (head r5_chainhop_hindsight_transport).
+AXES CHANGED: optim (new impl), head (taken from the partner). Arch, objective, batcher, stream
+and target are the parent's, verbatim.
+
+THE MECHANISM (optim): isometric address geometry via Riemannian optimisation on a fixed-radius
+Stiefel manifold.
+
+Every store in this genome is an associative memory addressed by a key. The arch writes obs
+content into a delta-rule store at k = unit(W_write x) and reads it back at q = unit(W_read x);
+the latent-transition store addresses with unit(W_tr x); the quotient that removes the verb
+subspace is spanned by the verb codebook. A read of that store returns sum_i <q, k_i> v_i, so the
+content that comes back at a read is the content that was written there only if the address family
+is incoherent. If W has a large condition number, whole directions of the command-feature space
+are squashed to near-zero and distinct paths land on nearly the same address; the read then
+returns a blend, and a blend is exactly what a chain of moves must not produce. Nothing in the
+current training loop pushes W towards being well conditioned, and because every address is
+unit-normalised downstream, the Frobenius scale of W is a pure nuisance direction that gradient
+descent is free to spend steps on.
+
+So: constrain the address matrices to be isometries up to a frozen scale, and optimise them on
+that manifold rather than in the ambient space. Concretely, for a 2-D weight W (m x n, m <= n)
+selected as an address projection, with s0 = ||W_init||_F / sqrt(m) fixed at construction:
+
+  init      W <- polar(W) * s0                       (Frobenius norm exactly preserved,
+                                                      only the singular spectrum is flattened)
+  each step U   <- g + mu * buf                      (the parent's Muon momentum)
+            U   <- U - sym(W_hat U^T) W_hat          (Stiefel tangent projection, W_hat = W/s0)
+            O   <- NewtonSchulz_orth(U)              (the parent's Muon orthogonalisation)
+            O   <- O - sym(W_hat O^T) W_hat          (re-project: orthogonalisation is not tangent)
+            W   <- W - lr * rms * sqrt(max(m,n)) * O
+            W   <- lerp(W, polar(W) * s0, tau)       (damped polar retraction back to radius s0)
+
+polar() is a Newton-Schulz polar factor: four quintic Muon iterations followed by two cubic
+1.5X - 0.5 X X^T X polish steps, which I verified numerically drives the condition number of a
+random (64,176) init from ~3.7 to 1.0010 and holds it at ~1.00006 across optimiser steps while the
+Frobenius norm is preserved to within 0.2%. This is Riemannian gradient descent with a polar
+retraction (Absil/Mahony/Sepulchre; the same construction as Cayley-SGD for orthogonality
+constraints in deep nets), imported into an optimiser that until now only orthogonalised the
+UPDATE. Orthogonalising the update says nothing about the conditioning of the weight; this
+constrains the weight itself.
+
+WHY THE SELECTION RULE HAD TO CHANGE, AND WHY THAT IS THE CROSSOVER. The parent routes to Muon by
+"output width == key_d AND at least two tensors share the shape" - a sibling rule that
+structurally cannot see a lone address projection. The partner's head installs exactly such a
+tensor: r5_chainhop's path_key is a single (48, 256) bias-free matrix through which BOTH the
+source address and the destination address of the move-transport memory are encoded. It is the
+single most compositional-depth-relevant matrix in the combined genome - if source and destination
+addresses collapse, the head's erase-at-source wipes the destination it just wrote - and the
+parent's optimiser would have left it to plain AdamW. The new rule is shape-family-free: a 2-D
+weight whose narrow side is in [8, 96] and whose wide side is at least 2x the narrow side. On this
+genome that selects exactly {file_read, file_write, path_read, path_write, tr_path, sys_val,
+verb_codebook, path_key} and nothing else - verified by enumerating every parameter shape in
+r22 + r5; every gate (output width 1), the read_mix router (width 3), ctx_proj (96x176, fails the
+aspect test), all FFN/attention blocks and all D-wide readouts are excluded.
+
+WHY THE HEAD MOVES WITH IT. The parent's head supervises the arch's one-step transition operator
+f(obs_pre, cmd); it trains a forward model, not multi-hop routing. The partner's head is a
+move-transport memory - read at source, write at destination, erase at source - with per-hop
+hindsight supervision that trains the store's value AT ITS OWN DESTINATION ADDRESS at the
+intermediate steps between an exposure and a re-read. That is a mechanism for the thing the metric
+actually pays for: carrying one content's identity through a chain of moves. Its only defence
+against source/destination collapse is a scalar role loss on cos(k_s, k_d); the isometry
+constraint on the shared path_key is the geometric half of that same defence, and neither half is
+available in the parent. The two axes need each other: the head supplies a store whose addresses
+carry roles, the optim supplies the conditioning that keeps those roles separable.
+
+SECONDARY, AND SUBORDINATE: weight decay is applied only to multi-dimensional weights, and 1-D
+parameters that are exactly zero at construction and D long - the zero-init injection gains
+(the head's out_scale, tr_read.bias, comp_out.bias) - form their own undecayed group at 2x the
+base learning rate. These are the channels through which any retrieved content reaches the
+prediction at all; under a fixed step budget an Adam step moves them at most ~lr per step from
+exactly zero, so they are the slowest thing in the model to wake up. The (D,D) soft spectral cap
+from the parent is kept unchanged (it still binds on tr_read).
+
+WHAT I EXPECT TO SEE. comp_ca above the parent's +0.0037, driven by the swapped arm: a
+better-conditioned address family should reduce blended reads, so the native chain should more
+often return the content actually routed there while the role-swapped chain returns the partner's
+content - the difference, not the level, is what should move. If instead the model is currently
+keying on chain position, this change should be roughly neutral, because address conditioning
+gives no advantage to a first-mover lookup: the retraction is content-agnostic and applies
+identically to both arms. A neutral result with an unchanged shortcut_leaning reading would say
+address collision is not the binding constraint here, which is itself the useful negative.
+
+FALSIFIABLE / HOW IT COULD BE WRONG. (1) Freezing the Frobenius radius of the selected matrices
+removes a degree of freedom. For file/path/tr/path_key that is free (unit-normalised downstream)
+and for verb_codebook it is free (Gram-Schmidt normalises each row anyway), but sys_val's output
+goes through a tanh with no downstream renormalisation, so its input gain is pinned at init - if
+the model needed to sharpen or soften that saturation, it can now only do so through sysfilm.
+(2) The isometry could be actively wrong: if the right solution is for many distinct commands to
+map to ONE address (all reads of the same path, whatever the verb), a well-conditioned projection
+forces that decision up into the trunk instead of letting W collapse. I claim the trunk has more
+context and the quotient already removes the verb subspace, but that is an argument, not a
+measurement. (3) Swapping the head drops the transition-operator supervision that r22's renderer
+was co-designed with; the arch still runs (r5 wraps forward and is arch-agnostic) but the
+transition path loses its aux teacher.
+
+PERFORMANCE, UNMEASURED ON THE REAL LANE. Eight address matrices, each step costing one
+Newton-Schulz orthogonalisation (as the parent already paid on six) plus two m x m tangent
+projections and a six-iteration polar retraction. On CPU with synthetic gradients over a mock of
+this genome's exact parameter shapes the whole optimiser step went from 13.6 ms to 15.0 ms, ~+10%
+of optimiser time; against an arch that runs a Python loop over n_cmd with bmm plus the head's
+own rollout loop this should be a small fraction of a training step, but I have not run the real
+harness and do not claim a measured step time.
+
+CORRECTNESS NOTES. The impl introduces no learnable parameters and no branch on sequence layout,
+so it is indifferent to the odd-length scored layout [cmd_0, obs_0, ..., cmd_r]; it never sees a
+sequence. Every parameter it touches is an arch or head parameter that already receives gradient
+from the training loss. It exposes make(params, steps, **p) -> (optimizer, scheduler) exactly, the
+optimizer accepts zero_grad(set_to_none=True) and step(), and the scheduler exposes step() and
+get_last_lr(). Genome params are left empty so all defaults ride. Falls back to plain
+AdamW + LambdaLR when no matrix matches the address signature, and to a no-op cap when no (D,D)
+readout exists. Non-finite gradients are skipped and every Newton-Schulz output is nan_to_num'd
+before it is applied. Verified by direct execution: address selection on a mock with r22 + r5's
+exact shapes, condition numbers, Frobenius preservation, the tall-matrix orientation branch, the
+no-address fallback, and the spectral cap engaging.

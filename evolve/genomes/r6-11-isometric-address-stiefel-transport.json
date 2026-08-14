@@ -1,0 +1,36 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r22_retrieval_composition_renderer",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "head": {
+   "impl": "r5_chainhop_hindsight_transport",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r6_isometric_address_stiefel_transport",
+   "params": {}
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

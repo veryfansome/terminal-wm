@@ -1,0 +1,58 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r22_observation_occlusion_denoising",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "head": {
+   "impl": "r4_registry_transport_composite",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r6_crossenv_agreement_gate",
+   "params": {
+    "agree_beta": 0.97,
+    "agree_cap": 2.5,
+    "agree_floor": 0.2,
+    "agree_renorm": 1.0,
+    "agree_tau": 0.2,
+    "avg_frac": 0.25,
+    "beta2": 0.95,
+    "floor_ratio": 0.12,
+    "gate_ramp_frac": 0.18,
+    "gate_start_frac": 0.12,
+    "hold_frac": 0.3,
+    "key_d": 64,
+    "lr": 0.0005,
+    "momentum": 0.95,
+    "ns_steps": 5,
+    "rho": 0.05,
+    "rms_match": 0.2,
+    "spectral_cap": 4.0,
+    "spectral_iters": 2,
+    "warmup_frac": 0.04,
+    "wd": 0.0005
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

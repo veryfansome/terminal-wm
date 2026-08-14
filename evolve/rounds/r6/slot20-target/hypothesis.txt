@@ -1,0 +1,113 @@
+AXES CHANGED: target only (equal_mass_normal_score_target, replacing confusion_discriminant_metric).
+All six other axes are the parent's verbatim.
+
+MECHANISM
+
+The parent re-metrizes the observation space with one global 768x768 linear operator built from
+second-moment statistics: whiten by the total moment, then gain up the eigendirections of a
+near-neighbour difference moment. Any such map is linear, so it can only reweight DIRECTIONS: it
+applies the same stretch to a pair of observations whether they sit on top of each other or on
+opposite sides of the cloud.
+
+This candidate changes the axis of adaptation. It applies no direction reweighting at all. Instead
+each of the 768 (already per-dimension standardized) coordinates gets its own strictly monotone
+piecewise-linear map whose x knots are that coordinate's empirical equal-mass quantiles and whose
+y knots are the standard-normal quantiles of the same probability levels — the probability integral
+transform, then the normal score, estimated once from a stride-subsample of training targets spread
+over the first 200 steps and then frozen. to_obs is the same piecewise-linear function read in the
+other direction, so the pair is exact by construction (measured max round-trip error 7e-7 on
+standardized-scale inputs, 8e-6 at 25 sigma).
+
+The reason to want this: the local slope of the probability integral transform is proportional to
+the DENSITY. Squared error in the transformed space therefore measures the probability mass lying
+between the prediction and the truth, not the raw distance — which is the quantity a forced-choice
+retrieval actually decides on, namely how many other observations sit between the two. It stretches
+the value regions where observations pile up and compresses the regions where they are already far
+apart. No linear re-metrization can express that, because it is a reallocation of resolution ALONG
+the value axis inside a coordinate rather than across coordinates.
+
+WHY THIS SHOULD MOVE comp_ca
+
+The scored read exposes N contents at N locations and asks which content the model puts at one
+location. The candidates being separated are near-duplicates of each other: same cwd, same exit
+code, same command shape, differing only in file content (in the training trajectories, e.g. the
+16-hex-char body of a .dat file). Two such observations sit inside the dense core of essentially
+every embedding coordinate, so their separation is a tiny fraction of the coordinate's range, and a
+squared-error objective on raw standardized targets treats getting that separation wrong as almost
+no error at all. Meanwhile an ls output versus a cat output are far apart in the tails and already
+trivially distinguishable, yet dominate the loss. The transform inverts that budget without
+changing the overall scale of the target.
+
+On a synthetic mixture built to have that structure (dominant cluster with a low-rank discrete
+content code, other verb clusters, one exactly-repeated plateau class, then per-dimension
+standardization), the fitted map amplified mean squared distance between same-cluster
+different-content pairs by 13.8x while leaving across-cluster distance unchanged (x1.00), and the
+per-dimension target scale stayed at 1.007 against an input scale of 1.007 so the objective's
+temperature, ring and margin constants stay calibrated. That is a property of the mechanism on
+synthetic data, NOT a performance claim: nothing here has been run against the real harness, and
+miniature probes in this project have inverted rank in both directions.
+
+FALSIFIABLE PREDICTIONS
+
+1. The fitted map is materially non-linear: per-dimension segment slopes span close to the imposed
+   4x-of-median cap in a large fraction of dimensions. If instead the embedding marginals are near
+   Gaussian, the map is near the identity, the candidate is near-identical to the identity-target
+   baseline, and comp_ca lands within noise of -0.0075 rather than of the parent.
+2. Native pick rate rises relative to the parent while chance does not (the transform is one global
+   frozen function applied identically to every window, every candidate and every arm, so it cannot
+   move swap_stayed except through the model it trained).
+3. comp_ca beats the parent's -0.0000. If it does not, the specific thing to look at is whether
+   native rose at all: a rise in native with no rise in comp_ca would say the extra resolution
+   bought generic retrieval and not content tracking, which is the distinction this objective exists
+   to make.
+
+WHY NO OTHER AXIS CHANGES
+
+The genome's engine is a copy path: the arch adds retrieved raw observation embeddings into the
+command-position prediction, and the head adds a routed copy through a per-dimension out_scale. A
+target transform breaks the alignment of that copy — the copied vector is no longer the tensor being
+predicted. This transform is DIAGONAL, one scalar function per coordinate, and the arch already
+applies a per-dimension state-conditioned affine to exactly that prediction
+(pred_cmd * (1 + g_sys) + b_sys, both [.., D]), which can locally linearize a per-coordinate monotone
+warp around the copied value. A full 768x768 rotation, which is what the parent's map contains,
+cannot be re-expressed by that FiLM at all. So this transform needs less arch help than the parent's
+did, and I changed no arch, head, objective, optim, batcher or stream code.
+
+WHAT I BUILT FIRST AND REJECTED
+
+I first built and tested a trainable unit-determinant linear metric (bounded per-dimension log-gains
+plus a Householder-orthonormal K-dimensional subspace gain, all log-gains sharing one offset so
+det F = 1 exactly, so gradient could only REALLOCATE precision, never shrink the problem). It is
+exactly invertible and every parameter receives gradient and reaches the read. It is also degenerate:
+jointly descending on the model and on the metric is winner-take-all, because the metric's cheapest
+move is to point at whatever the model already predicts best, which then gets predicted better still.
+On a synthetic world with one large, fully predictable nuisance direction, the descent version
+amplified that direction ~4x versus a random direction and dropped 64-way forced choice from 0.799 to
+0.783/0.729/0.787 over three seeds. Reversing the gradient (a unit-volume ADVERSARIAL metric, a
+directional DRO) correctly suppressed the nuisance but was worse still, 0.799 -> 0.354/0.308/0.313,
+because it reweights by unpredictability rather than by discriminability. Both failures share one
+cause: the loss gradient ranks directions by how well the model does on them, which is not what the
+retrieval decides on. That is why the mechanism I shipped is estimated from the DATA's own marginal
+distribution with no model in the loop and no trainable parameters at all.
+
+RISKS
+
+- Biggest: the copy path. If the genome's compositional ability lives entirely in adding a retrieved
+  raw observation embedding into the prediction, then warping the target degrades it, and the
+  per-dimension FiLM argument above is an argument, not a measurement.
+- The knots come from the training split and are applied to windows held out by image. A monotone
+  map extrapolates linearly outside its knots and cannot become non-monotone, so shift degrades the
+  map gracefully rather than breaking it, but the equal-mass property is only exact in-distribution.
+- The target space changes abruptly at step 200 (identity before, warped after). The optimizer's
+  warmup ends around then, so there is LR available to re-converge, but it is a discontinuity.
+- Amplifying the dense core also amplifies whatever encoder noise lives there. The slope cap
+  (4x the dimension's median slope), the per-dimension unit-variance calibration and the
+  identity fallback for dimensions with no spread bound this, but do not remove it.
+
+COST AND SAFETY
+
+No trainable parameters (the parent also has none), so nothing new to reach. One searchsorted plus
+four gathers per call: measured 3.4 ms per training call for 1400x768 on MPS and 6 ms on CPU, and one
+0.3 s fit. Fits and runs on cpu, mps and any device torch.searchsorted supports. Fails closed: any
+exception, non-finite knot or non-monotone knot vector during the fit sets a dead flag and both
+directions stay exactly the identity for the rest of the run.

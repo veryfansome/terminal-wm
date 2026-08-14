@@ -1,0 +1,83 @@
+AXES CHANGED: stream only (baseline_interleave -> r6_move_ordinal_hadamard_ledger). arch, head,
+objective, optim, target and batcher keep the parent's impls and params verbatim.
+
+WHY ONLY THE STREAM. The parent's genome is almost entirely address-matching machinery. The head
+builds a read address and a write address from each command token with two heads off one shared
+encoder, scores read-against-write agreement into a causal link matrix, and solves the chain in one
+triangular system. The arch does the same thing again in its own delta-rule memory: file_read /
+file_write and path_read / path_write are computed from the command token and used as the key that
+content is written to and later read from. All of that resolution machinery is fed by a single
+signal - the frozen encoder's standardized embedding of the command string. The locations a cups
+chain visits are strings that differ by one character (.../sshd_config.cfg.6 vs .../sshd_config.cfg.7,
+.../root.msg.3 vs .../root.msg.5), so that embedding is close to parallel for locations that must be
+treated as unrelated, and close to as parallel for the one pair that must be treated as identical.
+The parent therefore runs an exact-match algorithm on a signal that cannot express exact match. The
+stream is the only axis that can hand those modules a discriminative address, and it can do it
+without touching the parent's mechanism at all.
+
+WHAT THE MECHANISM IS. Every COMMAND token keeps the interleave2 layout and 640 of its 768
+standardized coordinates; 128 fixed, hash-chosen coordinates are overwritten with a two-role address
+ledger. Each role - READ (the path the command takes content from) and WRITE (the path it leaves
+content at) - carries two channels written index-for-index into the two roles, so one path yields
+one identical pattern in either role and a single shared linear map compares one command's read
+address against another's write address:
+  IDENTITY: a 32-bit Rademacher hash of the full path string (blake2b), gain 4.
+  ORDER:    a row of the 16-point Sylvester-Hadamard matrix selected by the path's ORDINAL, gain 4.
+Plus a 12-dim verb hash and 20 coordinates of ten replicated form flags (has source, explicit
+destination, mv, cat, ls, >, >>, source ordinal present, destination ordinal present, destination
+differs from source). Non-move commands write their read address into the write role, which is the
+semantics the head's gate blend already assumes. A command with no path at all is keyed by a hash of
+its own full string, so path-less commands are near-orthogonal to each other rather than sharing one
+address.
+
+THE ORDER CHANNEL IS THE NEW IDEA. In this data a move's destination is its stem with a numeric
+component appended, and that number is a counter over the window's moves: in all 24 jailed
+trajectories the cups destinations are numbered 1,2,3,... with no collision inside a sequence
+(134 of 134 cups mv destinations carry such a number; 83 of 134 sources carry one, the rest being
+chain origins). A path's final numeric component is therefore a near-unique NAME for the link that
+produced it, drawn from a vocabulary of about a dozen symbols instead of an unbounded vocabulary of
+strings. Coding it as a Hadamard row makes distinct ordinals EXACTLY orthogonal and equal ordinals
+EXACTLY identical, dense and zero-mean, rather than near-orthogonal the way independent hashes are.
+That matters because every consumer of the address compresses it hard (cmd_proj 768->176, key heads
+->64): identical addresses survive any linear map exactly, but distractor separation is what the
+compression erodes, and a finite exactly-orthogonal codebook erodes least. It also matters for
+transfer, which is what this eval measures: windows are held out by IMAGE, so the path vocabulary at
+test time is one the model never saw, while the ordinal codebook is the same fifteen vectors on
+every system. A rule expressed over ordinals is carried across images verbatim; a rule expressed over
+path hashes must be re-derived as a generic isometry. A numeric component is admitted only when it
+has no leading zero, is at most three digits, and follows a non-numeric component, which keeps
+versioned shared objects (libexslt.so.0.8.24, libcap-ng.so.0.0.0) out of the channel; across the
+24 jailed trajectories exactly one non-workspace path still qualifies.
+
+MEASURED IN THE JAIL, ON PAPER ONLY (no harness here, and no claim about comp_ca). Simulating one
+hop the way the consumers do it - project the address through a random 64-dim key map, add isotropic
+noise of the size the 640 untouched embedding coordinates would contribute at initialization, and
+ask whether the argmax over earlier commands is the command that actually produced this command's
+source - the ledger recovers the true producer for 158 of 158 real cups links at gain 6, 0.981 at
+gain 4, 0.892 at gain 3. With the ORDER channel zeroed and only the path hashes left, the same
+sweep gives 0.968 / 0.766, and the tenth-percentile margin between the true link and the best
+distractor is lower at every gain. That is why the gain is 4 rather than 1 and why both channels are
+present: at gain 1 the untrained address heads cannot see the ledger over the embedding at all.
+
+WHAT I EXPECT. The head's link matrix and the arch's delta memory should sharpen per hop, and
+because comp_ca is a difference between two arms over the same board, sharper hops should show up
+mostly at depth 4+ windows, where the parent's per-hop softmax mass compounds worst. I expect native
+pick rate to rise and swap_stayed to fall together, since a model that actually follows the re-encoded
+move commands must answer differently in the two arms.
+
+CANCELLATION AND THE SHORTCUT BAND. The coding is a pure function of one command string with no
+cross-command state, so it is prefix-causal, and the read command is the same string in both arms:
+I verified that command_code_values of the read command is bit-identical under a native chain and a
+role-swapped chain over the same board, and that only the re-encoded move commands change. Nothing
+in the coding resolves the chain; the ordinal names a LINK, never a content, and recovering the
+content still requires walking the links. Location-keying still cancels exactly, per window.
+
+RISK. The ordinal is a property of a location's NAME, and a model could learn to key on the ordinal's
+numeric value as a proxy for position in the move order rather than following the links, which is the
+chain-position family that does not cancel per window on this frozen slice. I expect that to be
+visible as shortcut_leaning rather than as a real gain, and the ordinal codebook is deliberately
+cyclic (n -> row ((n-1) mod 15)+1) and unordered - Hadamard rows carry no metric ordering, so nothing
+in the code makes "later ordinal" linearly comparable to "earlier ordinal". Second risk: overwriting
+128 coordinates at gain 4 makes the address about three quarters of the command token's energy at
+initialization, which demotes the command semantics the general next-observation loss depends on;
+if that loss governs what the shared trunk learns, the routing win could be paid for elsewhere.

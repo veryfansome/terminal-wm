@@ -1,0 +1,107 @@
+AXES CHANGED: head only (r3_rename_registry_occupancy_routing -> r6_chain_closure_link_router).
+Every other axis is the parent's verbatim. The mechanism consumes what the parent's stream
+(r5_shared_pathid_signed_role_binding) already puts in the command token — a role-signed path code —
+so the stream must NOT change with it; changing it would remove the very structure the router keys on.
+
+MECHANISM
+
+The parent head is a sequential slot registry that re-addresses slots step by step. This is a
+rewrite to a different object: a provenance LINK MATRIX closed in one triangular solve, i.e. the
+transitive closure of "which earlier command deposited the content that this command is now
+reading". The lineage of the idea is the temporal link matrix of a differentiable neural computer
+(Graves et al., 2016), where a link matrix records write-order adjacency and reads are obtained by
+iterating it; here the adjacency is not write-order but LOCATION provenance, and instead of
+iterating it k times I take the exact fixed point, which is available in closed form because the
+matrix is strictly lower triangular.
+
+Per command position i (features are that command's own token only, never an observation):
+
+  ka_i = unit(K_id  c_i),  kb_i = unit(K_role c_i),  mu_i = sigmoid(w_m . c_i)
+
+  link logit  l_ij = s_id <ka_i,ka_j> + s_role (1 - 2 mu_j) <kb_i,kb_j>
+                     + assert(c_j) - s_rec log(1 + i - j)          for j < i
+  row i is softmaxed over {null(c_i)} U {j < i}  ->  A_ij   (strictly lower triangular)
+
+  fixed point   V = diag(mu) A V + (1 - mu) OBS
+  read          R = A V
+
+The signed term is the whole point and it is not learnable from nothing — the token already
+contains it. The stream writes, for every path a command names, a role-signed atom: +R(path) when
+the path is the command's source or plain argument, -R(path) when it is the destination or redirect
+target. So <kb_i, kb_j> is POSITIVE when command i's location matches a location j named in the
+same role and NEGATIVE when it matches the location j wrote INTO. Multiplying that term by
+(1 - 2 mu_j) makes one gate decide both halves of the semantics: a depositor (mu_j -> 1) is linked
+to through the location it moved content INTO, and it contributes the content it carried in; an
+asserter (mu_j -> 0) is linked to through the location it read, and it contributes its own
+observation. That is exactly the shell semantics in this pack: `mv A B` and `cat A > B` produce no
+output and deposit at B what was at A; `cat A` and `ls A` produce output and reveal what is at A.
+
+Because diag(mu)A is strictly lower triangular it is nilpotent, so the fixed point is exact and
+costs one unit-lower-triangular solve (with an explicit forward-substitution fallback on devices
+without solve_triangular). Chain depth is not a hyperparameter and there is no per-step slot loop:
+a depth-8 chain and a depth-1 chain are resolved by the same solve.
+
+WHY IT SHOULD MOVE THE OBJECTIVE
+
+1. Structural: the parent head reads only positions 0..m-1 of a 2m+1-long stream, so on the scored
+   layout [cmd_0, obs_0, ..., cmd_r] its registry contributes NOTHING at the read that is scored —
+   it can only shape the trunk indirectly. This head computes the read at (L+1)//2 command
+   positions, which INCLUDES the final command whose observation is absent because it is the
+   answer, and injects it there through an identity-initialised (D,D) readout times a per-command
+   gate. The mechanism is present at exactly the position the metric looks at.
+
+2. Differential: a predictor keyed on which location is being read is identical in both arms and
+   cancels per window. This router cannot be that predictor: the read location only selects which
+   link is followed; what comes back is the content the chain deposited. Under the role-swapped
+   chain the move commands are re-coded, the links land on a different depositor, and the returned
+   content changes — so native_hit and swap_stayed come apart. It is also not a chain-position
+   lookup: the link requires a path match in the code blocks, and the recency term is logarithmic
+   in the gap, a tie-breaker between competing assertions about the SAME location rather than a
+   first- or last-mover prior. (Whether it nonetheless leans on the shortcut is a measurement, not
+   a claim I can make here.)
+
+3. Trainable signal for the closure itself. The same solve carries a one-hot ORIGIN channel, so at
+   train time the head exposes, per position, the distribution over which earlier command
+   originated the content it is reading. Two observations in one trajectory that are duplicates
+   with at least one content-free step between them are exactly a "same content, read again after
+   it moved" pair, label-free, and they give: a cross-entropy on that origin distribution (does the
+   closure terminate at the right originator), a squared-L2 InfoNCE plus MSE on the read vector
+   against the contentful observations seen so far (does it carry the right content), both weighted
+   by how many content-free steps the chain crossed, and a BCE that calibrates mu_j against whether
+   step j produced content, with the content-free prototype identified batch-wide so short-chain
+   sequences are not mislabelled. The origin cross-entropy is the term the parent's aux has no
+   analogue of: it supervises the ROUTE, not just the retrieved vector, which is what a
+   many-candidate location match needs to disambiguate.
+
+CAUSALITY / GATES
+
+A_ij is masked to j < i and V is a lower-triangular solve, so the read at command i depends on
+observations strictly before i and on no observation at or after i; the prediction at command i is
+therefore unaffected by obs_i, which is what the leakage guard perturbs. Only command tokens enter
+the logits and the gates, so nothing here needs a code_cmds of its own — the stream's coding is
+untouched and the instrument reproduces the tokens exactly as before. Indexing is written for odd
+length throughout ((L+1)//2 commands, observations padded to that width and masked). Every new
+parameter (K_id, K_role, move/assert/null/read gates, the three softplus scales, the readout)
+feeds the link matrix or the injected contribution and therefore the prediction at the final
+command position, and every one of them also receives gradient from the main loss, not only from
+the aux: the readout is initialised to 0.02*I rather than to zero, so the path is live at step 0.
+
+EXPECTED OBSERVATIONS, ALL UNMEASURED
+
+I have not run the harness. If the mechanism works I expect comp_ca above the parent's +0.0187
+driven mainly by the d4+ windows (deep chains are where a location-recency heuristic fails and a
+closure does not), with the d3 windows roughly flat; native pick rate up and swapped-held down
+rather than both moving together. The honest failure signature to look for is comp_ca up with
+native flat, which would mean the head only broke the swapped arm.
+
+BIGGEST RISK
+
+The link logits are inner products of learned projections of the FULL command token, and the token
+carries the frozen command embedding as well as the sparse code. Commands in these trajectories are
+lexically near-identical ("cat /tmp/w/cups/..."), so the embedding component has a large common
+similarity that can swamp the path-atom overlap; if K_id and K_role fail to null that common
+direction, the router degenerates into "attend to a recent similar-looking command", which is a
+lexical/positional shortcut rather than transport. The origin cross-entropy is the term meant to
+prevent exactly that, but nothing guarantees it wins. Second risk: cost. The head adds one (D,D)
+matmul at every command position plus an O(n^2 D) solve, roughly a 30% parameter and matmul
+increase over the arch, inside a fixed step budget.

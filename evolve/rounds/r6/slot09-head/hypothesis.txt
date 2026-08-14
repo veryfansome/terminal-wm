@@ -1,0 +1,109 @@
+AXES CHANGED: head only (r18_transition_forwardmodel_consistency -> r6_movechain_transport_read_nce).
+arch / optim / objective / target / batcher / stream are the parent's impls and params verbatim.
+The head change needs no other axis: it introduces no parameters, no new tensors in the forward
+path, and no change to the token stream, so the measurement instrument reproduces this candidate's
+tokens exactly as it reproduces the parent's.
+
+WHAT THE PARENT DOES, AND THE GAP I AM ATTACKING
+
+The parent's arch (r20 dual-key content-gated) carries a delta-rule transition memory: at each
+command it reads the slot addressed by p_r(cmd) = unit(tr_path(x_cmd)), applies the shared operator
+f(s,cmd) = s*(1+gamma)+beta, and writes the result to a DIFFERENT slot addressed by
+p_w(cmd) = unit(tr_path_w(x_cmd)). That recurrence is exactly the machinery a move chain needs: a
+move should read the source address and write to the destination address, and a later read of the
+destination should return what was put there.
+
+Nothing currently trains the addressing. The parent head's aux trains only f, and it trains it in
+isolation: it calls transition_from_emb on DETACHED raw observations, so p_r, p_w, the mutation gate
+and the presence gate receive no gradient from it at all. The only other route to those parameters
+is the main loss, and it enters the prediction through self.tr_read, a (D,D) Linear that the arch
+initialises to exactly zero. At initialisation d(main)/d(tr_reads) = g * tr_read.weight^T * dL/dpred
+is therefore identically zero: the entire transition recurrence starts with no gradient through the
+prediction path and has to bootstrap through that zero bottleneck. On top of that, the parent's aux
+mines triples only where the observation CHANGES (change_floor 0.25), i.e. it supervises f on the
+mutation regime and never on the preservation regime a move actually is.
+
+THE MECHANISM I ADD
+
+I capture the arch's own per-command transition read s_pre WITH GRADIENT by re-pointing the bound
+method net._transition_reads to a closure that calls the saved original and stashes its output (the
+recursion hazard is handled by holding the original bound method; no module is registered, so there
+is no parent-child cycle; nothing is stashed when grad is disabled, so eval is bit-transparent and
+the odd-length scored layout passes straight through). aux_loss then trains that read, at mined
+destination positions, with a squared-L2 InfoNCE over the other contents seen so far in the same
+window, to return the content the chain actually routed to that address. This is the retrieval shape
+the scored measurement uses, not an MSE a mean-predictor can satisfy.
+
+Destinations are mined from the batch alone, with no strings and no labels, using one exact fact
+about this data: the observation text of a step is rendered deterministically from cwd + exit +
+output, so a content read at a new address after a move is BYTE-IDENTICAL to its earlier read and
+its embedding is exactly equal. So per sequence I compute the observation distance matrix, call a
+pair duplicate below a small fraction of that sequence's mean off-diagonal distance, and call a step
+"silent" when its observation sits in a large duplicate cluster (mv and redirect steps all render to
+the same empty-output text, giving a cluster of 9-15 in a 30-step trajectory, while a re-read content
+gives a cluster of 1-3). A destination j is a contentful step whose observation duplicates an earlier
+contentful step i under a NON-duplicate command, with at least one silent step between them. An extra
+weight rides on pairs where some silent step between i and j is also close to the departure command
+and some other is close to the arrival command, which is the signature of `mv A B` naming both
+addresses, and which holds at any chain depth because the first hop always names the source and the
+last hop always names the destination. I verified this miner against evolve/jail_data/train_sample.jsonl
+with a text-similarity stand-in for the encoder: on 8 real trajectories it recovers 21 destination
+pairs, and every one of them is a genuine content-at-a-new-address case
+(cat .../g81/f604.bin -> cat .../g81/f604.bin.2 at 2 hops, cat .../g72/f654.dat ->
+cat .../etc/ssh/sshd_config.cfg.8 at 8 hops, and so on).
+
+The InfoNCE LABEL is the step's own next observation, which is the same label the main loss already
+uses at the same position. The mining decides only WHICH positions carry weight. A mis-mined pair
+can therefore only mis-weight, never mislabel — the arm cannot teach the model anything false, which
+is why I let a small base weight ride on every contentful position so the arm can never become a
+silent no-op if the real encoder's similarity structure differs from my stand-in.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca is the paired difference between the read under the native chain and the read under a chain
+where two contents exchange their move positions. Anything that keys on WHICH LOCATION is read
+cancels exactly. What survives is carrying a particular content's identity through the moves. Back-
+propagating an identity-discriminative loss through the delta-rule recurrence is the most direct
+pressure I can put on precisely that: the gradient reaches tr_path and tr_path_w (where to read,
+where to write), tr_mut_gate and the presence gate (when a step is a move rather than a content),
+tr_in/tr_out (that f must PRESERVE content across a move, the regime the parent's arm never touches),
+and the input block. I confirmed all of these receive gradient from this arm alone on the real arch
+module. There is a second, more speculative reason to expect a gain: the addresses are computed from
+x_cmd, which carries pos_scale * positional, so requiring the write key at the move and the read key
+at the later read to hit the same slot penalises addresses that depend on step index. That pushes
+against chain-position keying, which is the analytic non-tracker the brief says does NOT cancel.
+
+I keep the parent's forward-model arm verbatim, same defaults, same single randperm draw, run first
+so it sees the same RNG state; the transport arm consumes no RNG at all (top-k ties are broken by a
+deterministic tilt toward later positions, which also prefers deeper chains).
+
+WHAT I EXPECT TO SEE (all unmeasured — I cannot run the real harness from the jail)
+
+comp_ca above the parent's +0.0187, driven by the d4+ windows more than the d3 ones, since the arm
+weights destinations by hop count. In the reported diagnostics I expect native pick rate up with
+swapped-"held" down, i.e. the model following the chain rather than holding the first-mover content;
+if instead native and swapped both rise together, the arm has taught a better generic next-obs
+predictor and not a transporter, and the candidate should be read as a negative regardless of the
+scalar.
+
+CALIBRATION I DID MEASURE (on the real arch module, stand-in embeddings, CPU)
+
+At full ramp on an untrained net the transport arm is 0.73 and the parent's arm is 0.078 against a
+main loss of ~1.3; gradient norms are 0.53 for the whole aux against 1.83 for the main loss, so the
+arm takes roughly a quarter of the clipped gradient budget rather than dominating it. The arm's own
+cost is 11 ms against 273 ms for one forward at B=64, n=32 — about 4% — because it reuses the reads
+the forward pass already built and adds only n-by-n batched matmuls. Four optimizer steps run finite.
+
+BIGGEST RISKS
+
+1. Gradient through the delta-rule recurrence is now real rather than gated behind a zero-initialised
+   readout, and that recurrence contains outer-product writes with nan_to_num and clamps. If it is
+   unstable the run degrades rather than fails; the smoothstep ramp over 200 steps and the global
+   grad clip are the only guards.
+2. The aux reaches pos_scale and can shrink it. Suppressing position reliance is the direction the
+   objective wants, but pos_scale is shared with the whole trunk, so if the trunk genuinely needs
+   position this trades main-task quality for routing quality.
+3. The duplicate threshold is calibrated against a text-similarity stand-in, not the real encoder.
+   If the real embeddings put near-duplicates (an `ls` listing before and after a move) inside the
+   threshold, the silent-step classifier degrades and the mined set gets noisier — which costs
+   weighting precision but, because the label is the position's own target, cannot corrupt training.

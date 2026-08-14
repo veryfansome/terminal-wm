@@ -1,0 +1,70 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r5_dualaddress_transport_closure",
+   "params": {
+    "addr_w": 224,
+    "dst_lo": 224,
+    "erase_bias": -2.0,
+    "obs_info_bias": 4.0,
+    "ref_d": 128,
+    "ref_pd": 64,
+    "ref_recency_init": 0.1,
+    "src_lo": 0
+   }
+  },
+  "batcher": {
+   "impl": "r6_matchedrisk_ringband_blocks",
+   "params": {
+    "hard_frac_max": 0.75,
+    "ramp_frac": 0.3,
+    "n_blocks": 4,
+    "nb_k": 24,
+    "ring_floor": 0.25,
+    "proj_dim": 192,
+    "stratum_cap": 1024,
+    "stat_n": 2048
+   }
+  },
+  "head": {
+   "impl": "r5_rawaddress_dualpre_consistency",
+   "params": {
+    "mem_arm_w": 0.5,
+    "path_thresh": 0.42
+   }
+  },
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r4_twotimescale_router_polyak_tail",
+   "params": {
+    "avg_frac": 0.25,
+    "beta2": 0.95,
+    "floor_ratio": 0.1,
+    "hold_frac": 0.3,
+    "key_d": 64,
+    "lr": 0.0005,
+    "momentum": 0.95,
+    "ns_steps": 5,
+    "rms_match": 0.2,
+    "router_lr_mult": 2.0,
+    "router_out_max": 128,
+    "router_wd": 0.0,
+    "spectral_cap": 4.0,
+    "spectral_iters": 2,
+    "warmup_frac": 0.04,
+    "wd": 0.0005
+   }
+  },
+  "stream": {
+   "impl": "r5_dualrole_address_mention_code",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

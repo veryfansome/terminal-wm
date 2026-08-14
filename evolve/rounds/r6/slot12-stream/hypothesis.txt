@@ -1,0 +1,106 @@
+AXES CHANGED: stream only (baseline_interleave -> r6_isonorm_role_address_frame). arch, optim,
+objective, target, batcher and head keep the parent's impls and params verbatim. The whole point of
+the change is to feed the arch and head my parent already carries, so changing them too would
+confound the test.
+
+WHAT THE PARENT'S GENOME ALREADY HAS, AND WHAT IT IS MISSING
+
+The parent's arch (r23_dual_address_transport_pointer) is literally a transport machine for this
+task: from each command's 768-d token it computes a SOURCE address and a DESTINATION address, keeps
+a [key_d, 768] content store, reads the content sitting at the source address, writes it (or the
+step's own observation) at the destination address, erases the source, and injects the value read at
+the source into that command's prediction. The parent's head (r5_move_substitution_paired_read)
+supplies exactly the gradient that machine needs: a within-batch counterfactual in which the moves
+between an exposure and a read are substituted, with a hinge that the native arm must beat the
+substituted arm. Arch and head are both aimed at chain-following.
+
+Both are fed a command token that makes their job close to impossible. The parent's stream hands the
+address heads the frozen encoder's MEAN-POOLED embedding of the whole command string. For
+"mv /tmp/w/cups/etc/ssh/sshd_config.cfg.6 /tmp/w/cups/etc/ssh/sshd_config.cfg.7" the source path and
+the destination path are superposed in one bag-of-subwords vector, so "which of the two paths is the
+source" is not linearly present at all, and the two address heads have no way to be role-consistent.
+Worse, in this data (checked in evolve/jail_data/train_sample.jsonl, all 24 trajectories) every move
+destination is formed as <an existing location>.<k>: the board's locations are strings that differ
+from one another by a two- or three-character suffix. Under a mean-pooled encoder those strings are
+nearly collinear, so the transport memory's addresses for distinct cups locations collapse onto each
+other and a read at one location returns a blend of every other location's content. The machinery is
+present; the addressing substrate is not.
+
+THE MECHANISM
+
+Rebuild each COMMAND token as a fixed frame of five blocks (observation tokens are untouched, the
+interleave layout is untouched, CUPS_LAYOUT stays "interleave2"):
+
+  [0:192)   SOURCE address    balanced +/-1 hash of the parsed source path
+  [192:384) DEST address      balanced +/-1 hash of the parsed destination path, SAME hash family,
+                              index-aligned with the source block
+  [384:416) verb hash         balanced +/-1 hash of the verb
+  [416:448) form flags        8 flags, each written as (+v,+v,-v,-v)
+  [448:768) embedding view    a fixed 320-coordinate subset of the standardized command embedding,
+                              centred and rescaled to norm sqrt(320)
+
+Parsing: "mv A B" and "cat A > B" / "cat A >> B" give (src=A, dst=B); a command with no explicit
+destination gives (src=dst=its first positional argument), which is the exposure convention the
+transport machine wants (read at A, write this step's observation at A).
+
+Two properties do the work.
+
+(1) ROLE-INDEPENDENT, COLLISION-FREE ADDRESSES. One path yields one identical 192-bit pattern in
+either role, so "the destination of command i equals the source of command j" is a plain inner
+product between two fixed coordinate blocks, and a single linear map applied to the source block and
+to the destination block is role-consistent by construction. Two distinct paths get codes with
+expected cosine 0 and standard deviation 1/sqrt(192) ~= 0.072, and because the hash avalanches,
+".../magic.txt" and ".../magic.txt.2" are as orthogonal as any other pair. This is what turns the
+arch's rank-2 memory update into a usable one: near-orthogonal addresses mean reading at one
+location does not return its neighbours' contents.
+
+(2) ISOMETRIC FRAME. Every block is exactly zero-sum and exactly fixed-norm, so every command token
+has mean exactly 0 and squared norm exactly 768 -- the same first two moments a standardized
+embedding has. The arch's address path begins with LayerNorm over the 768-d command token; with a
+constant-geometry token that LayerNorm degenerates to one fixed scalar, identical for every command,
+instead of a per-command rescaling that varies with sentence length and lexical content. The address
+readout therefore sees the code at one scale for every step of a chain. This is the part that is
+mine: the two archived path-coding streams I was shown both leave a variable-norm residue of the raw
+embedding in the token, so their codes arrive at the address heads at a command-dependent gain.
+
+A third, smaller effect: the head mines its counterfactual using pairwise distances between COMMAND
+tokens (dup_c) to require that a read command differ from the command that exposed the content.
+Under raw embeddings two different cat commands over long shared path prefixes can sit inside that
+duplicate threshold and the pair is silently discarded; under this frame identical strings give
+distance exactly 0 and distinct strings give a large distance, so the mining decision becomes a clean
+0/large test and more genuine (expose, read) pairs survive into the paired loss.
+
+WHY IT SHOULD MOVE comp_ca, AND HOW IT CANCELS
+
+comp_ca is a paired difference between the native chain and a chain in which two contents exchange
+their moves. A predictor keyed on the location being read contributes exactly zero, and my read token
+cannot break that: the coding is a per-command pure function of the command string and that command's
+own embedding row, with no cross-command state, so the token at the read position ("cat P" with the
+same standardized embedding) is bit-identical in both arms. What differs between the arms is only the
+move tokens, whose source/destination address pairing is rewired -- which is precisely the signal the
+transport memory integrates. So any gain has to come from routing content through the moves, not from
+recognizing the location asked about.
+
+EXPECTATION (unmeasured; I cannot run the harness from the jail). I expect native_hit to rise and
+swap_stayed to fall, i.e. comp_ca above the parent's -0.0037, driven by the deeper windows (d4+)
+rather than d3, because address collision hurts more the longer the chain. I expect the plain
+next-observation quality on non-cups commands to be roughly unchanged: all cross-image semantic
+transfer now flows through the 320-coordinate embedding view, since hash codes of paths never seen in
+training are pure noise. That is the intended division of labour -- semantics from the embedding
+view, chain identity from the codes, and chain identity is image-independent by construction, which
+is what an eval held out by image requires.
+
+FALSIFIABLE PREDICTIONS. If the address substrate was not the bottleneck, comp_ca will sit at the
+parent's value while the health/pick-rate numbers drop slightly from the lost embedding coordinates;
+that outcome says the arch's transport memory is not being used at all and the next edit belongs on
+arch or head, not stream. If instead comp_ca rises but shortcut_leaning also rises, the gain is
+chain-position keying rather than content transport and should be discounted.
+
+RISKS I ACCEPT. 448 of 768 coordinates of the raw command embedding are replaced, which weakens the
+objective's command->target ridge nuisance fit (distinct commands become near-orthogonal regressors,
+so less of the target is explained away and the FWL orthogonalization does less); the retained
+320-coordinate view is what keeps that basis alive. The address heads still have to LEARN that their
+two blocks are the same family -- the frame makes that solution linear and reachable, it does not
+impose it. Cost is one dict lookup and one 448-float copy per command per step plus a 320-coordinate
+gather; no matmul and no new parameters, so training-time overhead should be a few milliseconds per
+step.

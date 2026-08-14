@@ -47,6 +47,19 @@
 #   RUNPOD_ENV_TAG      environment tag the scores are ingested under; default derives from the GPU
 #                       type, e.g. runpod-4090. Scores only compare within one tag.
 #   RUNPOD_SEEDS        seeds per genome (passed as TWM_SEEDS; pack_lane's own default is 0,1,2)
+#   RUNPOD_ROOT_SHA     encoded-root embedding sha the campaign must match (passed as
+#                       TWM_ROOT_SHA). Defaults to the published root's sha; preflight
+#                       fails closed on a mismatch. Re-pin after a deliberate re-encode.
+#   RUNPOD_CONCURRENCY  jobs in flight per pod (passed as TWM_CONCURRENCY). Unset uses the
+#                       runner's 3-per-GPU default; set 1 or 2 for a memory-heavy genome,
+#                       which is what CUDA OOM on a shared card looks like. NOTE it also
+#                       divides the CPU quota (runner.py: threads = cpu_quota() // conc),
+#                       so LOWERING it RAISES BLAS threads per job (3->1 triples them). Aggregate
+#                       demand stays inside the quota either way — only a value ABOVE the quota
+#                       oversubscribes — but per-job thread count is what changes the score, so setting
+#                       this appends '-c<N>' to ENV_TAG: every record then carries the value and
+#                       `evolve doctor` flags the split. That is an audit trail, not a firewall —
+#                       selection ignores env unless fitness.selection_env is pinned.
 #   RUNPOD_TYPES_FILTER default "4090|5090|A100|H100|L40|A40|RTX 6000"
 #   RUNPOD_ALLOWED_CUDA host driver CUDA versions to accept; default 12.6,12.7,12.8,12.9,13.0
 #   RUNPOD_PUBKEY_FILE / RUNPOD_SSH_KEY   ssh identity (auto-discovered otherwise)
@@ -89,6 +102,19 @@ TYPES_FILTER="${RUNPOD_TYPES_FILTER:-4090|5090|A100|H100|L40|A40|RTX 6000}"
 # so the tag names the hardware: "NVIDIA GeForce RTX 4090" -> runpod-4090.
 ENV_TAG="${RUNPOD_ENV_TAG:-runpod-$(printf '%s' "$GPU_TYPE" | awk '{print tolower($NF)}')}"
 SEEDS="${RUNPOD_SEEDS:-}"
+CONCURRENCY="${RUNPOD_CONCURRENCY:-}"
+# The encoded root is pulled from HuggingFace rather than re-encoded per box, so its tensors are a
+# fact about the published artefact, not about this pod. Pinning the sha makes eval/preflight
+# REFUSE a root whose embeddings differ instead of scoring against them silently — the failure it
+# catches is a wrong or stale root, which every other check passes happily. Override to re-pin
+# after a deliberate re-encode + publish (the sha is printed by `pack_lane.sh prepare`).
+ROOT_SHA="${RUNPOD_ROOT_SHA:-37801f89e25cdd3f3a8154d1fcd3b85c39c3ba8112b9d867e9588901f088d800}"
+# Concurrency divides the CPU quota into per-job BLAS threads (runner.py), and thread count
+# changes float reduction order, so it changes the score. Tagging puts that fact on every record
+# and makes `evolve doctor` flag the split. It is NOT a firewall: this project has
+# fitness.selection_env unset, and the archive filters by env only when that is pinned — so such
+# runs still enter parent sampling. Pin selection_env if you need them excluded. Unset changes nothing.
+[ -n "$CONCURRENCY" ] && ENV_TAG="$ENV_TAG-c$CONCURRENCY"
 TMUX_SESSION="${RUNPOD_TMUX_SESSION:-twm-campaign}"
 
 RUNPOD_SSH_KEY="${RUNPOD_SSH_KEY:-}"
@@ -102,14 +128,65 @@ fi
 # authorized_keys, and a pod can end up accepting that one instead of the injected PUBLIC_KEY —
 # IdentitiesOnly=yes would then lock you out of your own box. Set RUNPOD_SSH_PIN=1 to pin anyway,
 # which is what you want if a crowded ssh-agent trips the server's MaxAuthTries.
-SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30${RUNPOD_SSH_KEY:+ -i $RUNPOD_SSH_KEY}${RUNPOD_SSH_PIN:+ -o IdentitiesOnly=yes}"
+# The keepalive is what fails a dead peer, and the comparison that matters is against the flags
+# these replace, not against a bare config. `ssh -G` on this host: with the OLD flags
+# (-o ServerAliveInterval=30 alone) CountMax was inherited from ~/.ssh/config as 6, giving
+# 30x6 = 180s; with these, 30x3 = 90s. So pinning CountMax halves dead-peer detection here, and
+# makes it independent of whatever config the next operator has. ConnectTimeout is the second new
+# bound: `ssh -G` resolves `connecttimeout none` without it, so an unanswered TCP handshake waited
+# on the OS default.
+SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ConnectTimeout=30${RUNPOD_SSH_KEY:+ -i $RUNPOD_SSH_KEY}${RUNPOD_SSH_PIN:+ -o IdentitiesOnly=yes}"
+
+# Every API call is bounded. terminate is a single gql() call, so an unbounded curl would wedge
+# the one command whose entire purpose is to stop the meter, and lane.sh's terminate-confirmation
+# loop shares it — a hang there means the `die` that is supposed to catch a failed stop never runs.
+#
+# Retry is deliberately NOT part of this: a deploy that times out at --max-time may already have
+# been executed server-side, and retrying it would bill a second pod nobody is tracking. Retries
+# are added per call, and only where the request is idempotent (a read).
+CURL_TIMEOUTS="--connect-timeout 15 --max-time 60"
+# Reads get a SHORTER per-attempt budget than the sequence cap, deliberately. --retry-max-time is
+# only tested between attempts, so a cap below --max-time silently turns --retry 3 into --retry 0
+# for a stalled-but-connected peer — the exact case retry exists for (measured: 1 attempt at
+# max-time 60 / cap 45; 8 attempts once the cap sits above it). 25s is far above a healthy API
+# response, and 4 attempts still fit inside the 120s sequence cap.
+CURL_READ="--connect-timeout 15 --max-time 25 --retry 3 --retry-connrefused --retry-max-time 120"
+# A deploy creates a billing resource. If curl gives up while the server is still working, the
+# response carrying the pod id is lost but the pod may exist — and the ledger append below only
+# runs once an id has been parsed, so that pod is never recorded and `reap` shows it as UNTRACKED
+# to whoever thinks to look. Waiting for a slow deploy costs a minute; abandoning one costs a pod.
+CURL_DEPLOY="--connect-timeout 15"
+
+# GNU rsync aborts on --timeout (exit 30); openrsync does not, and there the flag can only turn a
+# recovered stall into a failed transfer. GNU prints "rsync  version 3.x"; openrsync prints
+# "openrsync: protocol version 29".
+RSYNC_TIMEOUT=""
+rsync --version 2>/dev/null | head -1 | grep -q '^rsync ' && RSYNC_TIMEOUT="--timeout=120"
 
 log() { echo "==> $*" >&2; }
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# A retried read must not stream to stdout: curl re-sends the request but does NOT unwrite the
+# bytes it already emitted, so a peer that sends half a body and stalls leaves the partial prefix
+# concatenated ahead of the good body — at exit 0, for the caller's jq to choke on. Writing to a
+# file makes curl truncate per attempt, so the caller sees one whole body or a non-zero status.
+_curl_read() {
+    local out rc=0
+    out=$(mktemp) || return 1
+    curl -sS $CURL_READ -o "$out" "$@" || rc=$?
+    [ "$rc" = 0 ] && cat "$out"
+    rm -f "$out"
+    return "$rc"
+}
+
 gql() {
     local q; q=$(jq -Rn --arg q "$1" '{query:$q}')
-    curl -sS -X POST "$GQL" -H "Content-Type: application/json" -d "$q"
+    # A GraphQL query is a safe read and worth retrying through a flaky link; a mutation is not,
+    # because a timed-out request may already have taken effect on the server.
+    case "$1" in
+        *mutation*) curl -sS $CURL_TIMEOUTS -X POST "$GQL" -H "Content-Type: application/json" -d "$q" ;;
+        *)          _curl_read -X POST "$GQL" -H "Content-Type: application/json" -d "$q" ;;
+    esac
 }
 
 # REST (Bearer auth). The two APIs are not interchangeable, so the split is deliberate: queries,
@@ -119,11 +196,19 @@ gql() {
 REST_BASE="https://rest.runpod.io/v1"
 rest() {
     local method="$1" path="$2" body="${3:-}"
+    # Retry a GET; never a deploy, because a retried POST is a second pod. And a deploy gets no
+    # --max-time at all: losing the response to a pod that was created is the expensive failure.
+    if [ "$method" = "GET" ]; then
+        _curl_read -X GET "$REST_BASE$path" -H "Authorization: Bearer $RUNPOD_API_KEY"
+        return
+    fi
+    local flags="$CURL_TIMEOUTS"
+    [ "$method" = "POST" ] && flags="$CURL_DEPLOY"
     if [ -n "$body" ]; then
-        curl -sS -X "$method" "$REST_BASE$path" -H "Authorization: Bearer $RUNPOD_API_KEY" \
+        curl -sS $flags -X "$method" "$REST_BASE$path" -H "Authorization: Bearer $RUNPOD_API_KEY" \
             -H "Content-Type: application/json" -d "$body"
     else
-        curl -sS -X "$method" "$REST_BASE$path" -H "Authorization: Bearer $RUNPOD_API_KEY"
+        curl -sS $flags -X "$method" "$REST_BASE$path" -H "Authorization: Bearer $RUNPOD_API_KEY"
     fi
 }
 
@@ -161,8 +246,13 @@ cmd_types() {
 _await_ssh() {
     local id="$1"
     log "pod id: $id — polling for RUNNING + a public SSH port (2-5 min)"
-    local ip="" port="" st="" tries=0
+    # Bounded by WALL CLOCK, not iterations. Each pass makes two retried reads, and a retried read
+    # against a stalled-but-connected API costs ~107s rather than failing immediately — so a
+    # 60-iteration counter silently became hours, on a pod that is already deployed and billing
+    # with nobody holding its id. The counter stays as a secondary guard.
+    local ip="" port="" st="" tries=0 t0=$SECONDS budget=900
     while :; do
+        [ $((SECONDS - t0)) -lt "$budget" ] || die "pod never exposed a public SSH port within ${budget}s (check the RunPod console for $id, and terminate it there if it is billing)"
         st=$(gql "query{ pod(input:{podId:\"$id\"}){ desiredStatus } }" 2>/dev/null | jq -r '.data.pod.desiredStatus // "?"' 2>/dev/null || echo "?")
         # Reset the vars and swallow the read's exit status: before the port exists _host emits
         # nothing, `read` hits EOF and returns non-zero, and under `set -e` that would abort the
@@ -194,6 +284,10 @@ _deploy_rest() {
     r=$(rest POST /pods "$body")
     id=$(echo "$r" | jq -r '.id // empty')
     [ -n "$id" ] || { echo "$r" | jq -r '.error // .message // .' >&2; die "deploy (REST + volume) failed"; }
+    # Same rule as the no-volume path: a deploy that returned has already created a billing
+    # resource, so record it before anything else can fail. Without this every volume deploy
+    # is invisible to `reap`, which greps live pods against this file.
+    _ledger "$id"
     echo "$id"
 }
 
@@ -204,6 +298,7 @@ _deploy_rest() {
 ALLOWED_CUDA="${RUNPOD_ALLOWED_CUDA:-12.6,12.7,12.8,12.9,13.0}"
 # Deploy ledger: every pod id this machine has created, appended the moment the API returns it.
 LEDGER="${RUNPOD_LEDGER:-$HOME/.runpod-pods.log}"
+_ledger() { mkdir -p "$(dirname "$LEDGER")" && echo "$(date -u +%FT%TZ) $1" >> "$LEDGER"; }
 _deploy_rest_novol() {
     local pubkey; pubkey=$(_pubkey | tr -d '\n')
     log "deploying ${GPU_COUNT}x '$GPU_TYPE' ($CLOUD), disk=${DISK_GB}GB, allowedCuda=[$ALLOWED_CUDA]"
@@ -221,7 +316,7 @@ _deploy_rest_novol() {
     # Record the id the instant it exists, BEFORE anything else can fail or be interrupted. A
     # deploy that returns has already created a billing resource; if the caller dies between here
     # and printing the id, the only trace left is this file. `reap` reads it.
-    mkdir -p "$(dirname "$LEDGER")" && echo "$(date -u +%FT%TZ) $id" >> "$LEDGER"
+    _ledger "$id"
     echo "$id"
 }
 
@@ -293,26 +388,50 @@ cmd_bootstrap() {
 
     # The base image may have none of these, and the first rsync needs rsync on both ends.
     log "ensuring rsync/git/curl/tmux on the pod"
-    _ssh_to "$ip" "$port" '(command -v rsync >/dev/null && command -v git >/dev/null && command -v tmux >/dev/null) || (apt-get update -qq && apt-get install -y -qq rsync git curl tmux)'
+    _ssh_to "$ip" "$port" 'timeout 600 bash -c "(command -v rsync >/dev/null && command -v git >/dev/null && command -v tmux >/dev/null) || (apt-get update -qq && apt-get install -y -qq rsync git curl tmux)"'
 
     # Code only. data/ and enc/ are pulled on the box from HuggingFace, .results/ and
     # cloud/podresults/ are the box's own output, and .venv/ is built there against its driver.
     # --delete removes stale code, but rsync never deletes what an --exclude covers, so
     # re-bootstrapping to ship a code change leaves the encoded roots and finished results intact.
     log "rsync repo code → root@$ip:$POD_REPO_LIT/  (code only)"
-    rsync -a --delete \
+    # What bounds a stalled transfer is the ssh keepalive above killing the transport child.
+    # --timeout is NOT that bound and is not harmless: on openrsync (the macOS /usr/bin/rsync) it
+    # logs 'poll: timeout' and keeps waiting on a true hang, while FAILING a stall that would have
+    # recovered — measured, an 8s stall then normal service gives exit 1 and an empty destination
+    # with the flag, and a completed transfer without it. It only delivers the abort on GNU rsync,
+    # so it is applied only there, via $RSYNC_TIMEOUT.
+    rsync -a --delete $RSYNC_TIMEOUT \
         --exclude=.venv --exclude=.git --exclude=__pycache__ --exclude='*.pyc' \
         --exclude='data/' --exclude='enc/' --exclude='ckpt/' \
         --exclude='.results/' --exclude='.cache/' --exclude='evolve/.cache/' \
         --exclude='cloud/podresults/' --exclude='*.pt' --exclude='*.safetensors' \
         -e "ssh $SSH_OPTS -p $port" "$REPO_DIR/" "root@$ip:$POD_REPO_LIT/"
 
+    # Bounded like the apt step above, and for the same reason: ssh keepalives fail a DEAD peer,
+    # but a stalled wheel download keeps the session alive, so nothing on the client side breaks
+    # this hang. It is also the expensive step (~12GB of locked wheels, plus the CUDA-12 swap), so
+    # an unbounded stall here is what bills a box overnight. Exit 124 surfaces as a loud failure.
     log "uv sync + CUDA smoke on the pod"
     _ssh_to "$ip" "$port" "
         set -e
-        command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
+        # Downloaded to a file, not piped: curl cannot rewind a pipe, so a retried download
+        # feeds the truncated prefix to the shell once per attempt and the pipeline still exits 0.
+        if ! command -v uv >/dev/null 2>&1; then
+            # An || group exempts its non-final commands from set -e, so a failed download used to
+            # sail past and surface later as a misleading 'uv: command not found'.
+            # No --remove-on-error here: it needs curl >= 7.83 and this image is ubuntu 22.04
+            # (curl 7.81), where an unknown option makes curl exit 2 and bootstrap fail on every
+            # pod. The rm in the failure branch does the same job on any version.
+            curl -LsSf --connect-timeout 15 --max-time 300 --retry 3 --retry-max-time 600 \
+                 -o /tmp/uv-install.sh https://astral.sh/uv/install.sh \
+                || { rm -f /tmp/uv-install.sh; echo 'uv installer download failed' >&2; exit 1; }
+            sh /tmp/uv-install.sh
+        fi
         export PATH=\"\$HOME/.local/bin:\$PATH\"
-        cd $POD_REPO && uv sync
+        # Bounded because a stalled wheel download keeps the ssh session alive, so no client-side
+        # keepalive can break it — and this is the ~12GB step that bills a box overnight.
+        cd $POD_REPO && timeout 2400 uv sync
         # The lockfile pins the default CUDA-13 torch wheels, and much of the rented fleet still
         # runs a 12.x driver, where those binaries cannot initialise. Detect the driver's CUDA
         # version and swap in the matching CUDA-12 torch INSIDE THE POD VENV ONLY — the lockfile is
@@ -324,7 +443,7 @@ cmd_bootstrap() {
         # CUDA-12 index that still ships torch 2.13.0, and its wheels run on any >=12.6 driver, so
         # the pod ends up on exactly the torch version the lockfile names.
         case \"\$drv\" in
-            12.6*|12.7*|12.8*|12.9*) uv pip install --index-url https://download.pytorch.org/whl/cu126 'torch==2.13.0+cu126' ;;
+            12.6*|12.7*|12.8*|12.9*) timeout 1200 uv pip install --index-url https://download.pytorch.org/whl/cu126 'torch==2.13.0+cu126' ;;
             12.*) echo \"driver CUDA \$drv is too old for a CUDA-12 torch 2.13 wheel — launch again for a newer-driver host\" >&2; exit 1 ;;
             *)    echo \"driver CUDA \$drv — keeping the locked CUDA-13 torch wheels\" ;;
         esac
@@ -344,7 +463,10 @@ cmd_push_raw() {
     [ -d "$src" ] || die "no such directory: $src"
     log "rsync $src → root@$ip:$POD_REPO_LIT/data/$dest/"
     _ssh_to "$ip" "$port" "mkdir -p $POD_REPO/data/$dest"
-    rsync -a -e "ssh $SSH_OPTS -p $port" "${src%/}/" "root@$ip:$POD_REPO_LIT/data/$dest/"
+    # Resume, not safety: an interrupted transfer already leaves nothing at the destination name.
+    # These are multi-GB packs over a home uplink, so re-sending from zero is the cost worth
+    # avoiding; the dotted dir keeps the retained partial obvious and out of the data root proper.
+    rsync -a $RSYNC_TIMEOUT --partial-dir=.rsync-partial -e "ssh $SSH_OPTS -p $port" "${src%/}/" "root@$ip:$POD_REPO_LIT/data/$dest/"
     echo "$POD_REPO_LIT/data/$dest"
 }
 
@@ -393,6 +515,8 @@ export UV_NO_SYNC=1                 # keep the driver-matched torch bootstrap in
 export TWM_ENV_TAG='$ENV_TAG'       # scores compare only within one environment tag
 export TWM_GPUS='$GPU_COUNT'
 ${SEEDS:+export TWM_SEEDS='$SEEDS'}
+${CONCURRENCY:+export TWM_CONCURRENCY='$CONCURRENCY'}
+${ROOT_SHA:+export TWM_ROOT_SHA='$ROOT_SHA'}   # preflight refuses a root whose embeddings differ   # jobs in flight per pod; unset means the runner's 3-per-GPU default
 ${TWM_RUN_ID:+export TWM_RUN_ID='$TWM_RUN_ID'}   # stamped into .done so a poller can tell THIS campaign's marker from a previous one's
 cd "$POD_REPO"
 mkdir -p cloud/podresults
@@ -432,7 +556,11 @@ cmd_pull() {
     _need_host "$id"
     local dest="$REPO_DIR/cloud/podresults"; mkdir -p "$dest"
     log "rsync pod cloud/podresults/ → $dest/"
-    rsync -a -e "ssh $SSH_OPTS -p $port" "root@$ip:$POD_REPO_LIT/cloud/podresults/" "$dest/"
+    # rsync already writes to a temp name and discards it on interruption, so nothing short ever
+    # appears at the destination name. --partial-dir is here to let an interrupted pull RESUME
+    # instead of re-sending, and the dotted directory keeps the retained bytes out of the way of
+    # anything that globs this directory (lane.sh's verify counts *.json here).
+    rsync -a $RSYNC_TIMEOUT --partial-dir=.rsync-partial -e "ssh $SSH_OPTS -p $port" "root@$ip:$POD_REPO_LIT/cloud/podresults/" "$dest/"
     log "pulled. If the box has no more work to do: $0 terminate $id"
     echo "$dest"
 }

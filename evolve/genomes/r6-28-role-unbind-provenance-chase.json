@@ -1,0 +1,49 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r6_role_unbind_provenance_chase",
+   "params": {
+    "d": 192,
+    "layers": 4,
+    "heads": 4,
+    "hops": 6,
+    "temp_init": 0.025,
+    "null_init": 0.2,
+    "recency_init": 0.02,
+    "stop_scale": 8.0,
+    "stop_thr": 1.6,
+    "role_scale": 2.0,
+    "role_thr": 1.6,
+    "readout_init": 1.5
+   }
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "head": {
+   "impl": "r2_dualaddress_move_transport",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r5_decision_direction_metric_quotient",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "stream": {
+   "impl": "r4_role_bound_path_atom_codes",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

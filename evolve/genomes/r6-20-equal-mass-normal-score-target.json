@@ -1,0 +1,40 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r22_retrieval_composition_renderer",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "routed_depth_sysblock_batcher",
+   "params": {
+    "block_frac_max": 0.75,
+    "depth_beta": 0.8,
+    "group_size": 4,
+    "hard_frac_max": 0.5,
+    "n_block_images": 2,
+    "ramp_frac": 0.3,
+    "size_pow": 0.5
+   }
+  },
+  "head": {
+   "impl": "routed_copy_pathchange_transport",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r22_exact_target_equivalence_quotient",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "equal_mass_normal_score_target",
+   "params": {}
+  }
+ }
+}

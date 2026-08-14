@@ -1,0 +1,93 @@
+AXES CHANGED: arch only (rewrite). batcher, head, objective, optim, stream and target are the
+parent's, verbatim. The mechanism needs no change on those axes, and three of them are load-bearing
+for it exactly as they already stand: the stream is what binds a role to each path argument, the
+optim's spectral cap is what bounds the new (768,768) content readout, and the head's aux is a
+within-sequence InfoNCE that pushes the final command prediction onto an earlier observation, which
+is the routing gradient this mechanism wants. Changing any of them would have confounded the test.
+
+MECHANISM
+
+The parent carries content forward: delta-rule stores over file and path keys, a learned latent
+transition operator, and per-step Python recurrences that write a value at a key and read it back.
+This is the opposite construction. Nothing is carried forward. One matrix is built that says, for
+every command, which earlier command last put content at the location this command refers to, and
+the answer to a read is obtained by iterating that matrix backwards until the mass reaches a command
+whose own observation shows the content.
+
+The addressing is not learned from scratch; it is read off algebraically. The stream builds each
+command token's last 128 coordinates as a sum of +/-1 Rademacher atoms, one per path argument,
+each multiplied elementwise by a +/-1 role vector for src, dst or read. Elementwise product by a
++/-1 vector is its own inverse, so unbinding a role is exactly multiplication by a fixed diagonal:
+u_role(i) = tok(i) * d_role. That makes the whole family of role-typed matches available as ordinary
+inner products, because <c_i * r_a, c_j * r_b> = <c_i * c_j, r_a * r_b>: the matched atom sums
+coherently to 0.75^2 * 128 = 72 while every unmatched channel adds an incoherent O(sqrt(128)) term.
+The module holds three learned diagonals over the full 768 coordinates, zero on the embedding block
+and initialised to the src / dst / read role vectors on the code block, derived from the same
+deterministic blake2b keys without importing the stream. They are ordinary parameters: if the
+initialisation were wrong the mechanism degrades to a learnable diagonal bilinear form rather than
+breaking.
+
+Each command emits an IN address (where its content comes from) and an OUT address (where its
+content ends up), each a gated blend of two unbindings: IN = a*u_src + b*u_read, OUT = c*u_dst +
+e*u_read. The gates are driven by one scalar the module computes from the token itself, the coded
+slot mass sum_k m_k tok_k^2 with m initialised to a uniform mass on the code block. That statistic
+counts path arguments, because each path contributes a fixed amount of squared norm: measured on the
+jail's real trajectories it is 1.18 (median) for a one-path command and 2.25 for a two-path command,
+so a two-path command routes IN to src and OUT to dst, and a one-path command routes both to read.
+The same statistic drives the STOP probability, since a command's observation shows content exactly
+when the command names one path (a cat) and is empty when it names two (an mv, a redirect): on the
+jail sample the coded slot mass separates non-empty output (max 1.49) from empty output (5th
+percentile 1.78) almost perfectly. Both rules are only the initialisation; a zero-initialised linear
+on the trunk state is added to each and takes over as training proceeds.
+
+One masked softmax over strictly earlier commands, with a learned recency penalty and a learned NULL
+column in cosine units, turns the IN-to-OUT cosines into a provenance matrix T. Because the answer to
+"who put it there" is again a command with an IN address, the SAME T is the hop operator: the chase
+is T, then T@T, then T@T@T, with mass leaving at each hop at the stop probability and accumulating.
+The accumulated mass is contracted against the raw earlier observation embeddings and injected into
+the command prediction through an identity-initialised (768,768) readout under a gate fed the
+absorbed mass, the chase sharpness and the read magnitude, and into the trunk state through a small
+gated projection. T is strictly lower triangular by an explicit mask and stays so under
+multiplication, so a command's prediction is an exact constant in its own and every later
+observation.
+
+WHY IT SHOULD MOVE comp_ca
+
+The objective is a per-window difference between the native chain and a chain in which two contents
+exchange their move positions. A predictor that keys on the location being read predicts the same
+thing in both arms and cancels to exactly zero. This mechanism cannot key on the location: what it
+returns is whatever content the chain of src/dst atoms actually routes to that location, so under
+the swapped chain it follows the swapped moves and returns the partner content. It also does not key
+on chain position; the only positional term is a recency penalty that breaks ties among commands
+matching the same address, so a first-mover lookup is not what it implements and I expect
+private.shortcut_leaning to stay low.
+
+FALSIFIABLE PREDICTION
+
+I simulated the chase arithmetic in pure Python on the jail's real trajectories, with the exact
+initial constants in genome.json and the role vectors derived as above, scoring every contentful
+single-path read whose content had been relocated by an earlier move. At initialisation, with no
+training at all, the chase puts its argmax on the correct earlier observation for 40 of 66 such
+reads (chance is about 1 in 30) with 0.57 of its absorbed mass on the correct content, and 12 of 12
+on repeated reads of an unmoved location. So the prediction is: this arch starts near the retrieval
+solution instead of having to discover addressing inside the step budget, and comp_ca should exceed
+the parent's +0.0150. If comp_ca instead lands at or below the parent, the falsifier is that a
+correct-at-init router is not what the metric was short of, and the parent's forward stores were
+already routing.
+
+Everything about run time and about the score itself is UNMEASURED: I could not run the harness from
+the jail. The simulation above is arithmetic on real command strings, not a training run, and this
+project has seen miniature probes invert rank in both directions. On cost, the arch replaces the
+parent's two Python loops over sequence length (each with a bmm per step) with five [n,n] bmms, so I
+expect it to be cheaper per step, but that is a FLOP count, not a measurement.
+
+RISK
+
+The chase fires on reads whose content was never exposed earlier: at these constants it still
+accumulates about 0.34 of mass on the wrong observation for a first-time read, against 0.65 for a
+relocated one. The injected term is the mass-weighted evidence, not the renormalised content, and
+the gate starts as sigmoid(4*mass + 2*sharpness - 2.9), which together give roughly a five-to-one
+ratio between the two cases; if that is not enough, the main loss can suppress the gate globally
+before the null level and the temperature learn to separate them, and the mechanism would go dead.
+The null level, the temperature, the recency and the stop rule are all single scalars with direct
+gradient, which is the argument that this resolves the right way, not a guarantee.

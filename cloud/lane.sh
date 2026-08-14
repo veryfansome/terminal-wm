@@ -201,8 +201,13 @@ stage_terminate() {
     $RP terminate "$id" || true
     # `runpod.sh terminate` pipes into jq with no curl -f, so it exits 0 on an API error and even
     # prints the word "terminated" for an auth failure. Confirm against the provider instead.
-    local i lst
+    # Wall-clock bounded as well as counted: each `$RP list` is a retried read, and a stalled API
+    # makes one call cost ~107s, so twelve iterations became ~22 minutes before the operator is
+    # told the box may still be RUNNING. This is the message that stops the meter — it has to be
+    # prompt even when the API is sick.
+    local i lst t0=$SECONDS
     for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        [ $((SECONDS - t0)) -lt 120 ] || break
         lst="$($RP list 2>/dev/null || true)"
         if printf '%s' "$lst" | jq -e 'type == "array"' >/dev/null 2>&1; then
             printf '%s' "$lst" | jq -e --arg id "$id" 'any(.[]; .id == $id and .desiredStatus == "RUNNING")' >/dev/null 2>&1 \

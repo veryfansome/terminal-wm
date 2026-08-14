@@ -1,0 +1,134 @@
+AXES CHANGED: objective only (r3_fwl_orthogonalized_ring_contrast -> r6_episodic_board_prototype_choice).
+arch, target, optim, batcher, stream and head keep the parent's impls and params verbatim.
+
+WHY ONLY ONE AXIS. The mechanism needs nothing the genome does not already supply: it reads pred,
+tgt and the two causal ctx channels the WANTS_CTX contract already delivers, and baseline_interleave
+already exposes extract_cmd_input so ctx["cmd"] exists. Changing arch or target as well would make
+the result uninterpretable against the parent, and the parent's arch is in fact the ideal partner
+(see LEVERAGE below), so I deliberately left the rest of the genome fixed.
+
+THE MECHANISM. The parent is a batch-global reweighted InfoNCE: every row is discriminated against
+every other row, negatives are made hard by TARGET-space proximity (the confusability ring), and the
+command is removed from the negative geometry by a cross-fitted ridge (Frisch-Waugh-Lovell). Every
+row is treated alike and the trajectory is never used as a unit. I replace that wholesale with an
+EPISODIC forced choice that reconstructs the evaluation's own N-way question out of the raw training
+trajectories, and makes it the term that dominates whenever the model is wrong.
+
+The mechanism imported from outside the domain is the prototypical network episodic loss (Snell,
+Swersky & Zemel 2017): an episode supplies a support set of classes, a query is scored by a softmax
+over negative squared Euclidean distance to the class prototypes, and the loss is the cross entropy
+of that softmax. Translated here, with everything computed from (pred, tgt, ctx) alone:
+
+  EPISODE   = one trajectory. Recovered exactly from ctx["prev"], which the harness sets to the zero
+              vector at the first command of a sequence and to the preceding observation everywhere
+              else; seg = cumsum(prev.abs().amax(1) == 0), and the flattened cmd rows are contiguous
+              per sequence in step order, so seg is a valid segment id and row index is time.
+  CLASS     = a numerically equal target, pooled. Distances tt_ij = ||tgt_i - tgt_j||^2 / D;
+              equivalent iff tt <= 1e-3 * mean_off. Classes whose in-batch multiplicity exceeds
+              max(16, 0.02 n) are dropped: that is the empty-output cluster produced by every mv and
+              every redirect, plus the system files that repeat across every trajectory of an
+              image-blocked batch.
+  SUPPORT_i = the classes exposed at STRICTLY EARLIER steps of row i's own episode. That is literally
+              the CUPS board: the N contents standing at N locations before the chain of moves runs.
+  QUERY     = a row whose own content numerically repeats a support content that was first exposed
+              under a DIFFERENT command (command equality is exact-duplicate detection on ctx["cmd"]
+              at the same 1e-3 relative tolerance, not a cosine threshold). This is exactly the row
+              whose answer cannot be read off the command: the content standing here arrived by a
+              move or a copy, not by the command naming it.
+  LOSS_i    = logsumexp over support - logsumexp over the positive class, on logits
+              -||pred_i - tgt_j||^2 / (D * temp_i) - log(multiplicity_ij). Subtracting log
+              multiplicity turns the row-level logsumexp into the class prototype logit exactly when
+              members are numerically equal, so each distinct content counts once however often it
+              was re-read. temp_i = 0.25 * sep_i, where sep_i is the distance from the true content
+              to its NEAREST board-mate in that episode, floored at max(0.1 * median sep, 5e-3 *
+              mean_off). A per-query scale, not a batch-global one, is what makes this work.
+  MARGIN    = softplus((d_true + 0.25 sep_i - d_nearest_foil) / (0.125 sep_i)) on the same queries,
+              in the raw squared-L2 decision variable the probe itself uses to pick.
+
+Two supporting terms: a batch-global class-pooled listwise term over all content rows, which keeps
+the whole embedding space discriminative and delivers gradient to every row, and a 0.05 raw MSE
+anchor. A constant prediction cannot minimize either, so the anti-collapse clause of the axis
+contract holds; verified numerically (constant-zero 4.91 and constant-7.0 21.05 against ~0.08 for a
+fitted prediction on the same batch).
+
+WHY IT SHOULD MOVE comp_ca. comp_ca is native_hit minus swap_stayed. swap_stayed is high exactly
+when a read keeps returning the content that the NATIVE chain routed there after the chain has been
+rewritten to route a different one, i.e. when the model answers the read with a board-mate rather
+than with the content that was actually carried. My query set is precisely the training rows that
+pose that question, my support set is precisely the foil set the probe draws from, and my loss is
+precisely the probe's decision rule. The parent's loss does penalize picking a board-mate, but only
+as one wrong retrieval among ~2000 in-batch candidates, at a batch-global temperature that is far
+too soft for two contents sitting a fraction of the batch mean apart. Making the same error costly
+at the board's own scale is the whole change. I measured on the jail's real trajectories that this
+signal is dense and not a rare corner: 70 such rows across 24 trajectories (2.9 per trajectory,
+~186 per 64-sequence batch), with a mean of 9.1 distinct earlier contents to choose among.
+
+THE DEBIASING TERM, AND WHY IT IS THERE. On the jail's real trajectories the answer's RECENCY RANK
+among the episode's support classes is far from uniform: rank 1 in 31/70 cases and rank 0 in 17/70,
+so a fixed "second-most-recently established" policy would already be right 44% of the time against
+~11% chance. That is the chain-position shortcut the objective's own documentation says cancels only
+in expectation. I therefore reweight each query by inverse propensity to a uniform prior over that
+rank: rank buckets that happen to be common in a batch are down-weighted, rare ones up-weighted, the
+weight clamped to [0.25, 4]. The up-weighted queries are also the deepest chains (the true content
+established long before many others), so the same term doubles as a depth curriculum aimed at the
+d3/d4+ slice. Measured effect on the gradient in a synthetic batch: 30-38% relative change versus
+uniform weights, so it is not a no-op.
+
+FALSIFIABLE PREDICTIONS.
+1. comp_ca beats the parent's +0.0112. UNMEASURED - no real training run is possible from the jail,
+   and this project has seen miniature probes invert rank in both directions, so I am not
+   extrapolating from the synthetic checks below.
+2. native_hit rises and swapped-held falls, rather than both moving together. If instead both rise,
+   the loss taught a stickier location-keyed or position-keyed reader and the mechanism failed on
+   its own terms.
+3. private.shortcut_leaning should be no worse than the parent's, and ideally lower, because the
+   rank debiasing removes the training-side propensity a position policy would exploit. This is the
+   one prediction that would be most informative if it fails.
+4. The gain, if any, should be larger on d4+ windows than on d3, since deeper chains are exactly the
+   up-weighted tail.
+
+WHAT I VERIFIED (synthetic, CPU, real shapes n=1984 D=768, plus the real trajectory statistics
+quoted above; none of this is a fitness claim):
+- Finite loss and finite gradient on n = 1, 2, 4, 15, 16, 17, 33, 64, 127, on float32 and float64,
+  with ctx None / not a dict / missing a key / wrong-shaped, with no segment starts, with all targets
+  identical, all commands identical, and target scales 1e-6 and 1e4. Nothing in the module assumes an
+  even row count or that a command is followed by an observation; it only ever indexes the flattened
+  command rows it is handed.
+- Every row receives gradient (1984/1984) whenever the prediction is not already exact.
+- Optimizing free predictions under this loss drives the forced choice to 64/64 correct at board
+  confusabilities spanning 30x, and the query rows' nearest neighbour among ALL 1984 batch targets is
+  the right content 64/64. Substituting a board-mate's prediction at the query rows raises the loss
+  from 0.06 to 93.4, which is the discrimination the metric measures.
+- Cost ~28 ms/step on CPU at n=1984, D=768, dominated by three n-by-n GEMMs; it removes the parent's
+  per-step 1024x1024 ridge solve, so it should be cheaper than the parent inside the fixed step
+  budget. UNMEASURED on the real GPU lane.
+- I introduce no trainable parameters, so nothing new needs to reach the scored read position; the
+  arch's and head's parameters keep gradient through the global term and the anchor, which cover
+  every row, and through the episodic term at the routed-read rows.
+
+A DESIGN BUG I FOUND AND FIXED, worth recording because the parent family carries the same shape.
+My first version used a batch-global margin (0.25 * mean off-diagonal target distance) for the
+hinge, copying the parent's convention. When two board-mates sit closer together than that margin
+the hinge is unsatisfiable, and reducing it pushes the prediction AWAY from its own target along the
+foil direction without bound: query-row MSE blew up to 8.1 against a batch mean of 0.61 and the
+forced choice went to 0/64. Rescaling the margin, the temperature and the hinge slope to that
+query's OWN nearest-board-mate separation fixes it completely (0/64 -> 64/64, query MSE 1.05). The
+lesson generalizes: on this task the decision scale is set by the board, not by the batch.
+
+LEVERAGE ON THE PARENT'S ARCH, which is why I left it alone. r23_dual_address_transport_pointer
+already contains a transport memory that reads content at a source address, writes it at a
+destination address and erases the source, plus a pointer-copy readout over the earlier observations.
+It has the machinery to answer "which content is here now" but its only supervision under the parent
+objective is an undifferentiated batch-wide retrieval loss. The episodic term is the supervision
+that specific machinery was built for: it asks, at exactly the rows where a transport happened,
+which of the board's contents the pointer should be copying.
+
+BIGGEST RISK. The rank debiasing could cost measured score even while improving the capability. The
+brief states plainly that on this frozen slice a first-mover lookup outscores every mechanism
+measured so far; if part of the parent's +0.0112 comes from residual position-keying, flattening the
+training-side positional prior removes it and comp_ca could fall even though native routing improved.
+A secondary risk is narrower: the query set is built from EXACT target duplication, so it captures
+mv/cp reads whose content reappears verbatim but misses compositional reads whose observation is a
+transformation of earlier ones (an `ls` of a directory after a move, an `acc.dat` after appends).
+If most of the eval's depth lives in those, the term fires on the wrong rows and the result lands
+near the parent rather than below it.

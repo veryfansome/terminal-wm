@@ -1,0 +1,91 @@
+MECHANISM: matched case-control batch composition on the read token.
+
+Axes changed: batcher ONLY (r6_sysblock_hardneg_curriculum -> matched_readtoken_control_sets).
+All six other axes are the parent's, verbatim. The mechanism lives entirely in which sequences
+share a batch; it needs no change to the arch, the stream, the target, the head or the loss,
+because the loss it is designed to act on is already the parent's: r12_antiretrieval_ring_negatives
+is a listwise softmax over in-batch rows, and the batcher is the only axis that decides which rows
+are in that softmax.
+
+THE BORROWED EQUATION (outside the domain). In epidemiology, a matched case-control design draws,
+for each case, one or more controls that MATCH the case on the confounder, and estimates the effect
+with the conditional-logistic likelihood
+
+    L = prod_over_strata  exp(b'x_case) / sum_over_stratum-members exp(b'x_j)
+
+Because every member of a stratum carries the same value of the match variable, that variable
+contributes the same term to numerator and denominator and drops out of the likelihood: the score
+is identified ONLY by the variables that vary inside the stratum. An InfoNCE / listwise softmax
+over a batch is the same object with the same algebra. So if I choose the batch so that the
+sequences inside a matched set share the read command, the read command cannot reduce the loss of
+that set; only the mv chain can.
+
+That is exactly the quantity this objective scores. comp_ca is native_hit - swap_stayed on the
+SAME board with the SAME read token, the two arms differing only in how the move commands assign
+contents to positions. A predictor keying on the read location scores structurally zero. So the
+training composition that most directly targets comp_ca is one that makes read-location keying
+loss-INCREASING rather than merely uninformative.
+
+WHAT THE IMPL DOES. Every training sequence is parsed from its command strings alone: the mv edges
+are collected, every cat/head/tail read is walked backwards through the edges that wrote its path
+earlier in the same trajectory, and the deepest such routed read gives (read_path, origin_path,
+depth). Sequences sharing the exact read_path form a stratum; a read_path that is a singleton is
+demoted to its suffix-stripped family (/tmp/w/cups/usr/local/etc/app.ini.6 -> .../app.ini) and
+strata are kept only when they have at least set_size distinct members. A batch is then a uniform
+base part plus n_sets matched sets; a stratum is drawn with probability proportional to its size,
+which is the case-control design's own marginal (draw a case at random, then draw its controls), so
+the matched part does not skew WHICH read tokens are trained on, it only adds matched controls
+beside them. The matched fraction anneals from zero over the opening ramp_frac of training, keeping
+the parent's curriculum shape.
+
+The second half of the mechanism is the within-set contrast. For each sequence I also record
+whether the read path's family names the routed content's own origin — the chain ended back on the
+name it started from, so the file name IS the answer — or names a different file, so the content
+arrived from somewhere else and the name is a decoy. Inside a
+matched set the members are alternated between the two labels, so a set of size 2 is, whenever the
+stratum permits, a minimal pair: identical read command string, one where the file name is the
+right answer and one where it is a decoy, and the ONLY thing that separates them is the chain of
+mv arguments. On the real trajectories in evolve/jail_data/train_sample.jsonl the name shortcut is
+correct for 9 of 24 routed reads, so it is a live shortcut worth refuting, and read tokens do
+collide exactly across systems: `cat /tmp/w/cups/usr/local/etc/app.ini.6` is the scored read of
+three different sequences on three different images with three different answers, each content
+carrying its own unique canary string.
+
+WHY IT SHOULD MOVE comp_ca. Under the parent's image blocking the in-batch negatives are
+same-SYSTEM, which is a coarse match: two sequences from one image still have different read paths,
+so a model that maps read-token -> answer can still separate them and the location shortcut stays
+free. Under read-token matching the negatives are same-READ-TOKEN, so that map is many-to-one
+inside the stratum and the listwise term cannot be reduced without conditioning on the mv
+arguments. The gradient that survives is a gradient on content routing, which is the channel the
+parent arch already has (r22's cross-attention over strictly-earlier prefix observations reads the
+exposed contents; the addressing pair decides WHICH one). This should raise native_hit and, more
+importantly for a differential, make the prediction move when the moves are re-encoded, which
+lowers swap_stayed.
+
+FALSIFIABLE PREDICTIONS.
+1. comp_ca rises above the parent's -0.0037. If the mechanism does nothing, comp_ca sits within
+   noise of the parent, because the sampler still covers the same sequences.
+2. The rise comes from swap_stayed falling at least as much as native_hit rises. If comp_ca moves
+   only because native_hit rose with swap_stayed flat, the model got better at the board without
+   getting more role-sensitive, and the mechanism did not do what it claims.
+3. The gain should be larger on the d4+ windows than on d3, since deeper chains are where the read
+   token is least informative and the matched set bites hardest.
+4. shortcut_leaning should not rise: nothing here rewards first-mover position; the matched set is
+   built from the read destination string, and both members of a set are drawn without regard to
+   where in the move order their content sits.
+
+PERFORMANCE CLAIMS ARE UNMEASURED. I cannot run the harness from the jail. What I did measure is
+mechanical, not predictive: on 3000 synthetic boards built to the shape of the real ones, the
+one-time parse costs 0.014 s and 200 batches cost 0.024 s, so the mechanism is free against a fixed
+step budget; the batch's share of slots sitting in a >=2 read-token collision goes from the uniform
+sampler's level to ~0.6 above it at full ramp; and 1698 of 1762 drawn colliding groups carried both
+origin-named labels. Determinism under a private generator, non-mutation of fit, exact length bs,
+in-bounds indices, and graceful degradation to uniform (no mv edges, no recoverable routed read,
+bs < set_size, matched_frac_max = 0) were all checked directly.
+
+BIGGEST RISK. Coverage skew. Sequences whose routed read lands on a per-system random name
+(g44/f461.bin.3) are singletons even after the family fallback and can only enter through the
+uniform base; on the synthetic replica ~40% of sequences were unmatchable. The matched fraction is
+therefore capped at 0.6 rather than the parent's 0.75 so the base keeps sampling them, but the
+training distribution still tilts toward boards whose read lands on a shared decoy name, and if
+that subpopulation transfers worse to held-out images the differential could fall instead of rise.

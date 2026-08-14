@@ -1,0 +1,39 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r4_fingerprint_conditioned_composition",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r4_distinct_blocked_transport_sampler",
+   "params": {
+    "chain_alpha": 1.0,
+    "hard_frac_max": 0.75,
+    "hop_cap": 6,
+    "n_block_images": 1,
+    "ramp_frac": 0.3,
+    "weight_cap": 4.0
+   }
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r6_boardlocal_forced_choice",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

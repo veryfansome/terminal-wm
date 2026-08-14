@@ -1,0 +1,76 @@
+AXES CHANGED: objective only (board_transport_permutation_matching, replacing
+r22_exact_target_equivalence_quotient). arch, optim, target, batcher, stream and head are the
+parent's verbatim. The mechanism needs no other axis: it consumes only pred, tgt and the ctx the
+harness already offers under WANTS_CTX, and the parent's stream (baseline_interleave) already
+exposes extract_cmd_input, so ctx["cmd"]/ctx["prev"] arrive without touching the stream. It
+declares no code_cmds because it does not alter command tokens at all.
+
+MECHANISM
+Entropic optimal transport with equipartition (Sinkhorn-Knopp, Cuturi 2013; the balanced-
+assignment constraint of Asano et al.'s self-labelling and SwAV; the log-domain unrolled
+differentiable assignment of SuperGlue), applied inside each board rather than across the batch.
+
+1. Segmentation. ctx["prev"] is the zero vector exactly at the first command row of every
+   sequence and the preceding observation elsewhere, and the harness flattens cmd rows in
+   row-major order, so the flattened rows split back into contiguous per-trajectory blocks with
+   one comparison. Each block is padded to [n_seg, kmax, D].
+2. Cost. Per block, C[i,j] = ||pred_i - tgt_j||^2 / D over that trajectory's own rows. Nothing is
+   precision-weighted: this is the same unweighted squared-L2 the probe decides with.
+3. Plan. exp(-C/temp) is made doubly stochastic by 15 log-domain Sinkhorn iterations with uniform
+   row and column marginals of one, unrolled WITH gradient, masked to the block's valid entries.
+   temp is a fixed fraction (0.1) of the mean distinct target-target separation, detached, so
+   sharpness tracks the embedding scale instead of a hand-set constant.
+4. Duplicates. Numerically equal targets form one class. The plan P[i,j] = 1/m for the m columns
+   of row i's class satisfies BOTH marginals exactly, so multi-positives need no special-casing
+   and the bijection is not broken by the ~14 empty-output mv rows a 31-step trajectory carries
+   (measured on evolve/jail_data/train_sample.jsonl: 29-32 steps, 15-19 distinct outputs, the
+   empty string 9-14 times).
+5. Loss. Row term = -log of the transported mass a read places on its own content class; column
+   term = -log of the mass a content receives from the reads that actually returned it. Both are
+   focal-weighted (gamma=1, detached) and weighted by 1/class-size, so the empty-output flood
+   weighs as one content instead of fourteen. A 0.1 MSE anchor keeps predictions in the target
+   space the probe measures in.
+
+WHY IT SHOULD MOVE comp_ca
+A board is a bijection: at every moment each content sits at exactly one location, and the chain
+of mv commands permutes that bijection. A row-normalised softmax (the parent, and every
+InfoNCE-shaped objective in this lineage) imposes no such constraint — it asks each read
+independently "which content is nearest", and a model that answers "the content this location
+usually holds", or "the generically most plausible content", is rewarded on every row that
+happens to agree. The doubly stochastic constraint makes those answers arithmetically worthless:
+because column mass is pinned to one, a prediction that claims the same content for k reads gets
+1/k of that column each. In a pure-Python replica of the block math (11-row and 31-row boards,
+scratch code, not the real harness) the loss for "always predict the board's most common content"
+came out numerically IDENTICAL to the loss for a constant prediction and to the loss for the mean
+target — 2.17 and 3.29 on the two boards — while the correct assignment scored 0.007 and a plan
+with just two contents exchanged scored 1.05. That identity is the point: the equipartition
+constraint removes the generic-content shortcut by construction rather than penalising it with a
+heuristic ring kernel, and what is left to gain is exactly the thing comp_ca pays for, namely
+knowing WHICH content the chain routed to the location being read.
+
+The second reason to expect movement is the negative set. The parent contrasts a read against
+~2000 in-batch rows, almost all from other images and trivially far. This objective contrasts a
+read only against the other contents on its own board — which is precisely the N-way forced-foil
+choice the probe makes, and precisely the choice that a role swap alters.
+
+PREDICTIONS (all unmeasured; I cannot run the harness from the jail)
+- comp_ca above the parent's +0.0262. Directionally I expect the gain to concentrate in the d4+
+  windows, where the number of chained moves makes the location prior least informative.
+- The native pick rate may move LESS than comp_ca, or even drop slightly, because the objective
+  gives up the easy cross-image discrimination the global softmax supplies. The differential is
+  what should improve.
+- Cost is negligible: the blocks are [64, ~32, ~32], about 65k kernel entries, 15 unrolled
+  iterations, versus the parent's dense 2000x2000 pairwise matrix. This should be FASTER per
+  step, not slower.
+
+BIGGEST RISK
+Absolute calibration. Removing the global contrastive leaves only the 0.1 MSE anchor to place
+predictions in the target space; the transport term is invariant to anything that preserves the
+within-board cost ordering, so the model could become a good relative discriminator on each board
+and a poorly scaled absolute predictor, which would cost the pick-rate reading even if the
+differential holds. Secondary risk: segmentation rests on ctx["prev"] being exactly zero only at
+sequence starts — true by construction of the harness shift, but a standardized observation
+embedding that happened to be the exact zero vector would split a board in two, which degrades
+the term to a smaller board rather than corrupting it. Third: temp = 0.1 * mean separation is a
+guess; too sharp and the transport gradient concentrates on near-ties, too soft and the perfect
+assignment stops scoring near zero (at 0.25 the correct plan already cost 0.40 in the replica).

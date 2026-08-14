@@ -1,0 +1,104 @@
+MECHANISM
+
+The parent runs the dual-key content-gated latent-transition arch on baseline_interleave tokens.
+That arch is a delta-rule associative memory over path slots: at every command it forms a READ key
+and a WRITE key by separate linear maps of the command token, reads the slot the read key points
+at, gates the retrieved content through a learned transition, and writes the result at the slot the
+write key points at, as a recurrence over steps. A machine of that shape can transport a content
+through an arbitrarily deep chain of renames in a single pass -- transport depth is not bounded by
+layer count -- provided the read key of `mv B C` lands on the same slot the write key of `mv A B`
+just wrote. Its input makes that impossible. A command token is one mean-pooled encoder embedding
+of the whole command string, so source and destination are superposed in a single vector and cannot
+be split by any linear map, and two paths that differ by one character (`backup.job.5` versus
+`backup.job.6`, which is what an actual chain step looks like in the training trajectories) sit at
+cosine near one, so the slots they address are not distinguishable. The memory is built; the
+addressing is mush.
+
+This stream rewrites each COMMAND token into five fixed contiguous regions and leaves the
+interleave layout and every observation token untouched:
+
+  [0:256)   READ address   -- centered sign code of the first positional path (where content is
+                              taken FROM), zero when the command names no path
+  [256:512) WRITE address  -- same code family applied to where content is put: argument two of a
+                              two-argument mv/cp/ln/install, or the target of `>` / `>>`, and
+                              otherwise the command's own path, so a plain read both reads and
+                              establishes its own slot
+  [512:576) verb code
+  [576:640) eight replicated form flags (source present, explicit destination, destination distinct
+                              from source, mv, cat, `>>`, `>`, an option token present)
+  [640:768) the standardized command embedding, at 0.5 scale -- the only surviving lexical channel
+
+Both address regions are read off ONE shake-256 generator per path string, so a path yields the
+identical pattern whether it is being read from or written to, and the alignment the arch needs
+(write key of one command equal to read key of the next) is a single shared linear map rather than
+a coincidence two independent weight blocks must discover. Distinct paths get near-orthogonal
+codes, so `backup.job.5` and `backup.job.6` become different slots.
+
+THE SECOND, LESS OBVIOUS HALF: STARVING THE CANCELLING CHANNEL
+
+A predictor that answers a read by picking the content whose original filename most resembles the
+path being read predicts identically under the native chain and under the role-swapped chain --
+the read command string is the same in both arms and the board is the same -- so it contributes
+exactly zero to comp_ca, per window, structurally. But it is a genuinely good predictor of the
+native arm, so the training loss rewards it, and in the parent's token space it is the cheapest
+thing to learn: the raw embedding of a long path string is dominated by the name family, and the
+cups naming scheme deliberately alternates the two families along a chain. Every gradient spent
+there is spent on a channel that the objective cancels away. So this stream does not merely add
+addresses on top of the embedding, as an address coding could: it demotes the raw embedding to 128
+coordinates at half scale, about 4% of the token's energy, keeping enough for verb/system semantics
+and for the non-cups packs while making lexical near-duplicate similarity too weak to dominate.
+That deliberate suppression, not the presence of a hash, is what I expect to move the differential.
+
+WHY THE HEAD PARAMETER MOVES WITH IT (the second axis I touched)
+
+r18_transition_forwardmodel_consistency mines its (pre-observation, mutating command,
+post-observation) triples by thresholding cosine between COMMAND TOKENS at path_thresh=0.60. That
+number is calibrated to raw mean-pooled embeddings, where every cups command is lexically similar to
+every other and the threshold is a loose heuristic. In the geometry this stream creates the same
+scale means something different, computed exactly on real commands from the training sample:
+
+    cat A          vs  mv A -> B      0.448   (read-key match, the triple's pre-leg)
+    cat B          vs  mv A -> B      0.447   (write-key match, the triple's post-leg)
+    cat s0         vs  cat s0 >> acc  0.486   (same, cvar pack)
+    cat acc        vs  cat s0 >> acc  0.486
+    mv A -> B      vs  mv B -> C      0.136   (share a path but in opposite roles)
+    cat A          vs  cat C          0.064   (same verb, unrelated paths)
+    ls /etc        vs  ls /usr/...    0.095
+
+Left at 0.60 the head would silently switch off; the genome would quietly lose a component without
+that being the thing under test. Set to 0.30 it sits in the gap between 0.14 and 0.45 and the head
+stops being a lexical heuristic: it now fires exactly on commands that share a path in the matching
+role, which is precisely the triple the transition operator is supposed to be supervised on. This
+is a params-only recalibration of the parent's head impl, forced by the change of geometry, not a
+second independent bet.
+
+FALSIFIABLE PREDICTION
+
+comp_ca rises above the parent's +0.0262, and it rises more on the d4+ windows than on d3, because
+the delta-rule recurrence resolves depth in one pass once the slots are distinct, whereas a
+layer-stacked chase would be depth-limited. Absolute native pick rate may fall or stay flat even
+where comp_ca rises, since the name-similarity channel that inflates it has been suppressed; if
+native falls while comp_ca falls too, the suppression was too aggressive and the raw region should
+be widened rather than the addressing changed. private.shortcut_leaning should not move up: nothing
+in the coding is chain-position dependent. If comp_ca does not move at all, the claim that the
+parent's memory is address-starved rather than capacity-starved is wrong, and the next edit belongs
+on arch, not stream. All performance statements here are unmeasured -- no training run was possible
+inside the jail.
+
+CORRECTNESS
+
+The coding is position-wise: row i of code_cmds depends only on cmds[i] and on row i of z_cmd, and
+on nothing else. That is strictly stronger than prefix-causal, and it makes the read-position
+invariant hold by construction -- the read command string is identical under the native and the
+role-swapped chain, so its token is bit-identical, with no dependence on how the moves were paired.
+collate places the output of code_cmds and nothing else into command positions, so the instrument
+reproduces the training tokens exactly. Nothing writes into observation positions, into tgt, or
+into the target space. No new trainable parameters are introduced, so there is no parameter that
+could fail to receive gradient; the mechanism reaches the scored position because the scored read's
+own token is one of the tokens rewritten. Indexing never assumes an even length or that a command
+has a following observation: code_cmds is a per-command map over min(len(cmds), z_cmd.shape[0])
+rows, so the trailing read command of an odd-length window is coded like any other. parse_command
+was checked against all 400 distinct commands in evolve/jail_data/train_sample.jsonl with zero
+mismatches, and 100 of the 253 explicit-destination commands there consume the exact destination
+string of an earlier command, which is the alignment the read/write key pair is built to exploit.
+No nn.Module attribute names are shadowed; the module defines no module class at all.

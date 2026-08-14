@@ -1,0 +1,98 @@
+MECHANISM: contents are a conserved resource inside one trajectory.
+
+Axes changed: objective only. The parent's other six axes are kept verbatim. The mechanism is a
+loss-level term over command rows and needs nothing from the arch, the head, the stream (beyond
+extract_cmd_input, which r4_role_bound_path_atom_codes already provides), the batcher or the
+optimiser, so changing any of them would be an unjustified confound.
+
+WHAT THE CROSSOVER TAKES FROM EACH SIDE
+
+From the parent (r5_decision_direction_metric_quotient) I keep the whole spine unchanged: the
+exact-target-equivalence quotient, the confusability ring, the per-coordinate metric read off the
+unit target-difference directions of confusable pairs, the scale-free repulsion hinge in the raw
+squared-L2 the eval ranks in, and the class-measured squared-error anchor.
+
+From the crossover partner I take the idea that carries its head impl (rename registry occupancy
+routing): a move RE-ADDRESSES a slot rather than copying its value, so a registry holds each
+content exactly once and a read returns whatever now occupies the address. The partner spends
+parameters and a recurrent scan to build that registry inside the model. I import the same
+constraint as a property the LOSS demands of the predictions, with no parameters at all, and I
+compute it in the parent's decision-direction metric — that is the join.
+
+THE TWO NEW TERMS (both trajectory-local; segments recovered exactly from ctx["prev"], which is the
+zero vector at the first command of every sequence and is strictly causal)
+
+(1) OCCUPANCY TRANSPORT. Within one trajectory the command rows are partitioned into content
+classes by exact target equivalence, each class represented by its earliest row. Row-to-content
+assignment is scored by an entropic optimal-transport plan (a few log-domain Sinkhorn-Knopp
+iterations, differentiated through) under BOTH marginals: uniform over the trajectory's rows, and
+per content exactly the number of rows that truly carry it. The loss is the negative log conditional
+plan mass on each row's own content. This is the Sinkhorn equipartition trick of self-labelling and
+SwAV (Asano et al.; Caron et al.), with equipartition replaced by the trajectory's true occupancy
+counts. The point is what a per-row softmax cannot say: a row softmax normalises only over
+candidates, so nothing stops every read in a trajectory from claiming the same content, and dumping
+a read onto the large empty-output class that all the mv steps share is nearly free. The column
+marginal makes each content a resource with a fixed supply — claiming a content another row must
+also hold pushes that row off it and both pay, and the supply a content genuinely has must land
+somewhere. Rows whose target duplicates an earlier row of the same trajectory under a different
+command, with a small class size (the post-chain re-read, and not the empty-output cluster), carry
+4x weight.
+
+(2) NAME DECOY. For exactly those re-read rows, the decoy is the earlier row of the same trajectory,
+of a different content class, whose command embedding is most similar — the content that this
+location's NAME used to hold, rather than the content the chain of moves routed into it. That is the
+single confusion the score is built around. A scale-free hinge in the raw unweighted squared-L2
+requires (||pred - t_decoy||^2 - ||pred - t_true||^2) / ||t_true - t_decoy||^2, formed algebraically
+as 1 + 2 e.(t_true - t_decoy) / ||t_true - t_decoy||^2, to stay above a fixed fraction of one; it is
+gated off unless that command similarity stands out above the row's own distribution of similarities
+to earlier distinct-content rows, and the separation is floored so a near-duplicate pair cannot
+amplify without bound. Where the gate misfires, the term degrades gracefully into an ordinary hard
+within-trajectory negative.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca is a paired difference between a native chain and a role-swapped chain over the same board,
+same destinations, same depth. Every predictor that answers from the read location alone gives the
+same answer in both arms and contributes exactly zero. The only thing that survives is having
+carried a particular content's identity through the moves. The parent's loss is entirely batch-level
+geometry: it makes confusable observations separable, but it never asks the model which of the
+trajectory's own contents belongs to which of the trajectory's own reads. Both new terms ask exactly
+that, and they ask it about the rows the metric is measured on — the read after a silent chain. The
+occupancy constraint supplies the pressure a contrastive structurally cannot (a content cannot be
+handed to two reads), and the decoy hinge supplies the direction (the routed content beats the
+name's previous occupant).
+
+WHAT I EXPECT TO SEE (all unmeasured — no training run exists from the jail)
+
+Higher comp_ca than the parent's +0.0150, driven by native_hit rather than by swap_stayed falling,
+and a larger effect on the d4+ windows than on d3, because deeper chains are where the name's
+previous occupant is the most attractive wrong answer. The absolute pick rate should not fall: both
+terms vanish at a correct prediction (measured on synthetic boards: occupancy 0.04 and decoy 0.08
+when perfect, 0.45 and 7.5 when the read claims the name-decoy content), and the class-measured MSE
+anchor is untouched. Falsified if comp_ca is at or below the parent's, or if the gain arrives with
+swap_stayed rising in step with native_hit, which would mean the model got better at the board and
+not at the routing.
+
+MEASURED IN THE JAIL (mechanics only, on synthetic boards shaped like the real cups blocks —
+never a performance claim): loss finite and every prediction row receiving gradient for even and odd
+trajectory lengths, 1-step and 32-step sequences, all-duplicate targets, predictions at 0, 1e-3, 1,
+1e2 and 1e4 scale, float32 and float64; a constant prediction scores 8.67 against 0.29 for a
+near-true one, so the loss remains anti-collapse safe; the no-ctx call path returns the parent's
+value exactly. With the Sinkhorn iterations forced to zero the transport collapses back to a per-row
+softmax and the discrimination the mechanism is for disappears (empty-class claim 0.105 versus
+0.294, and the over-claimed row's own penalty falls from 0.12 to 0.00), which is direct evidence the
+column marginal, not the added weighting, is doing the work. Cost is +20% wall clock on CPU at the
+real row count and should be far less on GPU, since the added work is a batch of RxR problems with
+R the trajectory length while the parent's terms are n x n over the whole batch.
+
+RISKS
+
+The occupancy term is satisfiable by a positional shortcut — learning that the k-th read of a
+trajectory returns the k-th exposed content, without ever carrying an identity. That is the chain-
+position keying the brief warns cancels only in expectation, so it could show up as a positive score
+with high shortcut_leaning; the decoy hinge pushes against it but does not forbid it. Secondary
+risks: the mined decoy depends on command-embedding similarity, and the r4 stream's path-atom code
+occupies the last 128 coordinates with near-orthogonal hashes for sibling paths, so the decoy may
+often be some other hard negative instead of the true name predecessor; and two extra terms on top
+of an already heavily shaped loss may simply crowd out the parent's listwise term at the weights
+chosen (0.5 occupancy, 0.25 decoy).

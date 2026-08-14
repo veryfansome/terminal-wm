@@ -1,0 +1,74 @@
+AXES CHANGED: objective only (r4_dupclass_ring_negatives -> r6_boardlocal_forced_choice).
+Everything else — arch r4_fingerprint_conditioned_composition, optim r18_spectral_capped_transition_readout,
+batcher r4_distinct_blocked_transport_sampler with the parent's params, target identity, stream
+baseline_interleave, head r18_transition_forwardmodel_consistency — is kept verbatim. No other axis
+needs to move: the mechanism is a second loss term computed from pred/tgt and the causal ctx the
+objective contract already offers, and the batcher already blocks batches by image so a board's rows
+land together.
+
+MECHANISM. The parent's whole training signal is one global listwise softmax over the entire batch,
+whose negatives are picked by target-target proximity (the confusability ring). The measurement is
+not that. It is a forced choice among the contents that are on ONE board: N contents were exposed at
+N locations of one trajectory, a silent chain of moves shuffles them, one location is read, and the
+model is scored on whether it picks the content the chain actually routed there rather than one of
+the other contents of that same board. The parent's negatives are drawn from ~1900 rows spanning
+~64 trajectories and reweighted by embedding proximity; the roughly thirty rows that constitute the
+actual board are a diluted minority of that denominator, and random canary contents are not close in
+embedding space, so the ring does not preferentially pick them either. This candidate adds the
+missing term: a board-local N-way forced choice on exactly the rows whose answer is decided by a
+chain of moves.
+
+Those rows are identified without any label. Trajectory boundaries are recovered exactly from
+ctx["prev"], which is the zero vector only at a sequence's first command (the harness builds prev by
+shifting tgt one step inside each sequence, and standardized observation embeddings are never
+identically zero). A row is a ROUTED READ when its target coincides with the target of an earlier row
+of the SAME trajectory that was produced by a DIFFERENT command embedding — the content was already
+observed under some other command and has since arrived here — and when that target's batch-wide
+coincidence count is at most 16, which excludes the large empty-output cluster (every mv and every
+redirect writes it) and stock files that many images share. Checking the data in the jail: in a
+trajectory the cups_test read `cat .../sshd_config.cfg.8` returns exactly the content of an earlier
+`cat .../g72/f654.dat` expose, and the cvar_test read `cat .../out.dat` returns exactly the content of
+an earlier `cat .../s1.dat`; both are picked up by this rule. The no-op re-read (`cat .../s1.dat`
+twice with nothing moved in between) has an identical command embedding and is deliberately excluded,
+because learning "same command, same answer" from it is the location-keying that cancels to exactly
+zero in the metric. Roughly one row in ten qualifies, ~190 rows in a 64-sequence batch.
+
+For those rows the loss adds a second listwise NLL whose candidate columns are restricted to the rows
+of that row's own trajectory, scored in the UNWEIGHTED squared-L2 decision variable — the same
+variable the forced-foil instrument uses to pick a content — rather than in the precision-weighted
+one the global term uses, so the term optimizes the geometry the measurement actually reads. The
+parent's coincidence-class quotient is carried over unchanged: each candidate column's logit is
+divided by its class multiplicity and the numerator is the log-sum-exp over the whole positive class,
+so a content that occurs several times inside the board counts once and is fully attainable. The term
+is averaged over routed reads only, which leaves its total gradient mass comparable to the global
+listwise term while concentrating it on the rows where routing decides the answer.
+
+WHY IT SHOULD MOVE comp_ca. comp_ca is native_hit minus swap_stayed on the same board. A model that
+keys on which location is being read gives the same answer in both arms and scores exactly zero; the
+only thing that survives both arms is carrying a particular content's identity through the moves. The
+board-local term penalizes precisely the confusion that produces a zero: at a routed read it demands
+that the routed content beat the OTHER contents of that same board in squared L2, and the other
+contents of that board are exactly the foils the swapped arm would route there. A prediction that
+encodes "something from this board" or "the content this path held before the moves" is unpunished by
+the parent's global softmax — every other board's rows are already far away, so the global NLL is
+near zero for it and the focal weight then removes what little gradient remains — but it is maximally
+punished by the board-local term. I expect the training loss to show a large, slowly-falling
+board-local component next to a near-saturated global one, native_hit to rise, and swap_stayed to
+fall or hold; and I expect this to be visible more on the deeper windows (d4+) than on d3, since it is
+the long chains where an untrained model settles for a board-plausible content.
+
+FALSIFIABLE, and the ways it can fail. (1) If comp_ca does not exceed the parent's +0.0075, the claim
+that board-local foils are the missing negatives is wrong for this data. (2) The routed-read detector
+could fire mostly on the cvar arms, whose chains are short, and rarely on deep cups chains, in which
+case the term trains a shallower skill than the one scored. (3) Concentrating a unit of gradient mass
+on ~10% of rows is a real emphasis; if those rows are genuinely unpredictable at this capacity the
+term is noise that costs the global term its budget, and the number goes down. (4) The term could
+raise native_hit and swap_stayed together — a model that learns "answer with a content from THIS
+board" does better on both arms and cancels out — which would show as a flat comp_ca with a healthier
+absolute pick rate. No performance claim here is measured: torch is not available in the jail, the
+term was written to be correct by construction, and shape/dtype reasoning was done on paper against
+the real collate (tgt is [B, maxn, D] per step, rows flatten sequence-contiguous in step order).
+Nothing indexes a sequence position or assumes an even length; the term operates only on flattened
+command rows. It introduces no parameters. Every mask, threshold and row selection is detached, and
+the term is anti-collapse-safe: a constant prediction cannot put the right positive lowest for two
+different rows of the same board at once, so the board NLL stays strictly positive.

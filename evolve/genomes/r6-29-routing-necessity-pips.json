@@ -1,0 +1,42 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r18_pathstate_latent_transition_worldmodel",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r6_routing_necessity_pips",
+   "params": {
+    "alpha": 2.0,
+    "w_floor": 0.15,
+    "pool_mult": 16,
+    "kappa_ref": 0.1,
+    "kappa_bias": 0.5,
+    "dup_tol": 0.02,
+    "dup_frac": 0.2,
+    "top_k": 3,
+    "proj_dim": 96
+   }
+  },
+  "head": {
+   "impl": "r20_dualpre_transition_consistency",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

@@ -73,11 +73,17 @@ assert got == '$EYE_TREE_SHA', f"eye tree sha {got} != frozen pin $EYE_TREE_SHA"
 print("eye ok")
 PY
 
-  say "pulling the raw pack root ($TWM_ARM)"
+  # Both roots: the raw pack, and the ENCODED root if it has been published. `publish` uploads
+  # the encoded root as a sibling directory ("<raw>-nocwd"), which the raw pattern cannot match —
+  # a glob needs a literal '/' after the arm — so without naming it explicitly every box re-encodes
+  # from scratch. Pulling ~1.3GB at datacenter bandwidth replaces ~25 minutes of GPU encode, and it
+  # is also the stronger choice for meaning: one set of tensors, not one per box (see `publish`).
+  say "pulling the raw pack root + published encoded root ($TWM_ARM)"
   uv run python - <<PY
 from huggingface_hub import snapshot_download
 snapshot_download('veryfansome/terminal-jepa-dockerfs', repo_type='dataset',
-                  allow_patterns=['dockerfs3-cupsF-$TWM_ARM/*'], local_dir='$TWM_DATA')
+                  allow_patterns=['dockerfs3-cupsF-$TWM_ARM/*',
+                                  'dockerfs3-cupsF-$TWM_ARM-nocwd/*'], local_dir='$TWM_DATA')
 PY
 
   if [ -f "$ENC_ROOT/emb-seq-val.pt" ]; then
@@ -200,8 +206,9 @@ PY
 # Manual single-genome path: train then fold.
 score() {
   local genome="$1" cand_id="$2"
+  local -a conc=(); [ -n "${TWM_CONCURRENCY:-}" ] && conc=(--concurrency "$TWM_CONCURRENCY")
   $TWM_PYTHON -m cloud.runner --genomes "$genome" --seeds "${TWM_SEEDS:-0,1,2}" \
-      --gpus "${TWM_GPUS:-1}" --out "$REPO/.results" --split inner --mode full
+      --gpus "${TWM_GPUS:-1}" "${conc[@]}" --out "$REPO/.results" --split inner --mode full
   _fold "$genome" "$cand_id"
   echo
   echo "Bring it back with (from a Claude Code session in this repo):"
@@ -220,10 +227,11 @@ campaign() {
   # FIRST, before anything long-running: a marker left by an earlier campaign is what a poller
   # would see the instant this one is dispatched, and it would conclude this run had finished.
   mkdir -p cloud/podresults && rm -f cloud/podresults/.done
-  say "campaign: $# genome(s) x seeds $seeds on ${TWM_GPUS:-1} gpu(s)"
+  local -a conc=(); [ -n "${TWM_CONCURRENCY:-}" ] && conc=(--concurrency "$TWM_CONCURRENCY")
+  say "campaign: $# genome(s) x seeds $seeds on ${TWM_GPUS:-1} gpu(s)${TWM_CONCURRENCY:+ at concurrency $TWM_CONCURRENCY}"
   say "(the lane context — splits, windows, role-swap chains — is derived once and shared)"
   $TWM_PYTHON -m cloud.runner --genomes "$@" --seeds "$seeds" \
-      --gpus "${TWM_GPUS:-1}" --out "$REPO/.results" --split inner --mode full
+      --gpus "${TWM_GPUS:-1}" "${conc[@]}" --out "$REPO/.results" --split inner --mode full
 
   # Fold every genome here, as part of the campaign. The per-seed metrics live under .results/,
   # which `runpod.sh pull` does NOT copy; only cloud/podresults/ comes home. Leaving the fold as a

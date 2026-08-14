@@ -1,0 +1,102 @@
+AXES CHANGED: batcher only (r6_sysblock_hardneg_curriculum -> r6_routing_necessity_pips).
+arch, head, objective, optim, stream and target are the parent's, verbatim. The mechanism is a
+pure change of which sequences the fixed loss sees, so it needs no partner axis; keeping the other
+six fixed also makes the delta against the parent a single-axis measurement.
+
+WHAT THE MECHANISM IS
+
+Every prior batcher on this axis (the parent's image blocking, and the depth-tilted, collision-
+blocked and cue-raked designs) ranks a training sequence by how DEEP its move chains are. This one
+ranks it by whether its reads DEFEAT A NAME LOOKUP, and it does so without parsing a single command
+string -- the score is read off the frozen embeddings only.
+
+Per sequence, with observations O and commands C projected to 96 dims by one fixed Johnson-
+Lindenstrauss matrix:
+
+  scale      = mean_{i,j} ||O_i - O_j||^2                     (that sequence's own distance unit)
+  dup_i      = #{ j : ||O_i - O_j||^2 < dup_tol * scale }
+  informative_i = dup_i <= max(3, dup_frac * n)
+  e_ref_t    = min over informative j < t of ||O_t - O_j||^2
+  j*_t       = argmax over informative j < t of cos(C_t, C_j)
+  e_bias_t   = ||O_t - O_{j*_t}||^2
+  w_t        = kr/(e_ref_t + kr) * e_bias_t/(e_bias_t + kb),   kr = kappa_ref*scale, kb = kappa_bias*scale
+  W_seq      = sum of the top-k w_t
+
+The first gate asks "is this answer obtainable by carrying some earlier content forward"; the
+second asks "does the earlier command that looks most like this one fail to supply it". Their
+product is high only where the answer IS earlier content but the name does not point at it -- i.e.
+exactly where a read can only be answered by tracking which content the moves carried. The
+informative mask is load-bearing: the identical render that every silent mv and every empty ls
+produces is a within-sequence near-duplicate cluster, so those rows are excluded both as candidate
+answers and as scored positions, which zeroes filler and mv rows with no verb list and no parser.
+
+Sampling weights are p ∝ (W_seq + w_floor*mean(W))^alpha, live from step 1 with no anneal. A batch
+is drawn by pi-ps SYSTEMATIC sampling, not by multinomial draws: a uniform candidate pool of
+pool_mult*bs indices per step, Hajek clipping of within-pool inclusion probabilities to 1/bs, one
+cumulative pass, and bs equally spaced sample points sharing an offset that walks the golden-ratio
+Weyl sequence across steps. The clip bounds the importance ratio at pool_mult and makes every
+batch's indices distinct by construction; the systematic grid makes each realized batch match the
+target composition instead of matching it only in expectation, which at bs=64 over a heavy-tailed
+weight is the difference between a tilt that is applied and a tilt that is mostly multinomial noise.
+
+WHY IT SHOULD MOVE comp_ca
+
+comp_ca is a paired difference in which a predictor that keys on WHICH LOCATION is read cancels
+exactly. On the real trajectories in evolve/jail_data/train_sample.jsonl the training distribution
+actively teaches such a predictor: the cups boards rename a content to the partner's base name plus
+a counter, and after an even number of hops the content lands back in a path whose base name is its
+OWN origin name. I checked all 24 sample trajectories with a symbolic content tracker: 5 of the 12
+routed reads at hop depth >= 3 are answerable by matching the read path's base-name family to the
+file the content started in. Those reads are solvable by name lookup, name lookup gives the same
+answer under the native chain and under the role-swapped chain (the swap keeps the board and the
+destinations, so the read string is identical in both arms), and therefore every gradient spent on
+them buys a predictor whose per-window contribution is structurally zero. A depth tilt upweights
+precisely those reads. That is my explanation for why the parent's batcher and the unmodified
+baseline score the same -0.0075, and it is what this mechanism inverts.
+
+I measured the score itself on those trajectories with surrogate embeddings built by hashing the
+real rendered observation and command text (identical text -> identical vector), which is a proxy
+for the geometry, not a proxy for the harness. Mean necessity by bucket: non-routed positions
+(n=650) 0.033; hop depth 1 with the name broken (n=49) 0.351; depth 2 broken (n=9) 0.653; depth >=3
+broken (n=7) 0.766; depth >=3 with the name intact (n=5) 0.000. So it ranks the deep reads that
+require carrying a content top, and it puts the deep reads a name lookup already answers at the
+bottom, together with repeated reads of an unchanged file. The two cases that carry the mechanism
+do not depend on the surrogate geometry: for a read whose path was just overwritten by a move, the
+most similar earlier command is the byte-identical earlier read of that same path, whose answer is
+the content the move destroyed -- a maximum-cosine match under any embedding; and the answer is a
+verbatim earlier observation, so e_ref is exactly zero under any embedding.
+
+FALSIFIABLE PREDICTIONS
+
+1. Sequence weights are non-degenerate on the real split: the tilt is live (the impl falls back to
+   uniform only if every sequence scores 0, which the sample says will not happen), effective
+   sample size stays a large fraction of the split (0.67 of uniform on the 24-sequence sample at
+   alpha=2.0), and no sequence has probability 0.
+2. native_hit rises relative to the parent's, because the share of the loss carried by reads that
+   are only answerable by tracking a content roughly doubles, and swap_stayed falls relative to
+   native_hit, because the reads that teach the exactly-canceling name lookup are down-weighted
+   rather than up-weighted.
+3. If comp_ca does not move, the informative reading is which of the two arms moved: native_hit up
+   with swap_stayed up by the same amount would say the model still routes by name and the tilt
+   only changed how much it practises; both flat would say sequence-level reweighting cannot reach
+   the mechanism at all, since the ratio of routed reads to filler inside a single trajectory is
+   fixed and no batcher can change it.
+
+UNMEASURED. No number here is a harness measurement. Nothing was trained; the harness cannot run
+inside the jail, and the bucket table above comes from surrogate embeddings on 24 trajectories, so
+it establishes what the score selects, not what the score is worth. The scored slice is one frozen
+realization of 89 windows, so a change of this size could also be noise in either direction.
+
+BIGGEST RISK: this is a sequence-level reweighting of a fixed loss. Within any one trajectory the
+proportion of routing reads to mv and filler rows is fixed, so the intervention can only move the
+mixture between trajectories -- if the necessary reads are spread evenly across the split rather
+than concentrated in half of it, the achievable tilt is small and the candidate will land on its
+parent. Second risk: the informative mask is calibrated to the observed duplicate structure (about
+10-14 identical empty renders in a ~31-step trajectory). On a pack whose sequences carry far fewer
+silent moves, dup_frac would let those rows back in as candidates, e_bias at a name-consistent deep
+read would become large, and the score would then upweight the very reads it is meant to suppress
+-- the sign of the mechanism, not just its size, depends on that mask.
+
+COST. Setup is one chunked GEMM pair per 256 sequences plus an n_steps^2 gram per sequence in 96
+dims (about 5 MFLOP per trajectory); per step it is one randperm, a 1024-element clip loop, a
+cumsum and a searchsorted. Both are small beside a training step, and the step budget is untouched.

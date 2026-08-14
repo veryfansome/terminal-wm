@@ -1,0 +1,99 @@
+AXES CHANGED: arch only (r22_observation_occlusion_denoising -> r21_dualaddress_content_transport).
+Every other axis keeps the parent's impl and params verbatim: the objective, the spectral-capped
+readout optim, the forward-model-consistency head and the sysblock hard-negative batcher are all
+co-designed with the r18 transition operator, which this edit keeps and reuses rather than
+replaces. Nothing outside the arch needed to move, so nothing did.
+
+WHAT I CHANGED, MECHANICALLY
+
+The parent is the r18 path-state trunk plus ramped observation occlusion. Inside that trunk the
+latent-transition memory is SINGLE-ADDRESS: at step i it forms one address p_i, reads s_pre from
+memory at p_i, and writes back at the SAME p_i a blend of the step's own observation and a
+command-conditioned edit of s_pre. I replaced that recurrence with a DUAL-ADDRESS TRANSPORTER and
+changed nothing else in the forward:
+
+  feat_i   = [x_cmd_i ; h_cmd_i ; unit(tr_path x_cmd_i)]           (2d + key_d)
+  z_i      = gelu(W_addr feat_i)
+  a_r_i    = unit(R z_i)          a_w_i = unit(W z_i)
+  s_src    = a_r_i^T M            s_dst = a_w_i^T M                (M read BEFORE step i writes)
+  carried  = (1-mu_i) s_src + mu_i f(s_src, cmd_i)                 (f = the shared r18 operator)
+  c_i      = sigmoid(carry(feat_i, h_obs_i)) if obs present else 1
+  v_i      = (1-c_i) obs_i + c_i carried
+  e_i      = sigmoid(erase(feat_i)) * (1 - (a_r_i . a_w_i)^2) * c_i
+  M        <- lam M + a_w_i (v_i - s_dst)^T + a_r_i (-e_i s_src)^T   (masked by command validity)
+
+and the step's prediction still enters only through the existing zero-cost path
+tr_contrib = sigmoid(tr_read_gate) * tr_read(s_src).
+
+WHY THIS SHOULD MOVE comp_ca
+
+The scored window is: expose N contents by reading N locations, then a silent chain of renames,
+then read one location. In evolve/jail_data/train_sample.jsonl every single mv step (172 of them,
+all exit 0) has an EMPTY output, so the rendered observation of a move collapses to one of two
+strings regardless of which file moved where. A memory whose written value is the step's own
+observation therefore overwrites a slot with a content-free vector at exactly the steps that
+constitute the chain: r18's transition memory can edit the content sitting at one address, but it
+has no operation that takes content from one address and puts it at another, so a content cannot
+survive `mv A B; mv B C`. The transporter's write value at a silent step is the content it just
+retrieved at the read address, deposited at a DIFFERENT write address and subtracted from the read
+address, which is literally the rename. Composition then falls out of the recurrence: after
+mv A B the content sits at addr(B), so the next step's read at addr(B) finds it and relocates it
+again, to any depth, and the final `cat L` uses the SAME read map to fetch whatever is currently at
+addr(L). That is the thing the metric does not cancel: under the role-swapped chain the same board
+and the same read token route a different content to that location, so a model that actually
+transports must flip its pick, while a model keying on the read location alone predicts the same
+vector in both arms and scores exactly zero. So I expect the gain to appear as swap_stayed falling
+at fixed native_hit, and to be larger at d4+ than at d3.
+
+Two supporting details, both deliberate:
+- The addresses come from a nonlinear map of BOTH the raw command feature and the causal trunk
+  state, not from fixed coordinate slices of the raw 768-d command embedding. The command token is
+  a mean-pooled encoding of the whole string, so source and destination are entangled in one
+  vector and no fixed slice isolates either; separating them is a contextual decision (which of the
+  two paths in this mv matches a location I have already seen), which is what the 4-layer causal
+  trunk is for. A single shared hidden layer feeding two heads also lets a non-move step collapse
+  to a_r = a_w, where the erase term vanishes by the (1 - align^2) factor and the write degenerates
+  to the parent's in-place write.
+- The write is gated on COMMAND validity and a missing observation forces the carry branch
+  (c_i = 1). This makes the parent's occlusion mechanism work FOR the new recurrence instead of
+  against it: an occluded step no longer disables the memory update, it forces the step to relocate
+  rather than to store an empty observation. On an occluded exposure (where a_r = a_w) the update is
+  a near no-op; on the final read command, which structurally has no observation at all, the same
+  branch is taken. I checked the odd-length layout explicitly: n_pair = n_cmd - 1 there, carry/seen/
+  obs are padded to n_cmd, the last command reads before it writes, and its prediction depends only
+  on observations strictly before it.
+
+The transporter also gets its own decay parameter initialized at 0.998 instead of sharing the
+trunk's 0.985: over the ~30-step sequences in the sample, 0.985 costs a factor of 0.63 on a content
+that must survive the whole prefix, and the file/path memories that want faster forgetting keep
+their own decay untouched.
+
+One init change is load-bearing for the guards, not for the mechanism: r18 zero-initializes the
+(D,D) transition readout tr_read, which would leave every parameter I introduce with an exactly
+zero gradient and zero influence on the prediction at step 0. I initialize tr_read with std 1e-3
+instead, so the whole transporter is reachable and differentiable from the first step. At the
+observed embedding scale this contributes on the order of 1e-2 to a prediction whose target has
+unit per-dimension scale, and the optim's spectral cap on (D,D) matrices is unaffected.
+
+WHAT I EXPECT TO SEE, AND WHAT WOULD FALSIFY IT
+
+Expected: comp_ca above the parent's +0.0300, driven by swap_stayed rather than by native_hit, with
+the d4+ subset gaining at least as much as d3, and shortcut_leaning no higher than the parent's
+(the mechanism has no access to move ORDER except through content it actually carried; the read map
+is shared between mv sources and cat reads, so a first-mover lookup is not what it is built to do).
+All of this is UNMEASURED — I could not run the harness from the jail and did not run a miniature
+proxy, which this project has seen invert rankings in both directions.
+
+Falsified if: comp_ca is at or below the parent while native_hit is unchanged, which would say the
+carry gate learned c_i = 0 everywhere and the transporter collapsed back to the parent's in-place
+write; or if native_hit drops, which would say the erase term is destroying content the file and
+path memories were still supplying. The most likely failure is the one I cannot check from here:
+that a linear head on the trunk state cannot separate the source path from the destination path in
+a mean-pooled command embedding, in which case a_r and a_w are two arbitrary directions, transport
+moves content to the wrong slot, and the readout gate learns to shut the whole branch off — which
+returns the parent's function plus a small amount of wasted capacity, not a broken model.
+
+COST: the replaced loop runs the same number of sequential steps as r18's (one per command, ~32),
+with one batched [B,2,K]x[B,K,D] read instead of a [B,1,K] read and a rank-2 instead of a rank-1
+update, plus one batched address MLP outside the loop. Roughly twice the cost of a loop that was a
+small fraction of the forward; no new sequential dependence and no new pass over the trunk.
