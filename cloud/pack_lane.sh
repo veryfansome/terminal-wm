@@ -107,6 +107,12 @@ prepare_cdh() {
   # everything downstream is a plain pull. The loader asserts sequence count, image and shape agree
   # between the records and the embeddings, so a mismatched pairing fails loudly rather than
   # measuring nonsense.
+  #
+  # Completing the root does NOT need a pod, and is faster without one. It pulls embeddings (down,
+  # fast), copies records already on disk, and verifies from the cache on CPU — the loader requires
+  # the cache and never re-encodes, so no GPU and no encoder weights are involved. Run it wherever
+  # the raw records already live. Pushing them to a box first spends the same uplink and adds a
+  # bootstrap and a billing box; measured, local was 51s against 66min of push.
   : "${TWM_CDH_ARM:=treat}"
   local enc="$TWM_DATA/dockerfs3-cdhB-${TWM_CDH_ARM}-nocwd"
   mkdir -p "$TWM_DATA"
@@ -122,7 +128,8 @@ PY
     if [ -z "${TWM_CDH_RAW:-}" ]; then
       say "MISSING RAW RECORDS. $enc has embeddings but no train/val.jsonl."
       say "Set TWM_CDH_RAW to a directory holding the matching raw records and re-run, then"
-      say "publish the completed root so this step becomes a pull:"
+      say "publish the completed root so this step becomes a pull. Run this WHERE THE RECORDS"
+      say "ARE — it needs no GPU and no pod, and pushing them to a box first buys nothing:"
       say "  TWM_CDH_RAW=<dir> $0 prepare-cdh && uv run python -m cloud.publish_root $enc"
       return 1
     fi

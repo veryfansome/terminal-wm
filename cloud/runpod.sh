@@ -15,9 +15,11 @@
 #                                 run cloud/pack_lane.sh prepare, then pack_lane.sh campaign over
 #                                 the genomes (default: all of evolve/genomes/*.json), inside tmux
 #   push-raw  <podId> <localDir> <destSubdir>
-#                                 rsync a data directory that is NOT published to HuggingFace
-#                                 (e.g. the raw cd-history records pack_lane.sh wants in
-#                                 TWM_CDH_RAW). Published roots are pulled by the box itself.
+#                                 rsync a data directory that is NOT published to HuggingFace and
+#                                 is needed ON A BOX. Published roots are pulled by the box itself.
+#                                 NOT the way to complete a published root from local raw records:
+#                                 that costs the same uplink and can be done here (see pack_lane.sh
+#                                 prepare-cdh).
 #   pull      <podId>             rsync the pod's cloud/podresults/ down into this repo
 #   terminate <podId>             TERMINATE THE POD — this is what stops billing
 #   status    <podId> | list
@@ -462,9 +464,12 @@ cmd_bootstrap() {
 }
 
 # push-raw <podId> <localDir> <destSubdir> — for data that is NOT in the published HuggingFace
-# repo, which is the only kind worth pushing over a home uplink. Everything published is pulled by
-# the box itself, far faster. The destination is under the pod's data root, so pack_lane.sh can be
-# pointed at it (e.g. TWM_CDH_RAW=~/terminal-wm/data/<destSubdir>).
+# repo and is needed on the box. Everything published is pulled by the box itself, far faster. The
+# destination is under the pod's data root so pack_lane.sh can be pointed at it.
+#
+# Pushing raw records here in order to COMPLETE and publish a root is the wrong shape: the same
+# bytes cross the same uplink either way, and routing them through a pod adds a bootstrap, a
+# billing box and something to strand. Complete it where the records already are.
 cmd_push_raw() {
     local id="${1:?push-raw <podId> <localDir> <destSubdir>}" src="${2:?<localDir>}" dest="${3:?<destSubdir>}" ip port
     _need_host "$id"
