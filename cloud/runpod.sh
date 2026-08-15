@@ -15,9 +15,11 @@
 #                                 run cloud/pack_lane.sh prepare, then pack_lane.sh campaign over
 #                                 the genomes (default: all of evolve/genomes/*.json), inside tmux
 #   push-raw  <podId> <localDir> <destSubdir>
-#                                 rsync a data directory that is NOT published to HuggingFace
-#                                 (e.g. the raw cd-history records pack_lane.sh wants in
-#                                 TWM_CDH_RAW). Published roots are pulled by the box itself.
+#                                 rsync a data directory that is NOT published to HuggingFace and
+#                                 is needed ON A BOX. Published roots are pulled by the box itself.
+#                                 NOT the way to complete a published root from local raw records:
+#                                 that costs the same uplink and can be done here (see pack_lane.sh
+#                                 prepare-cdh).
 #   pull      <podId>             rsync the pod's cloud/podresults/ down into this repo
 #   terminate <podId>             TERMINATE THE POD — this is what stops billing
 #   status    <podId> | list
@@ -47,6 +49,9 @@
 #   RUNPOD_ENV_TAG      environment tag the scores are ingested under; default derives from the GPU
 #                       type, e.g. runpod-4090. Scores only compare within one tag.
 #   RUNPOD_SEEDS        seeds per genome (passed as TWM_SEEDS; pack_lane's own default is 0,1,2)
+#   RUNPOD_CDH_ARM      mount the cd-history pack for the reported-only cdh probe, e.g.
+#                       'treat'. Unset means no cdh reading is taken at all — which is
+#                       why every record scored before this existed carries a null one.
 #   RUNPOD_ROOT_SHA     encoded-root embedding sha the campaign must match (passed as
 #                       TWM_ROOT_SHA). Defaults to the published root's sha; preflight
 #                       fails closed on a mismatch. Re-pin after a deliberate re-encode.
@@ -103,6 +108,11 @@ TYPES_FILTER="${RUNPOD_TYPES_FILTER:-4090|5090|A100|H100|L40|A40|RTX 6000}"
 ENV_TAG="${RUNPOD_ENV_TAG:-runpod-$(printf '%s' "$GPU_TYPE" | awk '{print tolower($NF)}')}"
 SEEDS="${RUNPOD_SEEDS:-}"
 CONCURRENCY="${RUNPOD_CONCURRENCY:-}"
+# The cd-history root is published complete (embeddings AND the raw records the probe needs to
+# find navigation blocks), so mounting it is a plain pull. Its embedding sha is
+# 6f4727fdbb31e6e7fbf062d65bf95553df5a104d2304c8e5ef7217c5a6101e4c — recorded for a future
+# re-encode to check against; nothing verifies it today, since preflight pins the SCORED root.
+CDH_ARM="${RUNPOD_CDH_ARM:-}"
 # The encoded root is pulled from HuggingFace rather than re-encoded per box, so its tensors are a
 # fact about the published artefact, not about this pod. Pinning the sha makes eval/preflight
 # REFUSE a root whose embeddings differ instead of scoring against them silently — the failure it
@@ -454,9 +464,12 @@ cmd_bootstrap() {
 }
 
 # push-raw <podId> <localDir> <destSubdir> — for data that is NOT in the published HuggingFace
-# repo, which is the only kind worth pushing over a home uplink. Everything published is pulled by
-# the box itself, far faster. The destination is under the pod's data root, so pack_lane.sh can be
-# pointed at it (e.g. TWM_CDH_RAW=~/terminal-wm/data/<destSubdir>).
+# repo and is needed on the box. Everything published is pulled by the box itself, far faster. The
+# destination is under the pod's data root so pack_lane.sh can be pointed at it.
+#
+# Pushing raw records here in order to COMPLETE and publish a root is the wrong shape: the same
+# bytes cross the same uplink either way, and routing them through a pod adds a bootstrap, a
+# billing box and something to strand. Complete it where the records already are.
 cmd_push_raw() {
     local id="${1:?push-raw <podId> <localDir> <destSubdir>}" src="${2:?<localDir>}" dest="${3:?<destSubdir>}" ip port
     _need_host "$id"
@@ -515,14 +528,16 @@ export UV_NO_SYNC=1                 # keep the driver-matched torch bootstrap in
 export TWM_ENV_TAG='$ENV_TAG'       # scores compare only within one environment tag
 export TWM_GPUS='$GPU_COUNT'
 ${SEEDS:+export TWM_SEEDS='$SEEDS'}
-${CONCURRENCY:+export TWM_CONCURRENCY='$CONCURRENCY'}
-${ROOT_SHA:+export TWM_ROOT_SHA='$ROOT_SHA'}   # preflight refuses a root whose embeddings differ   # jobs in flight per pod; unset means the runner's 3-per-GPU default
+${CONCURRENCY:+export TWM_CONCURRENCY='$CONCURRENCY'}   # jobs in flight per pod; unset means the runner's 3-per-GPU default
+${ROOT_SHA:+export TWM_ROOT_SHA='$ROOT_SHA'}   # preflight refuses a root whose embeddings differ
+${CDH_ARM:+export TWM_CDH_ROOT="$POD_REPO/data/dockerfs3-cdhB-$CDH_ARM-nocwd"}   # the second pack's probe runs only when this points at its root; unset means no cdh reading
 ${TWM_RUN_ID:+export TWM_RUN_ID='$TWM_RUN_ID'}   # stamped into .done so a poller can tell THIS campaign's marker from a previous one's
 cd "$POD_REPO"
 mkdir -p cloud/podresults
 exec > >(tee -a "$logfile") 2>&1
 echo "=== prepare  \$(date -u +%FT%TZ)"
 ./cloud/pack_lane.sh prepare
+${CDH_ARM:+TWM_CDH_ARM='$CDH_ARM' ./cloud/pack_lane.sh prepare-cdh}
 echo "=== campaign \$(date -u +%FT%TZ)"
 ./cloud/pack_lane.sh campaign $genomes
 echo "=== done     \$(date -u +%FT%TZ)"
