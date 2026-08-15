@@ -35,7 +35,7 @@ The point is what cancels. A model that keys on the *name* being asked about pre
 | `evolve/genome.py` | resolves a genome's impl names to modules, and the structural gate |
 | `evolve/harness.py` | the training closure — `_train` and the fail-closed encode. Nothing scores here. |
 | `evolve/cups_probe.py` | the pack instrument: the N-way forced-foil measurement, the analytic ceiling arms, and the role-swap probe |
-| `evolve/cdh_probe.py` | a second capability pack — does a read route through the navigation history that actually happened. Reported for every candidate, never scored. |
+| `evolve/cdh_probe.py` | a second capability pack — does a read route through the navigation history that actually happened. Runs only when `TWM_CDH_ROOT` points at the cd-history pack, and never enters selection. No scored campaign has mounted it, so `cdh_routing` is null in every archived record; a run that wants the reading has to set that root. |
 | `evolve/cups_ca.py` | **the objective** — `comp_ca`, built by intersecting the two arms per window |
 | `eval/adapter.py` | the fitness oracle the engine calls: one net per seed, one `metrics.json` |
 | `eval/smoke.py`, `eval/guard_leakage.py`, `eval/guard_stream.py`, `eval/guard_reach.py` | the gates: it builds, it cannot see the future, its tokens are ones the instrument can reproduce, and the parameters it introduces can actually affect something. Which path pays which differs — `evolve score` runs all four in its guardrail phase, while the pack lane calls `eval/adapter.py` directly, so there only the stream and reachability gates (called from the adapter, pre-training) and the leakage check (post-training) run |
