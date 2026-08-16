@@ -197,3 +197,27 @@ Re-measuring the nine selectable founders under identical conditions established
 One of nine moved by more than the floor, which is what a calibrated floor predicts. Treat `fitness.noise_floor = 0.0227` as measured rather than assumed, and treat any single ordering of the leaderboard as one realization: across the two campaigns the nominal best changed genome, and two genomes that differed by `0.026` in one campaign tied in the other.
 
 The practical consequence for a round is that a candidate's number is a draw, not a reading. A difference smaller than the floor is not evidence, and re-measuring the same id is cheap insurance rather than duplicated work: it is the only thing that distinguishes a mechanism from a draw from the tail, and the archive keeps every measurement so the estimates combine. Two independent three-seed runs of one candidate give a six-seed mean at standard error 0.0103 rather than 0.0146.
+
+## 2026-08-16 — the ordinal artifact in cupsF, measured
+
+Every `mv` destination in the cups pack is named `.N`, where N is that move's position in the suffixed chain: **19,252 of 19,252** destinations across train and val. The cue is a property of the pack generator, not of any candidate, and it is total. Anyone reading a `comp_ca` number off this pack should know the cue is present and that it has been probed.
+
+It was probed with `evolve/twin_probe.py`, which trains one net per (genome, seed) and measures those same weights against several val roots differing in one property, so arms are paired at the window level and the training term is identically zero. Nine arms over seven genomes, 19 records of 10 arms. The eligible slice, the metric form and every threshold are unchanged, so this note does not affect comparability with anything scored before it.
+
+The arms that carry the information are NOSUFFIX (the tag becomes a letter), MUGS (the mount is renamed, the ordinal left exactly intact) and RANDPa (a per-sequence random bijection of the digits).
+
+| | mean drop from ORIG, six live genomes | r7-26 (retracted) |
+|---|---|---|
+| NOSUFFIX | +0.012 | +0.9382 |
+| RANDPa | +0.031 | +0.1180 |
+| MUGS | +0.108 | +0.4607 |
+
+The largest population-level effect belongs to the arm that preserves the ordinal. Across the six live genomes the ordinal-targeting arms straddle zero (+0.084, +0.082, +0.023, +0.008, +0.004, −0.127 for NOSUFFIX) and every one of them sits inside the per-seed spread of 0.034–0.081, so for those genomes the question is under-powered rather than answered.
+
+For `r7-26` a control was pre-committed before the data existed: if MUGS — a broader, ordinal-preserving perturbation — cost at least as much as permuting the ordinal, the ordinal attribution was to be treated as dead. It cost 3.3x as much (`D_MUGS` +0.4607, cluster-exact p 6.8e-12, CI [0.352, 0.569]). **The RANDP drop is therefore not distinctively ordinal.** The retraction of `r7-26` is unaffected: it rests on the NOSUFFIX collapse, which is about the tag being a parseable digit form rather than about the digit's value.
+
+Two consequences for practice. The pack is **not** re-minted or relabelled: that would invalidate comparability with every archived score to remove a cue no live candidate has been shown to use. Future packs should simply not print the move position, which is free at mint time. And the twin probe is worth running as a post-score audit rather than a campaign, since measuring extra roots costs no extra training.
+
+The two remaining live genomes above 0.6, `r6-22-matchedrisk-ringband-blocks` and `r7-08-image-balanced-depth-rcbd`, were measured on the same ten roots at three seeds each, so every live genome scoring above 0.6 is now covered. Neither shows the signature: `r6-22` loses one window to NOSUFFIX (+0.0112) against +0.1985 to MUGS, and `r7-08` *gains* under both (−0.1086, −0.1011). Over all eight live genomes NOSUFFIX averages −0.003 and straddles zero, while MUGS averages +0.093 — the ordinal-preserving arm costs more than the ordinal-destroying one across the population.
+
+What this does not settle: whether MUGS costs because of surface size or because `/tmp/w/mugs/` never appears in train (0 of 2560 lines) — that was pre-committed as unknowable from this arm set; and whether the live genomes are ordinal-free or merely under-powered, since every one of their ordinal-arm effects lies inside the per-seed spread of 0.034–0.081. Distinguishing those needs more seeds rather than more arms.
