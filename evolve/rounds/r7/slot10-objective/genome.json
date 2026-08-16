@@ -1,0 +1,47 @@
+{
+  "chunks": {
+    "arch": {
+      "impl": "r24_backward_multihop_pointer_chase",
+      "params": {
+        "addr_hidden": 256,
+        "chase_gate_bias": -2.0,
+        "chase_hops": 6,
+        "chase_logit_scale": 8.0,
+        "chase_step_bias": 1.0,
+        "content_proj": 32,
+        "hop_emb": 16,
+        "n_addr": 2
+      }
+    },
+    "batcher": {
+      "impl": "r2_routed_collision_depth_batcher",
+      "params": {
+        "depth_beta": 0.8,
+        "group_size": 4,
+        "hard_frac_max": 0.5,
+        "ramp_frac": 0.3,
+        "size_pow": 0.5
+      }
+    },
+    "head": {
+      "impl": "r3_occupancy_routed_copy_transport",
+      "params": {}
+    },
+    "objective": {
+      "impl": "r7_board_conditional_routed_contrast",
+      "params": {}
+    },
+    "optim": {
+      "impl": "r5_persistent_gradient_mixture_channel_opener",
+      "params": {}
+    },
+    "stream": {
+      "impl": "baseline_interleave",
+      "params": {}
+    },
+    "target": {
+      "impl": "identity",
+      "params": {}
+    }
+  }
+}

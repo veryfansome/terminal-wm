@@ -1,0 +1,128 @@
+AXES CHANGED: optim only (rewrite). Every other axis keeps the parent's impl name and params
+verbatim. The mechanism is entirely about how the existing parameters are moved, so nothing about
+the arch, head, objective, batcher, stream or target needs to change with it; touching them would
+only confound the read.
+
+MECHANISM
+
+Two changes, one thesis: give each block the geometry its own parameterization actually has, and
+stop using a learning-rate schedule to buy the stability that averaging can buy instead.
+
+(1) Schedule-free AdamW (Defazio et al., "The Road Less Scheduled", 2024) replaces the parent's
+warmup-hold-cosine-floor AdamW + Muon. Three sequences, one stored:
+
+    y_k = (1 - b1) z_k + b1 x_k          gradients are taken at y (the live parameters)
+    u_k = g(y_k) / (sqrt(v_k) + eps)     v is the usual Adam second moment
+    z_{k+1} = z_k - lr_k u_k             the fast iterate takes the whole step
+    c_{k+1} = w_k / sum_{j<=k} w_j,  w_k = (max_j lr_j)^2
+    x_{k+1} = (1 - c_{k+1}) x_k + c_{k+1} z_{k+1}      the lr^2-weighted running mean
+
+Only y and z are materialized; the impl applies the standard in-place recursion
+y <- y + c(z - y) + lr(b1(1 - c) - 1)u, which I verified reproduces the explicit x recursion above
+to machine precision over 200 simulated steps, and converts y to x = y + (1 - 1/b1)(z - y) on the
+final optimizer step so the net that leaves _train IS the averaged iterate. After a short linear
+warmup the learning rate is constant, so with w_k constant the average is uniform Polyak-Ruppert
+over the whole trajectory.
+
+(2) A Riemannian sphere group for the addressing projections, an adaptation of AdamP (Heo et al.,
+ICLR 2021) sharpened by certification instead of a per-step heuristic. Five of this arch's weight
+matrices feed a projection whose output is immediately unit-normalized -- file_read and file_write
+through _quotient (linear, then _unit), path_read, path_write and tr_path through _unit -- and the
+verb codebook is normalized row-by-row after Gram-Schmidt. For all six the loss is exactly
+invariant to W -> cW, so by Euler's theorem <grad L, W> = 0 identically. The impl measures the mean
+|cos(g, W)| over the first detect_steps updates and certifies a weight scale-invariant when that
+mean falls below sphere_delta/sqrt(numel): for the (64,176) projections that threshold is 9.4e-4,
+against a chance-level cosine of 9.4e-3 and a float32 cancellation floor around 1e-5, so the test
+has roughly an order of magnitude of headroom on both sides. A certified weight then (a) has the
+radial component of its update projected out, (b) receives no weight decay, since decay on a
+scale-invariant weight cannot change the function and only shrinks the norm, and (c) has y and z
+rescaled by ONE common factor so ||y|| returns to the norm it was certified at. Because both
+iterates are scaled together, x scales with them, and since the function depends only on the
+direction, the rescale is an exact no-op on the represented model while pinning the norm.
+
+The soft one-sided spectral cap on square (768,768) matrices is kept -- this arch's tr_read is the
+only one -- because that readout is injected additively into the command-position prediction and is
+scale-SENSITIVE, the exact opposite of the addressing group; it is the one place magnitude, not
+direction, has to be controlled. It is now evaluated on the extrapolated point x rather than on y,
+and applied as the same multiplier to y and z, so the cap constrains the iterate that is actually
+measured and cannot make y and z drift apart.
+
+WHY THIS SHOULD MOVE comp_ca
+
+The objective needs the model to carry a particular content's identity through a chain of moves on
+a system it never trained on. Two things stand between the parent and that.
+
+First, effective learning rate on the routing keys. The delta-rule memory addresses slots by the
+direction of the file_read/file_write and path_read/path_write codes; the magnitude of those
+matrices is a null direction of the loss. Under the parent's Muon branch each step adds a
+fixed-RMS increment, so ||W||_F grows roughly like sqrt(t) while the angular motion per step,
+||dW||/||W||, decays like 1/sqrt(t). The addressing geometry therefore freezes partway through a
+fixed step budget, exactly when the chain-depth structure the objective cares about is still being
+sorted out. Under a fixed-norm sphere step the angular learning rate is constant for the whole
+budget (at lr 5e-4 and this arch's initialization it works out near 1.2e-3 radians per step), so
+the keys can still reorganize late. Deeper windows -- the d4+ half of the eligible slice -- need
+more separation between path codes than shallow ones, so this is where I expect any movement.
+
+Second, variance. The parent's reported per-seed comp_ca values, +0.0112 and -0.0112 on n=89
+windows, are exactly plus and minus one window: the whole spread between candidates measured so far
+is a couple of windows out of 89. A large share of that is which basin a seed's final iterate
+happened to land in. Averaging the trajectory rather than annealing into one point attacks that
+component directly, and it is the reason to prefer schedule-free over the parent's cosine-to-floor
+schedule instead of merely bolting an EMA onto it: the average is not a post-hoc smoothing of the
+same trajectory, the gradients are taken at y, which sits 90% of the way toward the average, so the
+trajectory itself is different.
+
+WHAT I EXPECT TO SEE
+
+comp_ca above the parent's -0.0075, with the gain concentrated in the d4+ windows, and less seed-to
+-seed spread than the parent's plus/minus one window. Both claims are UNMEASURED -- I could not run
+the harness from the jail and deliberately did not extrapolate from a miniature run. What I did
+verify without torch: the y recursion reproduces the explicit x average to 1e-16 over 200 steps,
+the final lerp recovers x exactly, and rescaling y and z by a common factor leaves
+x = y + (1 - 1/b1)(z - y) scaled by that same factor, so both the sphere rescale and the spectral
+shrink preserve the schedule-free invariant y = (1 - b1)z + b1 x rather than silently breaking it.
+
+FALSIFICATION
+
+If comp_ca lands at or below the parent's, the reading is that on this budget the averaged iterate
+is undertrained relative to an annealed one, or that a constant angular learning rate on the
+addressing codes keeps them moving so late that the delta-rule memory never settles into a stable
+routing. A follow-up that separates the two would keep the parent's cosine schedule and add only
+the sphere group, or keep schedule-free and drop the sphere group.
+
+BIGGEST RISK
+
+Schedule-free evaluates gradients at y = 0.1 z + 0.9 x, which lags the fast iterate badly early in
+training. On a fixed step budget on frozen encoder embeddings, the averaged iterate can simply be
+undertrained relative to the parent's peak-then-anneal trajectory, and if it is, the whole candidate
+loses on optimization speed rather than on geometry, and the sphere group never gets a fair test.
+The warmup is 5% of the budget and the learning rate matches the parent's peak of 5e-4 rather than
+its schedule-averaged ~3.3e-4, which is the mitigation, but it is an untested one here.
+
+CORRECTNESS NOTES
+
+- No new nn.Parameters are introduced, so there is nothing that could sit behind a no_grad block or
+  on an unreached branch: this axis only reshapes the updates of parameters the arch already
+  trains, and every parameter handed to make() is in the single param group and is stepped.
+- The impl never indexes the token sequence, so the odd-length [cmd_0, obs_0, ..., cmd_r] layout is
+  not something it can get wrong.
+- The class subclasses torch.optim.Optimizer, not nn.Module, and adds only total_steps,
+  sphere_delta, detect_steps, readout_dim, spectral_cap, spectral_iters and averaged, none of which
+  shadow an Optimizer attribute. LambdaLR's step-counter wrapper binds over step() normally.
+- A weight that is exactly zero, or that has no gradient on a step, would make cos(g, W) read 0/0.
+  That is the failure that would falsely certify this arch's THREE zero-initialized matrices
+  (film_out, sysfilm_out, tr_read) as scale-invariant and then pin their norms at zero, deleting
+  them. The certification forces the per-step cosine to 1.0 whenever ||W|| <= 1e-6 or ||g|| <=
+  1e-12, so a single such step is enough to push the window mean far above the threshold and the
+  weight stays in the ordinary AdamW group.
+- Certification is frozen after detect_steps and every subsequent per-step quantity (the tangent
+  projection, the norm restore, the spectral shrink) is computed as a tensor and applied
+  unconditionally, so the hot loop adds no host-device synchronization; the only syncs are one
+  float() per parameter at the certification step and one isfinite check per parameter on the final
+  step. The extra per-step cost is a handful of vector norms plus two power-iteration matvecs on a
+  single 768x768 matrix, which is negligible against the forward and backward passes -- also
+  unmeasured, but it is strictly less work than the parent's five-step Newton-Schulz
+  orthogonalization on six matrices, which this design removes.
+- If steps < detect_steps the detection window is clamped to steps, so certification always
+  resolves; if it resolves negative for everything, the impl degrades gracefully to plain
+  schedule-free AdamW rather than doing anything undefined.

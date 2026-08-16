@@ -1,0 +1,101 @@
+AXES CHANGED: arch only (rewrite). batcher, head, objective, optim, stream and target keep the
+parent's impls and params verbatim.
+
+THE CLAIM I AM ATTACKING
+
+Every prior transport arch in my slot's evidence (parent r18, r25, r23, r5) resolves a move the
+same way: learn one or more linear/GELU readouts off the raw command embedding and hope one of
+them lands on the SOURCE path and a different one lands on the DESTINATION path. r25 has three
+role heads sharing a trunk; r23 has addr_src and addr_dst of identical shape; r5 slices two fixed
+coordinate windows out of the raw token. All of them are trying to make one readout select "the
+first path argument" and another select "the second".
+
+The observations are mean-pooled frozen encoder embeddings. Mean pooling over token positions is
+permutation-symmetric in the tokens it pools, so to first order the embedding of `mv A B` is a
+BAG: verb mass plus the token mass of A plus the token mass of B, with the A/B distinction
+surviving only through second-order contextual effects in the encoder's attention. A linear map
+of a bag is symmetric in the two summands. My hypothesis is that this near-symmetry is why the
+separate-destination-head family has not converted into differential score: the head being asked
+to isolate the destination is being asked to break a symmetry that the pooled representation
+mostly does not carry.
+
+THE MECHANISM
+
+Bag-difference address arithmetic. One shared linear map A is applied to every raw command
+embedding. Subtracting a learned per-role offset vector gives either
+
+    read address     s(P)          for a one-argument command   (`cat P`)
+    joint address    s(X) + s(Y)   for a two-argument command   (`mv X Y`)
+
+The model never learns a destination readout. Instead the store resolves the source from STATE:
+occupancy-biased attention finds which currently-occupied slot's address the joint address
+overlaps (logits = cos(joint, key)/tau + kappa*log(occ)), and the destination is then DERIVED by
+arithmetic,
+
+    a_dst = unit( rho * joint - eta * a_src + b )
+
+with rho, eta scalars and b a bias vector, all learned. This breaks the A/B symmetry using
+something the pooled embedding genuinely does carry — which of the two paths already holds
+content — rather than something it mostly does not.
+
+Slots are addressed DNC-style (Graves et al. 2016, Nature): a write blends content matching
+(cosine against slot keys, occupancy-biased) with a usage-sorted free-list allocation
+(cumprod of ascending usage), gated by whether any occupied slot actually matches. Slot keys move
+toward the address they were written at, so a path seen for the first time claims a free slot and
+is content-addressable ever after. Occupancy is asserted on write and erased at the resolved
+source on a move.
+
+The content written at the destination is the content standing at the resolved source, passed
+through the shared command-conditioned affine transition operator f(s,cmd) = s*(1+gamma) + beta
+that the head axis supervises via transition_from_emb (kept, same signature). The store read is
+blended with the previous-observation channel and injected at command positions through an
+identity-initialised (D,D) tr_read readout under a sigmoid gate.
+
+WHY THIS SHOULD MOVE THE OBJECTIVE
+
+The objective is a paired difference between the native chain and a chain in which two contents
+exchange their move positions. A model that keys on the location being read predicts identically
+in both arms and contributes exactly zero. This store cannot do that: its answer at a read is
+whatever content the chain of derived destinations deposited at that address. In a chain
+A -> B -> C, the first move resolves source A (occupied), derives B, and deposits A's content
+there with B now occupied; the second move's joint is s(B) + s(C), resolves source B because B is
+now the occupied one, and derives C = joint - s(B). Identity is carried, not move-order position:
+nothing in the store reads step index, and the source is chosen by occupancy, not by recency or
+by being first. That is the thing the metric says survives both arms.
+
+WHAT I EXPECT TO SEE
+
+comp_ca above the parent's -0.0112, driven by native_hit at depth 3 and depth 4+ rising while
+swap_stayed falls, with the gap widening rather than shrinking with depth (a first-mover lookup
+has no depth signature; identity carrying does). I expect shortcut_leaning to stay low precisely
+because no step index enters the store. All of this is UNMEASURED — I could not run the harness
+or the metric from the jail.
+
+WHAT I DID VERIFY MECHANICALLY, in the jail, on synthetic addresses
+
+- Shapes and finiteness for L in {1,2,3,5,9,12,57}, including odd L where the final command has
+  no following observation; the store loop runs n_cmd=(L+1)//2 steps and the last step's
+  observation write is gated to exactly zero rather than taking a different branch.
+- Every named parameter receives non-zero gradient from a loss on pred alone (the transition
+  MLP's output layer is initialised small rather than zero for exactly this reason: a zero-init
+  tr_out leaves tr_in and tr_mut_gate with identically zero gradient at init).
+- Causality: perturbing the observation at position 7 leaves the predictions at positions 0..6
+  bit-identical and changes positions 7 onward.
+- Transport: with the address map set to read planted signatures, a read after 1, 2 and 3 silent
+  hops returns the originally exposed content at cosine 0.996-0.998 with attention sharpness
+  ~0.99, untouched locations return their own content, and the derived destination is never
+  supplied from outside. This is a test of the arithmetic, not a performance claim.
+- Speed: 3 forward+backward steps at B=64, L=57 in 1.5 s on CPU, same order as the parent's
+  sequential loop; the per-step state is one [B, slots, 768] fused update rather than two.
+
+BIGGEST RISK
+
+The bag additivity is an approximation. The encoder is a transformer, not a bag-of-words model,
+and the pooled vector of `mv A B` is only approximately s(A) + s(B) after the shared map; if the
+residual non-additivity is large, `joint - a_src` will not land near s(B) and the derived
+destination degenerates into a noisy address that the free-list keeps allocating fresh slots for.
+The learned rho, eta and b can absorb a global affine mismatch but not a content-dependent one.
+A secondary risk is that the source resolution is occupancy-driven, so an exposed-but-never-moved
+distractor whose signature happens to overlap the joint address can be picked as the source; at
+key_d=64 the overlap between unrelated path signatures was small in the synthetic check, but the
+real signatures are not random and share long common prefixes such as /tmp/w/cups/.

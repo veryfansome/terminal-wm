@@ -1,0 +1,104 @@
+AXES CHANGED: head only (r5_dualextractor_displacement_transport -> r7_causal_sinkhorn_chainlink_resolver).
+arch, optim, objective, target, batcher and stream are the parent's, verbatim. The head is the one
+mechanism I am changing, and the two things in it that are co-designed with the rest of the genome are
+deliberately preserved: the addressing projections are still (key_d=64 x hid=256) pairs, so the optim's
+Muon group and its (D,D) spectral cap see exactly the same shapes they saw for the parent, and the
+forward-model consistency aux on the arch's shared transition operator (raw-obs arm + memory arm,
+auto-disabled when the arch has no such surface) is carried over unchanged.
+
+WHAT THE PARENT DOES AND WHY I THINK IT STALLS
+
+The parent addresses an abstract 64-dimensional slot memory: from each command embedding it makes a
+unit source key and a unit destination key, reads the slot at the source key, writes a move-gated blend
+into the destination slot, erases the source. Chaining works only if the destination key of "mv X Y"
+lands on the same slot direction as the source key of "mv Y Z". Two things make that hard here, and both
+are visible in the data. First, every command in a cups window is a near-identical string: the windows in
+evolve/jail_data/train_sample.jsonl move files whose names differ by a single trailing character
+(.../sshd_config.cfg.6 -> .../sshd_config.cfg.7 sitting next to .../sshd_config.cfg.2 ->
+.../sshd_config.cfg.4). A frozen mean-pooled sentence embedding of such a window is dominated by a large
+component that every command shares; the discriminative part is a small residual. Keys built by a fixed
+linear map of that raw embedding, then unit-normalised, are all nearly parallel, so a soft-addressed
+fast-weight memory reads a blur of every slot rather than one slot. Second, no fixed linear layer can
+remove that shared component, because the component is a property of the WINDOW, not of the corpus: it
+is a window-dependent mean, and a Linear can only subtract a constant.
+
+WHAT I CHANGE
+
+(1) Causal window standardisation of the command embeddings before any key is formed. At step j the
+module subtracts a running mean over the window's own commands up to and including j, and divides by a
+running per-window variance, both shrunk toward a LEARNED global mean vector and a learned global scale
+by a fixed prior count (4). This is the shrinkage estimator of the window statistics: at step 0 it falls
+back to the learned global mean (initialised at zero, which is exactly the corpus mean of the
+standardised embeddings, so the module starts at "raw embedding" and the centering strengthens as
+evidence accumulates), and by the scored read position — always the LAST command of the window — the
+estimate has seen every command in the window, so the read query is the one that gets the full benefit.
+It is strictly causal: only commands at or before j, never any observation, enter the estimate.
+This is the "all-but-the-top" / common-component-removal result from the sentence-embedding literature
+(Mu & Viswanath), imported as an equation rather than a metaphor and made causal and learnable.
+
+(2) The abstract slot memory is replaced by an assignment over the window's own earlier commands. Score
+s(j,i) = <W_src c_j, W_dst c_i>/tau - rho*(j-i-1) on the standardised embeddings, masked strictly causal.
+W_src and W_dst are a symmetry-broken pair (dst initialised as src plus small noise), which is the one
+thing I keep from the parent's dual extractor.
+
+(3) The scores become links by log-domain Sinkhorn normalisation with a learned dustbin row and column
+(SuperGlue's matching layer, five iterations, marginals 1 per real row and column and n on each
+dustbin). This is the mechanism I am actually betting on. The ground truth in these windows is a partial
+MATCHING, not an independent choice per row: in the sample window above the true links are 9<-8, 11<-9,
+12<-10, 13<-12, 14<-13, 15<-14, 16<-15, 10<-6, 8<-7 — every earlier step is consumed by at most one
+later step. Independent row softmaxes (what the parent, and every attention-style resolver, does) cannot
+express that constraint; Sinkhorn's column marginal does, and it is exactly the discriminator the
+near-identical filenames need: when step 13 scores nearly as well against step 11 as against step 12, the
+fact that step 11 is already claimed by step 14 pushes 13 onto 12. Column exclusivity therefore replaces
+the explicit erasure term such a resolver would otherwise need.
+
+(4) The chain is resolved to unbounded depth in closed form. A learned relay gate m_i, fed by the step's
+command features and its paired observation, says whether a step delivers its own observation (an
+exposing read) or relays what it received (a move, whose observation is empty and identical across every
+move in the window). content(j) = sum_i a(j,i) [ m_i content(i) + (1-m_i) o_i ] is strictly lower
+triangular in content, so I - A diag(m) is unit lower triangular and one triangular solve gives the exact
+fixed point. No sequential scan, no hop cap, and the query is built from the command alone so the
+trailing command of an odd-length window — whose observation IS the answer and is absent — still issues a
+full query and gets a full resolution. No content ever depends on its own step's observation: the
+assignment is strictly lower triangular, so the injected prediction at cmd_r uses only obs_<r.
+
+(5) Injection and aux. The resolved content enters the arch's own prediction at command positions under
+a sigmoid gate, through a zero-init (D,D) readout plus a small non-zero per-dimension direct scale
+(0.02), so the wrapped net is a 0.005-scale perturbation of the unwrapped net at initialisation while
+every resolver parameter still receives gradient from the main loss AT the scored read position. The
+train-only aux is label-free from the batch alone: a relay-gate calibration against steps whose
+observation sits in an oversized duplicate cluster (the empty-output moves), a commitment term that
+pushes each relay step's assignment row onto a single predecessor (weight 0.05, relay weights detached
+so the gate cannot dodge it by collapsing), and, on mined reads whose observation duplicates an earlier
+one across at least one content-free step, a listwise ranking of both the resolved content and the
+head-augmented prediction against the contentful observations seen so far, under the eval's own
+per-dimension squared-L2 decision variable.
+
+WHY THIS SHOULD MOVE THE OBJECTIVE
+
+comp_ca is the paired difference between the native chain and a chain in which two contents exchange
+their move-position sets over the same board, same destinations, same depth. Everything that keys on
+which location is being read is identical in both arms and cancels per window; the only thing that
+survives is carrying a particular content's identity through the links. This head's prediction at the
+read position is a convex combination of the window's own earlier observations, selected by which
+earlier commands it links to — and role-swapping the chain rewrites exactly those move commands, so a
+resolver that links correctly returns a different observation in the two arms and a resolver that does
+not returns the same blend and contributes zero, not a negative. The recency term is the one part that
+could read as chain-position keying rather than content keying, so it is initialised small (0.05) and
+capped, with the content match as the dominant term; if measurement reports shortcut leaning, that
+parameter is where to look.
+
+WHAT I EXPECT TO SEE, ALL UNMEASURED (I cannot run the harness from the jail)
+
+Beating the parent's +0.0037 needs the links to be better than blur, not perfect. The falsifiable claims,
+in order of how much they would tell us: (a) native pick rate rises above the parent's while the swapped
+"held" rate does not rise with it — that is the signature of real carrying rather than a stronger prior;
+(b) the deeper slice (d4+, n=29) improves at least as much as d3, because the closed-form solve makes
+depth free whereas a fixed-hop or blurred scan degrades with depth; (c) if the Sinkhorn column constraint
+is what matters, the gain should be concentrated in windows with interleaved chains, where two contents
+are in flight at once and independent row softmaxes have no way to keep them apart. The way this fails
+is that the residual after window centering is still too small for the frozen encoder to have kept the
+one-character filename distinction at all, in which case the assignment is near-uniform over the recent
+past, content is a blur, the gate learns to close, and the score sits at the parent's level rather than
+below it. Wall clock should not be a problem and may improve: the parent's per-step sequential scan over
+command positions is replaced by one batched triangular solve plus five 33x33 Sinkhorn iterations.

@@ -1,0 +1,77 @@
+AXES CHANGED: head only (r2_dualaddress_move_transport -> r7_move_ablation_counterfactual_contrast).
+Every other axis keeps the parent's impl and params verbatim. Nothing else needs to change: the new
+head registers no parameters and does not touch net.forward, so the arch, optim, stream, batcher,
+objective and target all see exactly the model they saw in the parent run.
+
+THE CROSSOVER. The partner is the all-baseline genome, whose head is baseline_passthrough: the
+arch's own readout, unchanged, and a forward that is bit-for-bit the unwrapped forward. My parent's
+head is the opposite: it bolts a second content-routing mechanism (a dual-address delta-rule
+transport memory) onto a model whose ARCH is already a content-routing mechanism (the provenance
+chase), and injects that memory's read into the prediction through a learned scale. I take the
+partner's contribution literally -- the prediction path goes back to being the arch's alone, no
+injected read, no parallel memory, no re-pointed forward -- and I keep the parent's contribution
+where it is actually load-bearing: its label-free mining of "this observation is the same content
+that appeared earlier under a different command, with content-free steps in between", and its
+squared-L2 InfoNCE over the row's own observations. Then I spend the head's whole budget on
+something neither parent had: an INTERVENTION.
+
+THE MECHANISM. At train time only, the head runs the net a second time on two edited copies of the
+mined rows and scores the paired difference between them. It never edits the eval path.
+
+  1. Mining (label-free, from the batch tensors alone, no_grad). Content-free steps are found as the
+     one large duplicate cluster every observation batch carries: a move or a redirect prints
+     nothing, so all such steps render to the same observation text and collapse to one embedding.
+     A read step j is mined when its observation duplicates an earlier contentful observation i
+     under a command that is not a duplicate, no earlier step has both the same command and the same
+     observation, and at least one content-free step sits between i and j.
+  2. BROKEN arm: mask out (key_pad + zeroed token, both the command and its observation) every
+     content-free step strictly between the content's first exposure and the read. That removes the
+     only mechanism that could have put that content at that location.
+  3. CONTROL arm: mask out the SAME NUMBER of steps, drawn from steps that provably cannot change
+     what sits there -- earlier contentful reads that are not that content (a read mutates nothing),
+     and steps after the read (a causal model cannot see them).
+  4. Loss = pos_weight * (-log p_control(C)) + diff_weight * softplus(log p_broken(C)
+     - log p_control(C) + margin), where p(C) is the mass the prediction at the read position puts
+     on the mined content under one shared candidate set -- the row's contentful observations up to
+     j, scored by squared L2 at temperature cand_temp.
+
+WHY IT SHOULD MOVE THE OBJECTIVE. comp_ca is a paired difference over two arms that share the board,
+the depth, the destinations and the read, and differ only in which content each move carries. A
+predictor that keys on WHICH LOCATION is asked about cancels to exactly zero there. This aux is the
+same shape of question asked of the training data: both arms carry the same read command at the same
+position, the same observation tokens, and the same number of masked steps, so a location-keyed
+predictor scores the identical p(C) in both arms and eats the full softplus(margin) penalty; so does
+a predictor whose only sensitivity is "how much of the stream is masked". The only way to make the
+term small is to be sensitive to WHICH moves happened between the exposure and the read -- which is
+the capability the metric is trying to detect. The parent's aux could be satisfied by naming the
+content that "belongs" to a location; this one cannot.
+
+Second reason: with no parameters of its own, every gradient this aux produces lands on the arch's
+provenance chase -- the role-unbinding diagonals, the recency and null terms, the stop statistic,
+the content readout. The chase is currently trained only end-to-end, through six hops of soft
+mixture, by a loss averaged over all positions, most of which are ordinary reads that need no chase
+at all. This puts a direct, hard signal on the handful of positions per row where the chase is the
+only thing that can produce the answer.
+
+WHAT I VERIFIED, AND WHAT I DID NOT. Against evolve/jail_data/train_sample.jsonl (24 real
+trajectories) I checked the mining and the intervention with a filesystem simulator that reproduces
+all 365 real read outputs exactly: on every one of the 24 selected examples the broken arm's true
+answer at the read is no longer the mined content, and the control arm's true answer still is, with
+matched mask counts and the read itself never masked. Before adding the min_first / max_span /
+max_ablate gates, 6 of 24 selected examples were coincidentally identical directory listings (`ls -1
+/` vs a later bare `ls`) for which the moves are irrelevant and the contrast would push the wrong
+way; the gates remove all of those. I also checked: the wrapped net has zero new parameters, zero
+new attributes and an unchanged forward; the odd-length scored layout [cmd_0, obs_0, ..., cmd_r]
+runs through the arch untouched because the head is inert outside training; the aux returns a hard
+0.0 on short, malformed or unmined batches; every arch parameter receives gradient from the combined
+loss; and on a 64-row batch through the real r4 stream collate a full step costs about 1.35x the
+no-aux step on CPU, with the aux falling from ~2.0 to ~0.17 over 30 overfit steps. I have NOT
+measured comp_ca or any fitness -- no performance claim here is measured, and I could not run the
+real harness from the jail.
+
+BIGGEST RISK. The parent's +0.6142 may rest on the dual-address transport memory I am deleting, in
+which case removing a working parallel router costs more than supervising the arch's router gains,
+and this lands below the parent. A second risk: the model can make the broken arm wrong by detecting
+mid-sequence padding rather than by tracking content, and although the matched-count control arm is
+designed to price that shortcut out, the two arms still differ in WHERE the holes are, so some of
+that route may remain open.

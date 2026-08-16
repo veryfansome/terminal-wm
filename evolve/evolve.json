@@ -101,7 +101,7 @@
   "noise_floor": 0.0227,
   "noise_runs": 5,
   "noise_meta": null,
-  "selection_env": null,
+  "selection_env": "runpod-4090",
   "env_offsets": {}
  },
  "search": {

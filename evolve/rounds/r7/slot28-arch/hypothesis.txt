@@ -1,0 +1,109 @@
+AXES CHANGED: arch only (r19_obspresent_imagination_worldmodel -> r7_matching_pursuit_backwalk).
+Every other axis keeps the parent's impl and params verbatim. Nothing else needed to change: the
+new arch still exposes transition_from_emb(s_pre, cmd_emb), so the head's forward-model aux
+(erasing_dualaddress_transport_batchhard) keeps its supervision target and keeps fm_off False; it
+still exposes one (D,D) readout for the optim's spectral cap; and it consumes the same
+[cmd, obs, cmd, obs, ...] layout the stream produces.
+
+MECHANISM
+
+The parent, and every arch in its lineage, resolves a chain of moves by writing observations into
+an addressed memory and reading them back. The address is a learned linear map of a command, so
+the write address of "mv SRC DST" and its read address are two different linear maps of the SAME
+mean-pooled vector. Under mean pooling that vector is approximately additive in its two path
+arguments -- emb(mv SRC DST) ~ (c_mv + f(SRC) + f(DST)) / T -- so no linear map can separate the
+source term from the destination term. The lineage has been trying to route content through an
+addressing scheme whose two addresses are not separable from the token it is given.
+
+This rewrite gives up on separating them and exploits the additivity directly. Write the chain as
+P0 -> P1 -> ... -> Pk, read at Pk. Then
+
+    atom(mv P_{h-1} P_h) - atom(cat P_h)  ~  (c_mv - c_cat) + f(P_{h-1})
+
+so ONE subtraction moves an address one hop backwards along the chain, and the source/destination
+distinction is never needed. The arch iterates exactly that, matching-pursuit style: hold a
+residual address z, softly select the earlier command atom that best matches it, and set
+
+    z <- rms( W(mu) - alpha * z + b ),   mu = sum_j attn_j * atom_j,   W = I and alpha = 0.7 at init.
+
+Three pieces make the matching work on real, not idealised, embeddings.
+
+1. Cluster-centered atoms. A raw command atom is ~90% shared verb and shared path prefix, which
+swamps the distinguishing argument. Each command's atom is therefore represented by its deviation
+from the mean of the earlier commands most like it: similarity is measured against the causal
+prefix mean, a saturating sigmoid gate (not a softmax -- a softmax collapses onto the single most
+similar earlier command, which is exactly the one we are trying to find) selects that command's
+cluster, and the cluster mean is shrunk toward the plain prefix mean by a learned pseudo-count so
+a two-member cluster does not inject one specific command's content. A learned orthonormal
+null-frame deflates whatever shared directions survive. Everything is strictly causal: position
+i's frame is built from commands < i only.
+
+2. A monotone backward pointer. Residual f(P_h) matches BOTH the move that wrote P_h and the move
+that later read it away. A soft selected-index pointer carries the last hop's position and a
+learned penalty -softplus(lam) * relu(j - ptr + 1) pushes each next hop strictly earlier in
+command order, which is the physical fact that resolves the ambiguity: a file is created before it
+is moved away.
+
+3. Adaptive-computation-time halting. Chain depth is not known, so each hop also harvests, from
+the same residual, the observation of the earlier command that read that path, and a halting head
+(features: harvest mass and peak, move mass and peak, drift from the initial address; plus a
+direct term kappa*(peak - theta) so a sharp harvest halts at init) mixes the per-hop harvests with
+weights p_h * prod_{g<h}(1-p_g). Hop 0 is ordinary exact-address retrieval -- the repeated-read
+case; hop h resolves a depth-h chain. Unused halting mass simply contributes nothing.
+
+The harvested content is passed through the shared transition operator (zero-shifted at init, so
+it starts as the identity on content) and injected at command positions through an
+identity-initialised (D,D) readout with a sigmoid gate, and also fused into the returned hidden
+state so the walk has a second, non-degenerate gradient route.
+
+WHY IT SHOULD MOVE comp_ca
+
+comp_ca is native_hit minus swap_stayed. A predictor that keys on the read LOCATION contributes
+exactly zero, because the read token is identical in both arms. This mechanism cannot key on the
+location: the answer it returns is the observation reached by walking the actual chain of move
+commands backwards from that location, so re-encoding the move commands under the role swap sends
+the walk to the partner's origin and swap_stayed should drop while native_hit does not. It is also
+not a chain-position lookup: the halting head chooses a hop by harvest sharpness, not by ordinal
+position, and the walk's answer at a fixed depth still depends on WHICH earlier commands the
+residual matched.
+
+WHAT I EXPECT TO SEE, AND WHAT IS UNMEASURED
+
+I could not run the harness, so no claim here is a fitness measurement. What I did verify, on a
+synthetic model of a mean-pooled encoder (T=15 tokens, shared verb + shared path prefix, one
+distinguishing token per path, distractor chains present), with the module's real code and random
+untrained weights across 20 seeds per depth:
+  - the backward move-chain selection is fully correct at INITIALISATION for chain depths 1,2,3,4
+    (20/20 each) and depth 5 (19/20);
+  - restricted to the content-reading commands, the final harvest picks the correct origin
+    observation 20/20 at every depth 1-4.
+So the composition itself is correct by construction, not something training has to discover. What
+training must supply is one thing: a preference for content-reading commands over move commands in
+the harvest attention. That is harv_key_bias, a single linear readout of the raw command
+embedding, with a direct gradient path from the prediction loss (harvesting a move's observation
+returns the content-free "cwd=... exit=0" embedding and is heavily penalised). A learned 128-d
+harvest offset (harv_shift, zero-init) absorbs the constant frame difference between the walk's
+residual and a read command's address.
+
+Falsifiable predictions: native_hit should rise on d4+ windows at least as much as on d3 (a
+mechanism that composes should not decay with depth the way a one-shot retrieval does), swapped
+"held" should fall, and private.shortcut_leaning should not be what carries the score. If instead
+comp_ca rises only on d3 with d4+ flat, the walk is not composing and the gain is hop-0 retrieval.
+
+BIGGEST RISK: the whole mechanism rests on the frozen encoder's mean-pooled embedding of a long
+path string being additive enough, and discriminative enough in the one differing token (the ".7"
+suffix that distinguishes magic.txt.7 from magic.txt.1), for the learned address map to separate
+the paths. My validation used a synthetic additive model, and the real encoder is a transformer
+whose pooled output is only approximately additive; if the distinguishing suffix survives pooling
+too weakly, every hop's attention is diffuse, the halting head learns to stop at hop 0, and the
+arch degenerates to plain nearest-earlier-command retrieval -- which would score near the
+unmodified baseline rather than below it, but would not compose.
+
+SECONDARY RISKS: the halting head can collapse to p=1 at hop 0 early in training (before
+harv_key_bias is learned the hop-0 harvest already looks sharp because move commands are not yet
+suppressed), and there is no aux term in this genome that supervises the walk directly, so all of
+its credit arrives through the single next-observation loss.
+
+COST: measured on CPU at B=64, L=62, the full forward+backward including the head aux is ~0.48 s
+per step versus ~0.63 s for the parent arch alone, and the module has ~2.66M parameters versus the
+parent's ~3.07M, so it should fit the same step budget.

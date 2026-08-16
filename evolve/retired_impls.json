@@ -1,27 +1,6 @@
 {
  "_doc": "Impls retired because their mechanism cannot be MEASURED as what it claims to be, not because they scored badly. Two families so far. (1) Most of these key on a command step whose paired observation is absent: identically false in training (collate clears key_pad for a command and its observation together) and true at scoring only at the final read, whose observation is the withheld answer \u2014 so they train without gradient and cannot act before the read. Every move step does carry an observation; it is exit 0 with empty output, identical across all 23,874 of them, so it binds a constant and the identity of what moved lives only in the command text. (2) stream/alias_resolved_content_codes instead solves the objective OUTSIDE the model, resolving the move chain in Python and stamping the answer into the scored read token. Retirement stops an impl entering new candidates and stops its name appearing in a brief; the archive keeps every record and score it earned, and the source stays on disk so archived genomes remain resolvable. Retiring an impl and retracting the candidates selecting it are separate acts \u2014 doing only the first leaves the mechanism reachable as a parent.",
  "retired": {
-  "head/r20_bounded_native_innovation_observer": {
-   "reason": "_detect_masked_endpoint returns None on every cups layout"
-  },
-  "head/r20_predictive_state_counterfactual_renderer": {
-   "reason": "obs-missing predictive-state route gated on a condition the layout does not produce"
-  },
-  "head/r20_privileged_modular_innovation": {
-   "reason": "_detect_masked_endpoint returns None on every cups layout"
-  },
-  "head/r21_causal_matched_prefix_prototype": {
-   "reason": "_detect_masked_endpoint returns None on every cups layout"
-  },
-  "head/r21_counterfactual_history_guidance": {
-   "reason": "_detect_masked_endpoint returns None on every cups layout"
-  },
-  "head/r21_evidencegated_imagwrite_algebraic_observer_head": {
-   "reason": "_detect_masked_endpoint returns None on every cups layout"
-  },
-  "head/r22_masked_endpoint_trunk_task": {
-   "reason": "trains the trunk on an in-batch layout with a key-padded observation slot between mutation and read, which the instrument never produces"
-  },
   "arch/r20_contentcond_transition_imagwrite": {
    "reason": "imagination write gated on valid_cmd & ~valid_obs"
   },
@@ -43,8 +22,35 @@
   "arch/r21_sourcefused_imagwrite_pathstate": {
    "reason": "source-fused imagination write gated on valid_cmd & ~valid_obs"
   },
+  "head/r20_bounded_native_innovation_observer": {
+   "reason": "_detect_masked_endpoint returns None on every cups layout"
+  },
+  "head/r20_predictive_state_counterfactual_renderer": {
+   "reason": "obs-missing predictive-state route gated on a condition the layout does not produce"
+  },
+  "head/r20_privileged_modular_innovation": {
+   "reason": "_detect_masked_endpoint returns None on every cups layout"
+  },
+  "head/r21_causal_matched_prefix_prototype": {
+   "reason": "_detect_masked_endpoint returns None on every cups layout"
+  },
+  "head/r21_counterfactual_history_guidance": {
+   "reason": "_detect_masked_endpoint returns None on every cups layout"
+  },
+  "head/r21_evidencegated_imagwrite_algebraic_observer_head": {
+   "reason": "_detect_masked_endpoint returns None on every cups layout"
+  },
+  "head/r22_masked_endpoint_trunk_task": {
+   "reason": "trains the trunk on an in-batch layout with a key-padded observation slot between mutation and read, which the instrument never produces"
+  },
   "stream/alias_resolved_content_codes": {
    "reason": "resolves the move chain symbolically in code_cmds (loc[dst] = resolve(src)) and stamps the resolved content identity into the command token, so the scored read token carries the answer. Measured +0.9026 against a best-ever +0.0300. The candidate is retracted; the impl is retired so it is neither selectable nor named in a stream brief."
+  },
+  "stream/r7_cupgen_dualrail_address": {
+   "reason": "Its score is the pack's naming convention, not the capability. Rail GEN is a Sylvester-Hadamard row indexed by the trailing '.<digits>' generation, and in this pack that digit IS the move's ordinal within the window. Measured by twin probe \u2014 one trained net per seed scored against six val roots differing in one property, frame pinned to the original, the IDENT null exact to 0.0 across all 18 records \u2014 comp_ca falls +0.9476 -> -0.0075 when the tag is made non-numeric so _split_generation cannot strip it: 85 of 89 windows, all three seeds, down to the untrained baseline's noise floor. It does not need the digit's VALUE (permuting costs 12 windows) nor the stem (breaking it costs 6) \u2014 only that the convention exists and is machine-strippable. Under the same manipulation r5-19 loses 5 windows, r7-04 loses 1 and r6-28 gains 12. The candidate selecting it is retracted; the source stays on disk so archived genomes remain resolvable."
+  },
+  "stream/r7_rename_chain_origin_address_stream": {
+   "reason": "solves the objective OUTSIDE the model: chain_origins() carries a rename table (union-find) across the whole command list inside code_cmds, which the stream contract requires to be a pure per-command function, and stamps each move's fully compressed chain root \u2014 the exposure slot path of the routed content, i.e. the label \u2014 into the ORG band. An untrained arithmetic decoder reading only the coded command tokens recovers the routed content 640/640 on the real inner split, 100% at every depth d1-d7; the same decoder on the SRC band instead gets 359/640 and solves only depth 1, so the depth-independence is the Python union-find, not role coding. Never scored \u2014 dropped before the campaign, so there is nothing to retract."
   }
  }
 }

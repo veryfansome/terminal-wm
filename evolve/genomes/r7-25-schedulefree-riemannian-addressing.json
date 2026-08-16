@@ -1,0 +1,49 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r18_pathstate_latent_transition_worldmodel",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "head": {
+   "impl": "r18_transition_forwardmodel_consistency",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r7_schedulefree_riemannian_addressing",
+   "bs": 64,
+   "params": {
+    "lr": 0.0005,
+    "wd": 0.0005,
+    "beta1": 0.9,
+    "beta2": 0.95,
+    "eps": 1e-08,
+    "warmup_frac": 0.05,
+    "sphere_delta": 0.1,
+    "detect_steps": 40,
+    "readout_dim": 768,
+    "spectral_cap": 4.0,
+    "spectral_iters": 2
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

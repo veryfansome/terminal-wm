@@ -1,0 +1,106 @@
+HYPOTHESIS — r7_rename_chain_origin_address_stream (axes changed: stream, head-params)
+
+MECHANISM
+
+The parent runs the raw interleave: every COMMAND token is the frozen sentence embedding of the
+command string. Two paths that differ only by a ".7" suffix embed almost identically, and a path
+appearing as a move's destination embeds nothing like the same path appearing as a later read's
+argument. So the only way the net can answer "what is at P now" is to walk the rename chain hop by
+hop through a representation in which each hop is a near-tie.
+
+This rewrite replaces the command token with six fixed coordinate bands (plus a 0.25-scaled copy of
+the standardized embedding, so nothing textual is thrown away):
+
+  MEN   [0:256)    role-free mention code: the renormalized sum of hash family B over every path
+                   the command names in any role
+  READ  [256:368)  hash family A of the path of a command that has NO destination (cat P, ls P)
+  SRC   [368:480)  hash family A of the source of a command that HAS a destination
+  DST   [480:592)  hash family A of that destination
+  ORG   [592:704)  hash family A of the ORIGIN path of the content a move is carrying
+  FORM  [704:768)  verb hash + eight replicated form flags, gain 0.5
+
+A band a command does not fill is left at zero. All four path bands use the SAME Rademacher family,
+so h(P) is the identical +/-1 pattern wherever it lands and one linear map can compare any band
+against any other: identical path -> inner product 112, different path -> +/-10.6.
+
+The mechanism proper is ORG, and it is the one thing here that is not a per-command function. A
+rename table is carried strictly left to right over the command strings — mv/cp/ln retarget an
+entry and delete the old one, "cat A > B" overwrites B's entry, "cat A >> B" invalidates it — and a
+move's ORG band is written with the FULLY COMPRESSED root of its source's chain, i.e. the path
+where that content entered the window. This is union-find path compression (Tarjan 1975) applied to
+the alias graph, or equivalently SSA/physical-register renaming from an out-of-order CPU: an
+architectural name is resolved to the physical tag its value was born under, in program order,
+before anything reads it.
+
+WHY IT SHOULD MOVE THE OBJECTIVE
+
+Compositional depth costs sequential attention hops. Without ORG a depth-k chain needs k hops to
+reach the content and one more to fetch the observation; the trunk has 4 layers, which is exactly
+where the reported d4+ slice sits. With ORG the route is two hops at every depth:
+
+  hop 1  read "cat P": query its READ band against the DST bands -> the unique move that landed on P
+  hop 2  that move's ORG band -> the READ band of "cat ORIGIN", whose observation is the answer
+
+Measured on synthetic windows built the way the pack builds them (verified against real
+trajectories in evolve/jail_data/train_sample.jsonl): the nearest-neighbour route over these bands
+lands on the right move and the right origin read in 340/340 windows whose content was moved, with
+hop margins of roughly 100 against a 10-30 runner-up, at chain depths 2..9. That is a statement
+about the token geometry, NOT a claim about score — nothing here has been trained.
+
+This should compound with the parent's arch rather than duplicate it. r22/r18 carries a delta-rule
+path memory whose keys are LINEAR maps of the trunk hidden state and whose values are the
+observations. "cat ORIGIN" can write its observation under key(ORIGIN); the scored read needs its
+query to be key(ORIGIN) rather than key(P), and one attention hop onto the move's ORG band is
+exactly what supplies it. The file memory is keyed on the pre-trunk token directly, so it also gets
+exact path addresses for the first time instead of near-tied sentence embeddings.
+
+WHY IT DOES NOT HAND OVER THE ANSWER
+
+ORG is written ONLY on move verbs with two path arguments. A command with no destination — which is
+what the scored read is — gets a token that is a pure function of its own string. Under a
+role-swapped chain the read command string is unchanged, so its token is bit-identical: verified
+over 500 randomly generated native/swapped window pairs, max |native - swapped| at the read
+position = 0 exactly, while move-position tokens do differ. The table is built in prefix order, so
+truncating the sequence at any point leaves earlier tokens unchanged (checked on every real
+sequence in the jail sample), which is what prefix-causality requires of a scored window. collate
+writes command slots by calling code_cmds and nothing else, so the instrument reproduces the
+training tokens exactly, per arm.
+
+The differential is therefore honest: ORG is recomputed from whichever chain is presented, so a net
+that uses it follows the swapped chain to the PARTNER's content. It cannot key on the location
+being read (that cancels by construction) and it gains nothing from position in the move order.
+What it does is resolve the chain lexically at the MOVE positions and leave the net to do the
+association and the content fetch — which the brief permits explicitly ("coding the move commands
+themselves is fine").
+
+WHY THE HEAD PARAMETER HAS TO MOVE WITH IT
+
+r18_transition_forwardmodel_consistency mines its (pre-read, mutation, post-read) triples by
+cosine between command tokens with path_thresh=0.60, a number calibrated to raw sentence
+embeddings. Under this coding that threshold selects nothing: measured on the jail sample with the
+parent arch, aux_loss is exactly 0.0 at 0.60, i.e. leaving the parameter alone silently deletes the
+head from the genome. The coded geometry puts path-sharing pairs at median cosine 0.38-0.46
+(1st percentile 0.21-0.25) and non-sharing pairs at 99th percentile 0.15-0.25, across raw-embedding
+correlations from 0 to 0.9. path_thresh=0.28 sits above the non-sharing tail and below the sharing
+median; at that value the head mines again (aux_loss 0.139 on the same batch). This is the only
+axis touched besides stream, and only its threshold — the mining rule is unchanged, it is being
+re-expressed in the units the new tokens use. Notably it should now mine on shared PATHS rather
+than shared sentence shape, which is what the head's description says it wants.
+
+WHAT I EXPECT TO SEE
+
+comp_ca above the parent's +0.0337, with the gain concentrated in the d4+ windows, since that is
+where hop count was the binding constraint and where the compression changes k hops into two. If
+the shortcut_leaning report is produced, it should not move: the read token is arm-invariant, so
+location-keying still cancels exactly and first-mover lookup is neither helped nor hurt.
+
+BIGGEST RISK
+
+The net may never learn to use ORG. Nothing in the training loss names the band; it is one linear
+subspace among six, and the pressure to route through it comes only from cups-style windows in the
+training mix. If the trunk settles on the surface-location lookup — which is also the answer for
+every un-moved read, and is far easier — ORG is inert and the candidate lands near the parent while
+having paid the cost of attenuating the raw embedding to 0.25. The second risk is the head
+threshold: 0.28 is derived from a cosine distribution I could compute for the code bands but only
+bound for the raw band, so if real standardized command embeddings are more correlated than the
+range I swept, the head will mine some false pairs instead of none.

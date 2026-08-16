@@ -1,0 +1,68 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives",
+   "params": {}
+  },
+  "arch": {
+   "impl": "r5_dualaddress_transport_closure",
+   "params": {
+    "addr_w": 224,
+    "dst_lo": 224,
+    "erase_bias": -2.0,
+    "obs_info_bias": 4.0,
+    "ref_d": 128,
+    "ref_pd": 64,
+    "ref_recency_init": 0.1,
+    "src_lo": 0
+   }
+  },
+  "optim": {
+   "impl": "r7_address_isometry_retraction",
+   "params": {
+    "avg_frac": 0.25,
+    "beta2": 0.95,
+    "floor_ratio": 0.1,
+    "hold_frac": 0.3,
+    "key_d": 64,
+    "lr": 0.0005,
+    "momentum": 0.95,
+    "ns_steps": 5,
+    "ortho_iters": 12,
+    "ortho_rate": 0.5,
+    "rms_match": 0.2,
+    "router_lr_mult": 2.0,
+    "router_ortho_rate": 0.35,
+    "router_out_max": 128,
+    "router_wd": 0.0,
+    "spectral_cap": 4.0,
+    "spectral_iters": 2,
+    "warmup_frac": 0.04,
+    "wd": 0.0005
+   }
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "r5_dualrole_address_mention_code",
+   "params": {}
+  },
+  "head": {
+   "impl": "r5_rawaddress_dualpre_consistency",
+   "params": {
+    "mem_arm_w": 0.5,
+    "path_thresh": 0.42
+   }
+  }
+ }
+}

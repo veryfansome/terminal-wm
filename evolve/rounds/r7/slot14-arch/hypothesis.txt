@@ -1,0 +1,134 @@
+AXES CHANGED: arch only (r18_pathstate_latent_transition_worldmodel -> r7_causal_sinkhorn_deposit_closure).
+objective / optim / target / batcher / stream / head are the parent's, verbatim. Why they must NOT
+change is argued at the end, because the new arch was shaped to keep both co-designed partners live.
+
+WHAT THE MECHANISM IS
+
+The parent stores content by hashing each command into ONE address of a delta-rule associative
+memory, then reads that same address back. A move is a command whose source and destination are
+different locations, so a single address per command cannot express transport at all; the parent's
+latent-transition operator patches over that by learning to TRANSFORM whatever sits at the address
+instead of RELOCATING it. I replace the whole memory with an explicit relational one.
+
+Every command position gets, from one shared GELU reducer on its raw 768-d embedding, a pickup
+vector and a deposit vector. The score S[i,j] = <pickup_i, deposit_j>/sqrt(k) + b_pick(i) + b_dep(j)
++ w * <ov_i, ov_j> asks one question: does command i pick up what command j put down? It is
+deliberately an ASYMMETRIC low-rank bilinear form on the raw embeddings rather than two decoded
+addresses, because a mean-pooled sentence embedding of "mv A B" is close to a symmetric function of
+A and B, and the antisymmetric part that survives contextualization is exactly what a bilinear form
+can isolate and two independent linear address heads cannot.
+
+S is masked to j < i and then turned into a soft PARTIAL MATCHING by the mechanism imported from
+outside this domain: SuperGlue's dustbin-augmented Sinkhorn optimal-matching layer (Sarlin et al.
+2020), run in log space. A row dustbin (per-command logit) is the "I originate my own content"
+option; a column dustbin is the "my deposit is never picked up" option. The plain row softmax that
+prior archs here use enforces only "each pickup chooses one deposit". Sinkhorn adds the constraint
+this data actually satisfies -- each deposit is picked up at most once -- and that constraint is
+what structurally suppresses many reads collapsing onto one popular deposit.
+
+The one novel change I had to make to import it: standard Sinkhorn's column normalization couples a
+column to ALL rows, including later commands, which would make the layer non-causal in the command
+stream. I replace it with a PREFIX column normalization -- torch.logcumsumexp over the row axis --
+so column j at row i competes only against rows i' <= i. Measured: replacing commands 9..11 changes
+rows 0..8 of P by exactly 0.0. At the scored position, which is the LAST command in the window, the
+prefix is the whole sequence, so the read still sees the full matching.
+
+Given the strictly-lower-triangular row-substochastic P, deposits are resolved by EXACT transitive
+closure, not by a recurrence: dep = sum_t P^t (own * obs), computed by repeated squaring in
+ceil(log2 n) steps (acc += A@acc; A = A@A). The value used at command i is pulled_i = (P @ dep)_i,
+which touches dep_j only for j < i and hence obs_l only for l < i -- strictly causal, and the read
+command's own (absent) observation is never involved. Row coefficients sum to own_i + rowmass_i <= 1
+with equality when the origination gate is open, so the closure is a genuine convex combination of
+earlier observations and content is NOT attenuated by chain depth. Only the final hop carries
+rowmass, and that is divided out with a floor (scale bounded by 1/0.2 = 5), so a depth-5 answer
+comes back at the same magnitude as a depth-1 answer.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca is native_hit minus swap_stayed. Location-keying cancels exactly. What does not cancel is a
+predictor that follows the actual chain, because the role-swap gives the two contents each other's
+move POSITIONS while the board, the destinations, the depth and the final read command are all
+unchanged. The only thing that differs between the arms is WHICH command string sits at which move
+position, i.e. exactly the src/dst pairing that S[i,j] scores. A model whose read is a transitive
+closure over that pairing therefore returns a different content in the two arms by construction; a
+model that reads an address derived from the read command alone returns the same one.
+
+I also deliberately removed every recency prior. r5's closure and the parent's decay both bias
+toward "the most recent thing", and a first-mover / recency lookup is the analytic non-tracker that
+scores positive on this frozen slice. There is no gap term, no decay, no positional prior in S; the
+column dustbin plus prefix-column competition is the only thing that breaks ties between deposits,
+and it breaks them by contestedness, not by distance.
+
+FALSIFIABLE PREDICTIONS (all unmeasured on the real harness -- I cannot run it from the jail)
+
+1. comp_ca > +0.0075. If the mechanism is right the gain should sit in the d4+ windows, where
+   address-hashing degrades and closure does not: I predict comp_ca on the d4+ subset >= comp_ca on
+   the d3 subset. If instead d4+ is flat or negative while d3 carries the whole number, the matching
+   is not chaining and the result is depth-1 pattern matching, and the hypothesis is wrong.
+2. private.shortcut_leaning should not rise relative to the parent. If the number goes up together
+   with comp_ca, the win is recency/first-mover and the design failed on its own terms.
+3. Ablating Sinkhorn to a plain row softmax (sink_iters=0, one row normalization) should LOWER
+   comp_ca. If it does not, the matching constraint contributed nothing and the whole import was
+   decoration.
+
+WHAT I VERIFIED LOCALLY (structure only; no claim about the score)
+
+- Interface: build(**params) -> module, forward(tok_emb, types, key_pad) -> (pred [B,L,768],
+  h [B,L,192]), predicting at every position. Finite output at L = 1, 2, 3, 12, 13, 62, 63, with
+  ragged padding, so the ODD scored layout [cmd_0, obs_0, ..., cmd_r] is handled: n_cmd = (L+1)//2,
+  and every per-step tensor built from obs positions is padded up to n_cmd, with the read row's
+  origination term zeroed by its own validity mask.
+- Causality: the stream's leakage_ok replica gives exactly 0.00e+00 change at commands 0..3 when
+  obs_3 is corrupted by 100x noise; corrupting EVERY observation in turn and checking all commands
+  at or before it gives no leak anywhere.
+- Reachability: with the loss taken ONLY at the last command of an odd-length sequence, no parameter
+  has zero or missing gradient. This required two init choices -- overlap_scale starts at 0.25 (at
+  0.0 it kills link_overlap's gradient) and route_out starts at std 1e-3 rather than exactly zero
+  (at exactly zero it kills route_gate's gradient). The routed content also enters the hidden state
+  through a non-zero-init gated projection, so the whole routing path is live from step 0.
+- Closure algebra on a hand-built depth-3 chain (expose A at L0, expose B at M0, mv L0->L1,
+  mv M0->M1, mv L1->L2, read L2): pulled at the read is content A at coefficient exactly 1.0, and
+  the parallel B chain resolves to B. This is the arithmetic the mechanism is for.
+- Matching properties: P is strictly lower triangular, row sums <= 1, zero mass on padded rows and
+  columns. On an adversarial score matrix where seven rows all want deposit 0, total pickup mass on
+  column 0 falls 5.35 -> 1.33 -> 0.34 at 0, 1, 3 Sinkhorn passes. Default is 2.
+- Ten real training steps with the genome's own objective and optimizer stay finite and decrease.
+- Speed: 0.095 s/step forward+backward on CPU at B=32, n=31, against 0.234 s/step for the parent
+  arch on the same input -- about 2.5x faster, at 3.52M params vs the parent's 3.07M. The parent's
+  python loop over steps and its chunked triangular solves are both gone; what replaces them is 2
+  Sinkhorn passes and 5 squaring steps of [n,n] and [n,n]x[n,D] matmuls.
+
+WHY THE OTHER SIX AXES STAY, AND WHY THAT IS A DESIGN CONSTRAINT AND NOT LAZINESS
+
+The optim (r18_spectral_capped_transition_readout) routes identical-shape (key_d, hidden) addressing
+PAIRS to Muon and spectral-caps (D,D) readouts. I sized link_pickup / link_deposit / link_overlap as
+three (64, 192) tensors so all three land in the Muon group -- orthogonalized updates are the right
+prior for vectors whose only job is to be discriminable addresses -- and made route_out the single
+(768, 768) tensor so the spectral cap regulates the readout gain. Verified by replaying the optim's
+own selection code against my parameter list.
+
+The head (r18_transition_forwardmodel_consistency) disables itself on any arch without
+transition_from_emb. I kept that entry point and made it the SAME operator that renders the pulled
+content before the readout, so the head's mined (pre-content, command, post-content) triples train
+the exact function that runs at the scored read. Verified: head reports not-disabled, aux is a
+tensor, and it delivers gradient to tr_out. Swapping either axis out would leave the new arch with
+an untuned readout gain or a dead auxiliary.
+
+The objective, batcher, stream and target are untouched so this slot measures ONE thing. Note also
+the standing context: the unmodified baseline scores +0.0112 against this parent's +0.0075, i.e. the
+parent's accumulated memory machinery is currently a net cost on the objective. That is the argument
+for a rewrite that deletes it wholesale -- the delta-rule file and path memories, the verb quotient
+codebook, the FiLM views, the system summary, the three-way read mix, the step-by-step transition
+recurrence -- and puts a reference-shaped trunk (d=192, 4 layers, ffn 4x) underneath a single
+mechanism aimed at the one question the metric asks.
+
+BIGGEST RISK
+
+The frozen encoder mean-pools "mv A B" into one vector, so the pickup/deposit asymmetry the bilinear
+form must find may be too weak to learn inside the fixed step budget, especially when A and B differ
+only by a numeric suffix. If S cannot separate source from destination, Sinkhorn will hand back a
+well-conditioned but semantically arbitrary matching, the closure will faithfully propagate the wrong
+content, and comp_ca lands at or below the parent -- with a cleaner and faster model as the only
+consolation. A secondary risk is that the prefix-column normalization, which is an approximation to
+Sinkhorn rather than an exact fixed point, distorts the matching enough at 2 passes that the column
+constraint helps less than the pathological test suggests; prediction 3 above is the check.

@@ -1,0 +1,118 @@
+AXES CHANGED: arch only (rewrite). batcher, head, objective, optim, stream and target keep the
+parent's impls and params verbatim. The mechanism depends on the parent's stream, but as a
+consumer of what that stream already emits, not as a change to it — see "why the stream matters"
+below.
+
+THE DEFECT I AM ATTACKING
+
+The parent arch (r18_pathstate_latent_transition_worldmodel) has a per-path latent-transition
+memory with exactly ONE address per step: it reads slot p(cmd), applies a command-conditioned
+affine edit, and delta-rule writes the result back to p(cmd) — the SAME slot it read. A memory
+that always writes where it read cannot relocate content. `mv A B` can only rewrite whatever sits
+at the single address the whole command string hashes to; it can never make the content that was
+at A appear at B. So the parent's only route to the scored read is its file/path associative
+memories keyed on the read command, i.e. exactly the location-keyed predictor that the paired
+metric cancels to zero per window by construction. That is consistent with a parent whose measured
+comp_ca sits within noise of zero (one seed reported at -0.0112).
+
+THE MECHANISM
+
+I replace the whole memory stack with a location->content SLOT BANK whose update rule is a soft
+permutation operator on the slot axis.
+
+State: M in R^{B x S x D}, S=64 slots, each slot holding a D=768 content vector.
+
+Each command i produces TWO simplex addresses over the slots, a (source) and b (destination):
+
+    a_i = softmax( tau * cos( P (g_src . z_i), K ) )
+    b_i = softmax( tau * cos( P (g_dst . z_i), K ) )
+
+z_i is the raw command token, "." is elementwise product, P is ONE shared projection
+(R^768 -> R^64), K is a learned codebook of S slot keys and tau a learned inverse temperature.
+Only the diagonal gains g_src / g_dst differ between the two addresses; P and K are shared, which
+is what forces "the same path reaches the same slot no matter which command mentions it".
+
+Per step, with c_src = a_i^T M and c_dst = b_i^T M:
+
+    M <- lambda M + b_i (g_i s_b (f(c_src) - c_dst))^T  -  a_i (g_i s_a (1 - <a_i,b_i>) c_src)^T
+    M <- M + a_i (w_i s_a (obs_i - a_i^T M))^T           [only when step i has an observation]
+
+with g_i a learned move gate, w_i a learned observation-presence gate, s = 1/(||addr||^2 + eps)
+the delta-rule normaliser, and f a low-rank content transform that is EXACTLY the identity at
+initialisation. When a_i and b_i are one-hot on slots p and q, the first update is precisely the
+elementary permutation matrix that moves row p to row q; a chain of moves therefore composes into
+the product of its operators, which is what "carrying a particular content's identity through the
+chain" means arithmetically. The <a_i,b_i> overlap factor makes a move whose two addresses
+coincide an exact no-op, so the recurrence is the identity at initialisation instead of an eraser.
+
+The read c_src is taken BEFORE the step's own writes, and the observation store happens after,
+so the recurrence is strictly causal: the scored command (odd-length layout, no trailing
+observation) reads the bank built entirely from earlier steps and writes nothing that can matter.
+
+WHY THE STREAM MATTERS (and why I did not change it)
+
+The parent's stream writes a role-bound code into the last 128 coordinates of every command token:
+each path contributes a fixed +/-1 Rademacher vector twice, once bound to its role by elementwise
+multiplication with a fixed role vector (src / dst / read) and once unbound. That is a Vector
+Symbolic Architecture bundle, and elementwise multiplication by a +/-1 vector is its own inverse.
+So "unbind role r" is a DIAGONAL linear map, and any fixed combination of unbindings is still
+diagonal — which is exactly what g_src and g_dst are. A single learned diagonal can therefore
+realise (role-free) + (unbind src) + (unbind read), which recovers the same path vector from
+`cat P` (where P carries the read role) and from `mv P Q` (where P carries the src role). This is
+the structural reason a shared projection P can put both on the same slot, and it is why the
+parent's single whole-string address could not: no linear map of the mean-pooled sum can pull the
+first path out of `mv A B` while ignoring the second unless the roles were bound in the first
+place. g_src and g_dst are initialised to the role-free channel (uniform on the code region, 0.25
+elsewhere), which is already the strongest single channel available, and are free to move toward
+the role-unbound mix.
+
+The softmax over a learned codebook is a VSA cleanup memory: the unbound path vector is signal
+plus several pseudo-random bundle terms, and snapping it to the nearest slot key restores exact
+agreement between the address a path gets as a `cat` argument and the address it gets as an `mv`
+argument. tau is learned, so the bank interpolates continuously between a hard quantiser
+(cleanup, sharp binding) and a smooth superposition memory (graceful under slot collisions);
+neither regime is legislated.
+
+READOUT
+
+The prediction at each command position is a four-way CONVEX mixture over {trunk head, slot read,
+previous observation, command-similarity lookup over earlier observations}. Convex rather than
+additive, and with the slot-read channel passing through a zero-initialised (D,D) residual, so the
+model can emit a retrieved content vector VERBATIM — which is what the nearest-neighbour retrieval
+measurement rewards. That (D,D) readout is also what the co-designed optim's spectral cap acts on,
+so the optim keeps its role unchanged.
+
+WHAT I EXPECT TO SEE, AND WHAT WOULD FALSIFY IT
+
+Expectation: the scored differential rises above the parent's +0.0150 because native_hit on
+deeper windows (d3, and especially the 29 d4+ windows) improves while swap_stayed does not — the
+role-swapped chain re-encodes the move commands, which changes which slot each move reads and
+writes, so a bank that actually transports must land on a different content, whereas the parent's
+location-keyed reads land on the same one in both arms. Concretely: if the bank works, the gap
+should be carried by the d4+ bucket rather than spread evenly, and private.shortcut_leaning should
+not be what is doing the work.
+
+I state this as UNMEASURED. I could not run the harness or even import torch from the jail, so
+there is no timing or accuracy number behind any of it. Speed: the sequential loop does four
+[B,S] x [B,S,D] products per step and no per-step MLP over D, against the parent's per-step
+176->192->1536 transition MLP plus two chunked delta-rule solves, so I expect it to be no slower
+than the parent — also unmeasured.
+
+Falsifiers, in order of how much I believe them:
+
+1. Slot collisions. S=64 slots and a noisy unbound address; if two of a window's five board paths
+   land on the same slot the delta rule overwrites one with the other and the read returns the
+   wrong content. The measured signature would be native_hit near chance on d3 windows that the
+   parent already got, i.e. a candidate that is worse than its parent rather than merely flat.
+   The learned temperature is the designed escape hatch (a diffuse address superposes instead of
+   overwriting), but nothing guarantees training finds it.
+2. The move gate never separates. g_src and g_dst start ~equal, so every move is a no-op at init
+   by construction; the symmetry has to be broken by gradient. The head's aux InfoNCE on
+   duplicated observations across a mutation is the only direct routing signal, and if it is too
+   weak the bank degenerates into a plain single-address store and I have paid the rewrite for
+   nothing.
+3. Lost generic competence. I deleted the FiLM readout, both chunked delta-rule memories and the
+   system-summary channel. If those were carrying the ordinary next-observation accuracy, native
+   hit rate falls everywhere and the differential collapses even if the transport itself is
+   correct. The command-similarity lookup channel is the hedge, and it is a weaker one than what
+   it replaces.

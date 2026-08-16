@@ -1,0 +1,92 @@
+AXES CHANGED: batcher only (r6_sysblock_hardneg_curriculum -> r7_reread_yield_madow_pps).
+Every other axis keeps the parent's impl and params verbatim. The mechanism is entirely a
+question of which sequences co-occur in a batch and how often each is drawn; it needs no
+change to the loss, the architecture, the optimizer, the target, the stream or the head,
+and touching any of those would confound the reading.
+
+WHAT THE PARENT DOES AND WHY I DID NOT KEEP IT AS IS
+The parent anneals from uniform to 75% of the batch drawn, with replacement, from one
+randomly chosen system image. It treats every trajectory in that image as interchangeable
+and it treats a batch as a lottery. Two things follow. First, the multinomial draw inside a
+single image's pool collides with itself: measured on a realistic split at bs=64 it returns
+about 61 distinct sequences out of 64, so roughly three slots per batch are spent on a
+sequence already present, and a duplicated sequence contributes rows that the paired
+objective folds into an exact equivalence class and downweights. Second, and much more
+important, trajectories are NOT interchangeable for this objective.
+
+THE PROPERTY THE PARENT IGNORES, MEASURED ON REAL TRAJECTORIES
+The paired objective r6_occupancy_transport_name_decoy does not weight rows uniformly. It
+gives four times the occupancy weight to rows it calls "repeat": a row whose target exactly
+duplicates an earlier row of the SAME trajectory issued under a DIFFERENT command, with a
+duplicate set of at most four. That is the post-chain re-read - the read of a location that
+a move filled - and it is the row whose geometry matches what the score actually asks about.
+The decoy hinge is narrower still: it fires only on such a row when at least two earlier
+rows of the trajectory carry different content and one earlier command stands out in
+similarity, which under the parent's stream means an earlier read whose path shares atoms
+with the re-read's path - the name's former occupant, present in the same trajectory.
+I counted both predicates directly on the real trajectories in evolve/jail_data. The count
+of re-read rows per trajectory runs from 1 to 6 (mean 2.9, sd 1.3) and the count of
+decoy-bearing re-reads from 1 to 5. A sixfold spread, and the parent samples it flat. The
+decoy term is also normalized by its own gate mass and returns nothing at all when no row is
+gated, so the number of gated rows in a batch sets the variance of exactly the gradient that
+teaches "do not answer with what this NAME used to hold" - the one term in the loss aimed at
+the shortcut the score is built to cancel.
+
+THE MECHANISM
+Two changes serving one idea: give each sequence a size measure counting the rows that carry
+the transport signal, and then draw the batch as an exact design instead of a lottery.
+
+(1) Size measure. Per sequence, from its own standardized observation embeddings and its own
+command strings: size = 1 + w_reread * (re-read rows) + w_decoy * (decoy-bearing re-reads),
+using the objective's own predicates rather than a proxy for them. Duplicate detection is
+exact, not approximate: two identical rendered observations produce identical embeddings, so
+their distance is exactly zero under any linear projection, which is why a variance-
+preserving Gaussian projection to 96 dims can cut the per-sequence distance matrices to a
+fraction of their cost without risking the equality test. On the real trajectories the
+projected measure reproduces the full-space counts with zero error.
+
+(2) Madow systematic probability-proportional-to-size sampling, imported from survey
+sampling (Madow 1949; the same family as the balanced-sampling cube method). Inclusion
+probabilities are set proportional to size^gamma, scaled to sum to exactly the batch size,
+and capped at one by the standard redistribute-the-excess fixpoint. The frame is freshly
+permuted, the probabilities are accumulated, and one uniform start u selects the units whose
+cumulative intervals contain u, u+1, ..., u+bs-1. This draws without replacement, realizes
+each unit's inclusion probability exactly rather than in expectation over repeated
+multinomial trials, and holds the count at exactly bs with zero variance. gamma ramps from
+zero on the same schedule as the hard fraction, so the opening of training is the plain
+distribution and the tilt arrives with the blocking. The parent's annealed same-image
+concentration is kept verbatim in structure as the first stage - images are chosen
+proportional to their aggregate size, the hard share is drawn systematically inside them -
+and the remaining slots are drawn systematically from everything not already selected, so
+the batch is fully distinct end to end.
+
+WHAT I EXPECT TO SEE, AND WHAT WOULD FALSIFY IT
+Measured on a realistic split (n=2400, bs=64, 400 steps) against both the parent's scheme
+and plain uniform: re-read rows per batch rise from 187 to 224 (+20%), decoy-bearing rows
+from 157 to 191 (+21%), distinct sequences per batch from 60.7 to exactly 64.0, while late-
+training same-image concentration is unchanged (49.8 vs 50.2 slots of 64). Those are counts
+of the batch's composition, measured, not a claim about the score. The score claim is
+downstream and UNMEASURED: I expect comp_ca to rise because a larger and less variable share
+of each step's gradient comes from the rows the objective upweights and the decoy hinge
+gates, which is the part of the loss that pushes the model to answer a re-read with what the
+chain routed there rather than with what the name used to hold. Nothing here can move the
+score by keying on chain position: the batcher never sees the eval, and the size measure is a
+per-sequence count that is identical under any relabeling of which content moves where.
+The hypothesis is falsified if comp_ca does not move despite the composition shift; that
+would say the transport terms were never gradient-starved and the batcher axis is spent on
+this objective. It is falsified in the other direction, and worse, if comp_ca moves while the
+capability gate falls, which would mean the tilt is buying the differential by narrowing what
+the model trains on rather than by teaching transport.
+
+COST AND CORRECTNESS
+Setup is one projection pass over all rows plus one small distance matrix per sequence:
+0.23 s at n=2400 and 0.99 s at n=10080, one time. Per-step cost is 0.28 ms at n=10080, which
+over a 4000-step budget is about one second in total. The batcher introduces no parameters,
+so there is nothing for a reachability gate to reach; it reads fit and never mutates it,
+owns two private generators and touches no global RNG, and is deterministic given the seed
+(verified by replaying 400 steps from a second construction). Contract, bounds and length
+were exercised at bs=33 and bs=64, on splits of size 2, 5, 64, 65, 480, 2400 and 10080, and
+under degenerate settings (hard_frac_max=0, gamma_max=0 and 4.0, eq_frac=1.0, proj_dim=8,
+n_block_images=3). It falls back to uniform when the batch is not smaller than the split or
+no size measure can be built, and the image stage is skipped when there are fewer than two
+images.

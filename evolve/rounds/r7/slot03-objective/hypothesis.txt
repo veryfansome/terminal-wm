@@ -1,0 +1,80 @@
+AXES CHANGED: objective only (r22_exact_target_equivalence_quotient ->
+r7_paired_difference_alignment). arch, optim, target, batcher, stream and head are the parent's
+verbatim. The mechanism is a pure loss-shaping term over (pred, tgt) rows, so it needs no
+collaborating change anywhere else: it introduces no parameters, no new tensors in the batch, and
+no assumption about the token layout. Touching another axis would have been an unjustified
+liability.
+
+THE MECHANISM. Keep the whole r22 backbone (exact-target equivalence classes, occurrence measure
+1/class_size, per-dimension precision weighting, class-balanced MSE anchor, focal listwise
+class-NLL, confusability-ring importance and the gated repulsion hinge) and ADD one term: a paired
+difference-alignment hinge over rows that are near each other in the flattened cmd-position order.
+
+Take two rows i and j with numerically distinct targets. The matched-versus-swapped assignment
+cost in the eval's own decision variable is
+
+    s_ij = d2(i,i) + d2(j,j) - d2(i,j) - d2(j,i)
+
+and it collapses algebraically to exactly
+
+    s_ij = -2 (p_i - p_j) . (t_i - t_j) / D.
+
+Every squared-norm term cancels. So "the matched assignment must beat the swapped assignment" is
+identical to "the prediction difference must have positive projection on the target difference".
+I score that projection as a scale-free regression coefficient,
+
+    alpha_ij = (p_i - p_j).(t_i - t_j) / max( ||t_i - t_j||^2 , 0.1 * mean_offdiag ),
+
+and penalise it with a smooth hinge, tau * softplus((0.75 - alpha_ij)/tau), tau = 0.25. The
+denominator clamp keeps a near-duplicate-but-distinct pair from dividing by a vanishing number
+while still leaving those pairs the hardest ones. Pairs are restricted to |i - j| <= 16 (rows of
+one trajectory are contiguous in the flattened order, so this is a within-board neighbourhood,
+which is where the sibling contents of a window live) and weighted by the r22 occurrence measure
+1/class_i * 1/class_j, so the very large exact-equal class of silent commands -- every mv, every
+redirect, whose rendered observation is the identical "cwd=... exit=0" string, verified in
+evolve/jail_data/train_sample.jsonl -- contributes essentially nothing and content-versus-content
+pairs carry the mass. Everything except alpha's numerator is detached. Cost is one extra n-by-n
+elementwise pass; the pred/tgt matmul is reused rather than recomputed, so the step-time increase
+should be small (unmeasured).
+
+WHY IT SHOULD MOVE comp_ca. Two properties, neither of which the parent has.
+
+(1) It is blind to the shared component of a pair of predictions. Any part of p_i and p_j that is
+common to both -- the conditional mean of "a config-file-shaped blob", the generic empty-output
+direction, and in particular anything keyed on the read location alone -- cancels out of
+(p_i - p_j) exactly, not on average. So the entire gradient of this term is spent on the direction
+that separates the two contents. Squared-error and the listwise NLL both spend most of their
+gradient budget on the common direction, because that is where the mass of the residual is.
+comp_ca is itself a paired difference in which everything common to the two arms cancels, so this
+term optimises the same shape of quantity at training time that the metric measures at scoring
+time.
+
+(2) It attacks shrinkage. A model minimising expected squared error predicts a shrunk conditional
+mean; shrinkage is invisible to MSE ranking but fatal to a nearest-neighbour readout among N
+similar in-window contents, because the shrunk predictions of two different reads sit closer to
+each other than to their respective contents. alpha_ij is exactly the shrinkage coefficient of the
+pair, and the hinge at 0.75 demands the prediction difference recover three quarters of the target
+difference. The hinge saturates: once a pair is separated there is no further pressure, and
+inflating the prediction norm buys nothing, so it cannot be gamed by scaling.
+
+WHAT I EXPECT TO SEE. Native pick rate on the eligible windows should rise, driven by reads whose
+sibling contents are close in encoder space; swap_stayed should fall or hold, because a model that
+gives two in-window reads the same answer is now penalised directly and such a model is exactly one
+whose native and swapped predictions coincide. The expected signature is a higher comp_ca with the
+paired difference, not the absolute distance, doing the work. Absolute latent MSE may get slightly
+WORSE while comp_ca improves -- that dissociation is the falsifiable prediction. If comp_ca does
+not move but MSE does, the mechanism is inert; if both degrade, the de-shrinkage pressure was too
+strong.
+
+STATUS OF PERFORMANCE CLAIMS. Unmeasured. I cannot run the harness from the jail; the algebraic
+identity s_ij = -2 (p_i - p_j).(t_i - t_j)/D is verified on paper, and the class/weight structure
+was checked against the real trajectories in evolve/jail_data/train_sample.jsonl, but nothing here
+has been trained.
+
+BIGGEST RISK. The band is a proxy for "same board": rows are contiguous per sequence in the
+flattened cmd-position order, but I cannot see sequence boundaries from inside the objective, so a
+band that straddles a boundary mixes in cross-system pairs. Those pairs are easy, the hinge
+saturates on them and they contribute no gradient, but they do enter the normaliser and dilute the
+term. The second risk is the de-shrinkage target itself: 0.75 is a guess, and a value that is too
+aggressive would trade absolute accuracy for separation and could lower the native pick rate faster
+than it lowers swap_stayed.

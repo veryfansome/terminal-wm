@@ -1,0 +1,105 @@
+AXIS CHANGED: stream only (r5_dualrole_address_mention_code -> r7_locationlattice_scopegated_code).
+arch, optim, objective, target, batcher and head keep the parent's impls and params verbatim. The
+arch reads the raw command token at [0:224] as its READ address and [224:448] as its WRITE address
+through one shared linear map (addr_w=224, src_lo=0, dst_lo=224), and the head mines "same path"
+command pairs by raw-token cosine at path_thresh=0.42, so both of those interfaces are load-bearing
+constraints on any stream and I designed inside them rather than changing them.
+
+WHAT THE MECHANISM IS
+
+Two changes, both pure per-command functions of the command string (no cross-command state, so the
+coding is trivially prefix-causal and the token at a read position is bit-identical under the native
+chain and under a chain in which two contents exchange their moves).
+
+1. LOCATION LATTICE instead of an opaque address hash. Each of the two 224-wide address blocks is
+   now a block-structured code of ONE path, built the same way in either role so the same path gives
+   the same 224 numbers as a source and as a destination:
+
+       L(p) = s * [ 1.00 * R_id (p)            on dims [0:136]
+                    0.50 * R_fam(stem(p))      on dims [136:184]
+                    0.50 * R_dir(dirname(p))   on dims [184:208]
+                    0.50 * B(type bits of p)   on dims [208:224] ]   (4 bits, replicated 4x)
+
+   R_* are independent blake2b-derived Rademacher families, stem(p) strips trailing ".<digits>"
+   components, and s = sqrt(224 / sum of block energies) so every location block has squared norm
+   exactly 224 regardless of path. The four type bits are: path present; path was CREATED BY AN
+   EARLIER RENAME (its last dot-component is all digits); path lives under the mutable workspace
+   root; path names a file rather than a directory.
+
+   The sub-blocks are separate coordinate ranges, not a superposition, which is the whole point: the
+   arch's shared 224->64 address map can zero the family/directory/type columns and keep exact
+   identity addressing, while the reference-closure maps (which see all 768 raw coordinates) and the
+   command projection (which drives the mut / obs-info / erase / write gates) can read the typing.
+   Measured on the code as written: address cosine is 1.000 for the same path, 0.177 for two
+   distinct members of the same stem family (e.g. backup.job vs backup.job.4), 0.025 for same
+   directory different family, 0.060 for unrelated paths. The 0.177 family term is the deliberate
+   cost; it is the same order as the intrinsic 1/sqrt(64) = 0.125 crosstalk the 64-dim key space
+   already carries, and it is suppressible by a learned map because it lives in its own columns.
+
+   Why the derived bit should matter: an origin read ("cat A", whose observation IS the content) and
+   a chain read ("cat A.7", whose observation must be routed from wherever the content came from)
+   are the SAME surface form, and the parent's coding gives the model no per-command way to tell
+   them apart. The closure's own/pull decision and the transporter's obs-info gate have to make
+   exactly that call at every step. On the real training sample the derived bit separates them at
+   89% precision / 65% recall (24 of 27 numeric-suffixed cats are reads of a relocated file; the
+   misses are the cvar arm, which overwrites existing names instead of minting new ones). The bit
+   is a function of the read command's own string, so it is identical in both arms and cancels
+   exactly in the differential; it says what KIND of step this is, never which content is there.
+
+2. SCOPE-GATED LEXICAL RESIDUAL. The standardized command embedding survives, scaled by 0.6, under
+   the mention/verb/form frame ONLY for commands that name no path under the workspace root. A
+   command that touches a tracked file contributes NO lexical channel at all.
+
+   The reason is the metric, not tidiness. The frozen encoder puts "cat /..../app.ini" and
+   "cat /..../app.ini.6" at very high cosine, because they are the same string plus a suffix. That
+   similarity is a route to an answer that is identical in the native and the role-swapped arm: the
+   read command's string is the same in both, so a prediction produced by lexical nearest-neighbour
+   over earlier commands scores native_hit and swap_stayed together and contributes exactly zero per
+   window, while competing with the routing pathway for the gradient during training. This is the
+   same failure the parent's objective (antiretrieval ring negatives) tries to suppress in the loss;
+   here it is removed at the source, for exactly the commands where it is a decoy. Distractor
+   commands ("cat /etc/resolv.conf", "ls /usr/share/zoneinfo/Brazil") keep the residual, because
+   their observations genuinely ARE lexically predictable and killing that channel would turn ~21%
+   of training rows into unlearnable ones. On the sample, 79% of steps are workspace steps, so this
+   is a large change to what the trunk sees, which is what a rewrite is for.
+
+   Note the residual can only ever live in dims [448:768] anyway: superposing a per-command vector
+   on [0:448] would put different embedding slices under the two address blocks and destroy the
+   same-path-same-pattern invariant the arch's shared address map needs.
+
+The mention channel (256 dims, an undirected normalized sum over the distinct paths a command names
+in any role), the verb hash and an eight-bit form spine are kept, because the head's triple mining
+runs on raw-token cosine at a threshold I am not changing. I checked the geometry against the real
+trajectories: over the 724 sampled steps, this coding yields 93 triple-eligible positions and 364
+above-threshold pairs; the parent's coding yields 93 and 365. The co-designed aux loss sees the same
+mining behaviour, so any score movement is attributable to the addressing and the residual gate
+rather than to silently switching the head off.
+
+WHAT I EXPECT TO SEE (all of this is unmeasured; I cannot run the harness from the jail)
+
+comp_ca above the parent's +0.6554, with the movement coming more from swap_stayed falling than from
+native_hit rising, because the channel I removed is precisely an arm-invariant one. I expect the
+gain, if it exists, to be concentrated in the d4+ windows, where per-hop fidelity compounds and where
+crisper step typing (derived source, derived destination, mv-vs-redirect form) should keep the
+transporter's obs-info and erase gates from corrupting a relocation. I expect the d3 windows to move
+less. I expect shortcut_leaning not to rise: nothing in this coding carries the position of a command
+in the sequence, the numeric value of a suffix, or any count over earlier commands - only the boolean
+that a suffix exists.
+
+Falsifier: if comp_ca does not move, or moves down, while native_hit holds roughly flat, the lexical
+residual was not the shortcut carrier I claim it is and the parent's mention/flag channels were
+already carrying the typing I added.
+
+BIGGEST RISK
+
+Zeroing the residual on 79% of steps is the bold half of this, and it is the half that can backfire.
+Workspace observations that are not canary file contents - the "ls" of a workspace directory, whose
+output is the current occupancy listing - become unpredictable from the command token. The parent's
+objective is focal (gamma=1), so it UPWEIGHTS rows the model cannot fit; a block of newly
+unlearnable rows could pull capacity toward them and degrade the routing pathway that the same
+gradient is supposed to build. Only 24 of 724 sampled steps are workspace "ls", so I judged the
+exposure small, but it is the failure mode I would look at first if the number moves the wrong way.
+The second risk is the family sub-block inside the address region: it puts 0.177 cosine between two
+distinct locations in the same stem family, and if the learned address map does not suppress those
+columns early, the memory will partially confuse consecutive destinations in the same family, which
+is exactly the confusion the objective is about.

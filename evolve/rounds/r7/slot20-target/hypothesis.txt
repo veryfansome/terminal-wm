@@ -1,0 +1,82 @@
+AXES CHANGED: target only (identity -> r7_unit_volume_householder_metric). Every other axis keeps
+the parent's impl and params verbatim. The mechanism is a pure change of the geometry in which the
+existing loss measures error; it needs no cooperation from the arch, stream, objective, batcher,
+head or optim, and touching any of them would confound the one thing being tested.
+
+MECHANISM
+A learned linear flow on the target space with |det| pinned to exactly 1:
+
+    make_target(z) = (z R) * g          to_obs(p) = (p / g) R_inv
+
+R is the product of an even number (64) of Householder reflections H(v) = I - 2 v v^T / |v|^2 built
+from a trainable [64, 768] matrix; it is orthogonal for every parameter value and R_inv is the same
+reflections replayed in reverse order, so the inverse is exact by construction rather than by a
+solve. g = exp(a - mean(a)) with a = 1.25 * tanh(log_gain): the logs sum to exactly zero, so the
+gains have unit product, and the log range is bounded, so the transform's condition number is
+capped at e^2.5 ~ 12. The reflection vectors are initialised as 32 adjacent identical PAIRS and
+log_gain at zero, so H(v)H(v) = I and the transform is EXACTLY the identity at step 0 -- the run
+starts as the parent and departs only by learning. At that symmetric point the gradients on the two
+members of a pair are exact negatives, so each pair separates into a rotation in one learned plane;
+32 planes are available. Both parameter tensors get gradient from the training loss (the target is
+built inside the autograd graph and the objective's raw_anchor and dist2 terms both differentiate
+through it), and both appear again in to_obs, so they act directly on the prediction at the scored
+read position.
+
+WHY IT SHOULD MOVE comp_ca
+Minimising sum_i g_i^2 r_i^2 subject to prod_i g_i = 1 has the closed-form optimum g_i ~ 1/r_i, at
+which the loss equals the GEOMETRIC mean of the per-direction squared residuals instead of the
+arithmetic mean. The training signal therefore becomes a relative, scale-free error criterion in a
+learned basis: every direction contributes equally in d log L / d log r_i, rather than in absolute
+error. That matters here because of what these observations look like. Contents are distinguished by
+a few hex characters inside otherwise identical template text (".. job[ed89] canary=ba02a23..",
+"# canary 1a689166857cd315", "cv-6e330e2ed64c19c4"), while the bulk of the target variance is
+output length / format / cwd / empty-vs-nonempty -- and two thirds of the training steps have empty
+output at all. Under an absolute-error criterion the content-identity subspace is a rounding error
+in the loss, so the readout is never pressed to place a prediction accurately inside it. The
+rotation lets the gain pick out that subspace even though it is not coordinate-aligned (per-coordinate
+standardisation has already equalised the marginals, so a low-variance direction only exists in a
+rotated basis), and the unit-determinant constraint makes the amplification a genuine reallocation
+rather than a free rescaling -- a collapse is not merely scored down after the fact, it is
+unreachable.
+
+The eval inverse is what converts that into retrieval. A residual e in transformed space comes back
+as (e / g) R_inv, so the model's error is DIVIDED by the same gains training amplified: error shrinks
+exactly along the directions the transform judged worth resolving, and grows along the nuisance
+directions. Growing the nuisance error is close to free for the metric, because the forced foils on
+a cups board are contents of the same template: they differ only inside the content subspace, so the
+nuisance part of the error is common-mode across all candidates and cancels out of the ranking,
+while the content part is the whole of it.
+
+PREDICTION (unmeasured -- I cannot run the harness from the jail)
+native_hit rises because the read prediction lands nearer the content actually routed there;
+swap_stayed is not raised by the same amount, because the transform is a fixed function of the
+target space and identical in both arms, so anything that keys on the read location still cancels
+exactly per window. I expect comp_ca above the parent's +0.0150, most of the movement at d3, and
+the paired gap to widen rather than both arms moving together. Concretely falsifiable: if the
+learned log_gain stays near zero, or ends up spread but comp_ca does not move, the geometry story
+is wrong and an absolute-error target was not the binding constraint.
+
+COST AND SAFETY
+49,920 extra parameters, one [768,768] orthogonal matrix rebuilt per step (64 rank-1 updates, then
+one matmul; activation memory is independent of batch size). Verified mechanically: identity at
+init to 6e-7; round-trip after heavy parameter perturbation exact to 7e-7 relative; R R^T = I to
+2e-6 and slogdet(R) = +1; sum of log gains exactly 0 with the log range capped; gradients reach both
+tensors; empty input, 3-D input and a wrong last dimension all pass through safely. Under AdamW at
+lr 5e-3 on a synthetic per-direction residual, log g converges to -log r with correlation 0.98 and
+only 1.7% of coordinates at the cap, so the intended solution is reachable, bounded, and does not
+saturate. The reflectors are initialised at N(0,1) scale, not unit norm, so a fixed optimiser step
+is a small RELATIVE change to a direction that is normalised inside the forward; decoupled weight
+decay shrinks a reflector uniformly and therefore leaves its direction untouched. Shapes are [64,768]
+and [768], which the optim's addressing-pair rule (shape[0] == key_d, shape[1] != D) and its (D,D)
+spectral cap both skip, so neither post-step operator changes meaning.
+
+BIGGEST RISK
+Rich-get-richer. The optimum g ~ 1/r rewards directions the model ALREADY predicts well, so if the
+content subspace is the hardest thing in the target it will be shrunk instead of amplified, and the
+inverse will then amplify exactly the error that decides the ranking -- the mechanism would move
+comp_ca down, not sideways. The variance term should dominate that (for equal relative skill,
+g ~ 1/sqrt(var), and the content subspace is the low-variance one), and the cap of 12 bounds how
+badly it can go either way, but the sign of the effect is an empirical question this run answers.
+A second, smaller risk: the objective's own per-dimension precision weighting (w ~ 1/mse_d, clamped
+to [0.25, 4]) partially counteracts the gain, leaving the net effect linear in g rather than
+quadratic, so the measured effect may be smaller than the transform's nominal range suggests.

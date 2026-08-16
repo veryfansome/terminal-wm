@@ -1,0 +1,44 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r22_prefix_content_xattention",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r7_antithetic_moverrole_pairing",
+   "params": {
+    "curr_frac": 0.75,
+    "demand_pow": 1.0,
+    "depth_cap": 6,
+    "lam_down": 0.35,
+    "min_stratum": 8,
+    "n_block_images": 1,
+    "pair_frac": 0.85,
+    "peers_cap": 2,
+    "ramp_frac": 0.35,
+    "tau_up": 0.5,
+    "warm_frac": 0.1
+   }
+  },
+  "head": {
+   "impl": "r2_dualaddress_move_transport",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r5_boardlocal_namecollision_quotient_nce",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "stream": {
+   "impl": "r3_srcdst_hashslot_coding",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

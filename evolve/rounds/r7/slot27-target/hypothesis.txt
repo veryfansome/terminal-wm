@@ -1,0 +1,76 @@
+AXES CHANGED: target only (rank_gaussianized_contrast_metric_target). arch, batcher, head,
+objective, optim and stream are the parent's, verbatim. The mechanism is a pure re-metrization of
+the space the loss is computed in; it needs no other axis, and the parent's objective is already
+the ideal consumer for it, so touching a second axis would only add a confound.
+
+WHAT IT IS. One full cycle of iterative Gaussianization (Laparra, Camps-Valls & Malo, "Iterative
+Gaussianization: from ICA to random rotations", IEEE Trans. Neural Networks 2011): a per-coordinate
+marginal Gaussianization followed by a linear transform of the Gaussianized coordinates. Stage one
+is the probability integral transform of the crossover partner: each of the 768 standardized
+observation dimensions gets its own strictly monotone piecewise-linear map from that dimension's
+empirical equal-mass quantiles to the standard-normal quantiles of the same probability levels,
+fitted once from a stride subsample over the first ~200 steps and frozen. Stage two is the parent's
+map, Cov_contrast^(q/2) Cov_total^(-a/2), with contrast pairs drawn from mutually nearest
+observations inside the same trajectory — but estimated and applied entirely in the coordinates
+stage one produces. The inverse is the linear inverse assembled from the same eigenpairs followed by
+the same knots read backwards, an exact algebraic inverse of the composite, so to_obs reconstructs
+and reads only frozen buffers.
+
+WHY THIS ORDER IS THE ACTUAL CROSSOVER. Stacking the two parents in the parent's order (linear, then
+marginal) would be close to vacuous: each output coordinate of a dense 768-dimensional linear mix is
+a sum of many weakly dependent terms, so its marginal is already near-Gaussian and the per-dimension
+transform would come out nearly affine. In the order used here the two stages genuinely compose.
+The rank transform acts where the non-Gaussianity actually lives, in the frozen encoder's own
+coordinates, which have dense cores and long tails; and the linear stage is then estimated on
+coordinates that are standard normal by construction, which means its total second moment IS the
+normal-scores (Gaussian rank) correlation matrix and its contrast neighbours are chosen by
+rank-space distance. That repairs a specific weakness of the parent rather than merely adding to it:
+the parent's eigenbasis comes from a raw second moment, where a handful of large-norm rows can drag
+the leading directions, whereas a rank correlation is a bounded-influence estimator — no single row
+can contribute more than a bounded amount to any entry.
+
+WHY IT SHOULD MOVE comp_ca. The differential cancels anything keyed on which location is read: both
+arms present the same read token, so a location-keyed predictor scores exactly zero per window. What
+survives is whether the model resolves WHICH CONTENT now sits there, and at the read that is a
+forced choice among observations of the same board that differ only in file content — same cwd, same
+exit code, same output shape. Those observations sit in the dense core of every encoder dimension.
+After the rank transform, squared error between two such observations measures the probability MASS
+between them rather than the raw distance, so their tiny separations are amplified and already
+trivially distinguishable observations in the tails are compressed; after the linear stage, that
+amplified resolution is further concentrated on the directions along which co-occurring confusable
+observations actually differ. The parent's objective consumes this directly: its hard-negative ring,
+duplicate pooling and temperature are all fractions of the mean in-batch distance in target space, so
+reshaping that geometry retunes which negatives are hard and moves gradient budget off directions
+that only separate observations the retrieval was never going to confuse.
+
+WHAT I EXPECT TO SEE (all performance claims unmeasured — I cannot run the harness from the jail).
+Primary: comp_ca above the parent's +0.0112. Mechanistic checks that make this falsifiable rather
+than a bet on a number: (1) the gain should appear as a higher native hit rate with swapped-held
+roughly unchanged, because the mechanism acts on content discrimination and touches nothing that
+could encode where in the move order a content sits; if the improvement instead shows up as
+swapped-follows, that is chain-position leaning and this hypothesis is wrong even if the score rises.
+(2) If the fitted knots come out close to affine — i.e. the encoder's marginals are already near
+Gaussian — the composite degenerates to the parent and the score should reproduce the parent's
+within seed noise; that is the null this design is exposed to. (3) Because the map is one global
+function of value, identical for every window, and reads neither z_prev nor any observation, it
+cannot behave differently at the position whose observation is withheld.
+
+SCHEDULE, AND WHY IT CHANGED. The two stages have to be staged in time: knots fitted while the
+linear map is still being rebuilt would describe a space that then moves under them. So the marginal
+is fitted and frozen by call ~200 (with a hard deadline at 600 calls so it can never stall), the
+second moments are accumulated only afterwards, the linear exponents ramp from call ~350 and the
+whole composite freezes by ~1150 — earlier than the parent's 1500 — so the model still trains most
+of its budget against a stationary target.
+
+COST AND FAILURE MODES. Added per-step cost is one batched searchsorted plus four gathers over
+[768, rows] under no_grad, and one 64x768 host copy on each of the first 200 steps; the one-time
+knot fit sorts at most 12288x768 float32 on CPU; the linear stage does seven float64 eigendecom-
+positions of 768x768, fewer than the parent's eight. Every failure path degrades rather than breaks:
+identity until the knots are fitted; identity marginal if the fitted knots fail the strict-
+monotonicity check, in which case the candidate is exactly the parent with a shorter schedule; the
+pure rank map if training ends before the linear stage warms; and the linear stage keeps the parent's
+finiteness guards so a bad rebuild leaves the previous map in place. The impl introduces no trainable
+parameters at all — only buffers — so there is no parameter that could fail to receive gradient. The
+single biggest risk is the null in check (2): if the encoder's per-dimension marginals are already
+close to normal, the rank stage is nearly the identity and this is the parent with a different
+schedule.
