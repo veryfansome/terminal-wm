@@ -1,0 +1,77 @@
+AXES CHANGED: objective only (r3_fwl_orthogonalized_ring_contrast -> r7_matched_command_conditional_likelihood).
+All six other axes keep the parent's impls and params verbatim: the mechanism is a change to how the
+command embedding is used inside the loss, and it needs nothing from arch, target, stream, head,
+optim or batcher that the parent does not already provide (the parent already opts into WANTS_CTX,
+so ctx["cmd"] is already flowing).
+
+MECHANISM
+The parent handles the command as a NUISANCE REGRESSOR: each minibatch cross-fits a detached linear
+kernel-ridge map from the causal command embedding to the target and subtracts rho times each row's
+fitted value from the prediction and from every candidate target before distances are formed
+(Frisch-Waugh-Lovell partialling-out). That removes only the part of the target that is LINEARLY
+predictable from the command, and it removes it globally with one fitted map.
+
+This candidate replaces that with the exact, non-parametric version of the same idea, taken from
+matched case-control designs in epidemiology (conditional logistic regression) and from Cox's
+partial likelihood: STRATIFY instead of regress. Each anchor row i gets a risk set
+S_i = { j : ||cmd_i - cmd_j||^2 <= 1e-4 * mean_offdiag_cmd_distance }, i.e. the rows of the batch
+issuing the same command string, found by a relative threshold so float noise on identical
+embeddings cannot split a stratum and genuinely different commands cannot join one. A second
+listwise term is then formed whose softmax denominator is restricted to S_i:
+
+  nll_c(i) = logsumexp_{j in S_i} L_ij  -  logsumexp_{j in S_i, tgt_j == tgt_i} L_ij
+  L_ij     = -||pred_i - tgt_j||^2_w / d / temp_c  -  log |class(j)|
+  temp_c   = 0.25 * mean over matched distinct pairs of ||tgt_i - tgt_j||^2_w / d
+
+with the parent's precision weighting w reused for the distances, the parent's exact-duplicate
+equivalence classes reused as the multi-positive set and as the inverse-class-size row mass, and
+the parent's focal factor reused. Rows whose risk set holds no distinct-target partner get
+nll_c = 0 identically (their risk set is contained in their own positive class) and are excluded
+from the row measure; the whole term is skipped if fewer than 8 rows are eligible, and it degrades
+to exactly the global loss if ctx carries no usable command embedding. The global ring-contrast
+listwise term, the gated repulsion margin, and the untouched raw squared-error anchor are carried
+over unchanged; the FWL cross-fit and the residual-energy row weight it fed are removed, since
+without the subtraction there is no command-unexplained residual to measure energy on.
+
+WHY THIS SHOULD MOVE comp_ca
+Inside a risk set the READ LOCATION IS HELD FIXED and only the routing history varies. So any
+predictor that is a function of the command alone assigns identical scores to every candidate in
+S_i and sits exactly at the conditional chance level log(|classes in S_i|) -- not approximately, by
+construction. Every unit of gradient the conditional term supplies is therefore paid for by
+knowing WHICH CONTENT the chain of moves put at that location, which is precisely the quantity the
+score's paired difference isolates: the native and role-swapped arms present the same read command
+over the same board and differ only in which content was routed there, so a location-keyed
+predictor contributes exactly zero per window. FWL only suppresses the linear component of that
+shortcut and leaves its nonlinear part fully available; stratification removes it whole. The risk
+sets also contain the sharpest possible negatives for free: rows from the SAME trajectory reading
+the same path at different depths of the move chain, which hold the board and the location fixed
+and vary only the history.
+
+The mechanism is only worth anything if such matched rows actually exist in a batch, so I checked
+it against evolve/jail_data/train_sample.jsonl rather than assuming: of 724 real steps, 55.4% carry
+a command string that occurs at least twice in the sample, "cat /tmp/w/cvar/g0/s1.dat" alone occurs
+25 times, and the repeated cat-reads overwhelmingly have DIFFERENT outputs (23 distinct outputs
+across those 25 occurrences). With ~64 sequences x ~30 steps per batch the common read paths should
+give risk sets of tens of rows, and they are matched sets of exactly the shape the mechanism wants:
+same location, different content.
+
+WHAT I EXPECT TO SEE (all unmeasured -- I cannot run the harness from the jail)
+Native pick rate should rise while swapped-held falls, since the term penalizes exactly the
+predictions that are invariant to the routing given the command. If the mechanism is real, the gain
+should concentrate in the d4+ windows, where more of the answer is history rather than the initial
+board. I expect the conditional term to start near log(risk-set size) and fall well below it; if it
+stays pinned at chance while the global listwise term falls, that is the clean falsification --
+it would say the model is solving the global task with location keys and has no content identity to
+offer once the location is held fixed. Cost is one extra n x n command-distance matrix and one
+extra masked logsumexp per step, in exchange for dropping the parent's per-step 1024-row ridge
+solve, so step time should not be worse; that too is unmeasured.
+
+FALSIFIABLE PREDICTIONS
+1. comp_ca beats the parent's +0.0112 on the same budget/environment.
+2. If the risk sets are empty or degenerate on the real batches (e.g. the batcher's system-block
+   curriculum packs one image per batch and command strings turn out to be image-unique), the term
+   self-disables and the candidate should land near a de-FWL'd r12/r22 ring baseline rather than
+   near the parent -- a null result that is still informative about whether FWL was carrying the
+   parent's score.
+3. shortcut_leaning should not rise: nothing here rewards move-order position, and the term is
+   symmetric over the members of a risk set.

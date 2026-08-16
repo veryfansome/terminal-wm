@@ -1,0 +1,106 @@
+AXES CHANGED: batcher only (r6_sysblock_hardneg_curriculum -> r7_antithetic_movepos_pairs).
+Everything else in the parent genome is kept verbatim: arch r22_prefix_content_xattention,
+objective r12_antiretrieval_ring_negatives, optim r18_spectral_capped_transition_readout,
+target r6_spectral_equalized_target, stream r3_srcdst_hashslot_coding,
+head r2_dualaddress_move_transport. The mechanism is entirely a statement about which sequences
+co-occur in a batch, so no other axis has to move with it, and moving one would confound the read.
+
+MECHANISM (the outside-domain import)
+Antithetic variates, from Monte-Carlo estimation, and matched-pair randomization, from
+experimental design. Both say the same thing: a nuisance factor whose realized in-sample
+correlation with the response is forced to exactly zero contributes exactly zero to the estimate,
+whereas a factor that is only balanced in the population still fluctuates by O(1/sqrt(bs)) in any
+finite draw. SGD is an estimator over finite draws, so a nuisance direction that is merely
+marginally balanced is still descended on every step; only its long-run average vanishes.
+
+Applied here. Each training sequence is reduced, from its command strings alone, to its deepest
+mv-routed read: a `cat P` walked backwards through the mv edges that wrote P earlier in the same
+trajectory. That walk returns the hop count, the origin location, and, crucially, the exact set of
+mv steps that carried the answer content. Two bits summarise WHERE IN THE MOVE ORDER the answer
+sits: first_bit = the trajectory's first mv before the read belongs to the answer's own chain,
+last_bit = the last mv before the read does. Those two bits are the primacy and recency cues a
+causal transformer over the whole trajectory can read off without ever routing anything.
+
+Sequences are then stratified on everything that is NOT the signature: hop class (capped at 4),
+whether the answer ended in the same trailing-suffix name family it started in, and the kind of
+location being read (cvar slot / templated system path / scratch gNN path). A nested backoff drops
+the last key component whenever the finer stratification cannot supply enough matched pairs, so
+the stratification is as tight as the data allows and never starves. Inside a stratum, only
+bit-complementary bags are matched: (first,last)=(1,1) against (0,0), and (1,0) against (0,1).
+A batch is the parent's uniform iid base part plus pairs, one draw from each side of one cell, on
+the parent's own ramp (hard_frac_max 0.75, ramp_frac 0.3 kept verbatim so the change is focused).
+Cell weight is the matched-pair count min(|A|,|B|), the effective sample size of a matched design.
+
+WHY IT SHOULD MOVE comp_ca
+comp_ca cancels location keying exactly, per window: the read token is the same string in both
+arms. What it does not cancel is move-order keying, which cancels only in expectation, and the
+scored slice is one frozen realization. The parent sits at -0.0262, below the all-baseline floor of
++0.0112. A model whose pick is arm-independent scores exactly 0, so a reliably negative number is
+not indifference: it is a move-order-keyed rule pointing the wrong way — under the swapped chain it
+keeps returning the content the native chain routed. The claim of this candidate is that such a
+rule is learnable from the training distribution because primacy/recency is spuriously predictive
+inside any finite batch, not because it is predictive overall.
+
+Inside a pair, every matched covariate is held constant and both position bits are flipped, so the
+in-batch covariance between either bit and the target is exactly zero over the paired slots, not
+zero on average. No descent direction exists along a primacy or recency feature. What still
+separates the two members of a pair is only which content the chain actually routed to the read
+location, which is the capability the metric scores. The uniform quarter is retained for coverage,
+so the balance is exact over 75% of the batch rather than over all of it, by design.
+
+WHAT I EXPECT TO SEE (all unmeasured; I could not run the harness from the jail)
+comp_ca moves up from -0.0262 toward and past zero, and the swap arm's `held` statistic falls
+relative to the parent's: the intended path to a better number is removing the negative
+contribution of an inverted position rule, not adding a positive shortcut. Expected magnitude is
+small; at n=89 windows the parent's -0.0262 is about two and a half windows, so the honest
+prediction is a shift of a few windows, and I expect the reported analytic non-tracker band to sit
+where it always does rather than move with the candidate. native_hit should be flat or slightly up.
+`shortcut_leaning` should not rise: the mechanism suppresses first-mover reliance rather than
+cultivating it, which is a real risk to the raw number, since the brief records that on this frozen
+slice a first-mover lookup scores positive. I would rather lose that than bank it.
+
+FALSIFIED IF: comp_ca stays at or below the parent, or `held` is unchanged, which would say the
+parent's negative sign has nothing to do with primacy/recency keying and the matched design bought
+nothing. Also falsified if the score moves only through the loss of the parent's image blocking
+rather than through the pairing.
+
+WHAT I DELIBERATELY GAVE UP
+The parent spent 75% of every batch inside a single system image. That is dropped: the paired slots
+are matched on chain geometry, not on image. This is not a free removal and it is the biggest
+confound in reading the result. I dropped it on evidence measured in this jail's real trajectories:
+between two sequences drawn from the same image, 36% of rows are EXACTLY duplicate observations
+(identical rendered text, hence identical target vectors), against 25% between different images —
+the shared `ls` context outputs of the same OS are literally the same string in every trajectory
+from that image. The objective's ring zeroes duplicate targets with its dup mask, so those slots
+buy no negative at all, and the focal term meanwhile weights the unlearnable duplicate rows most
+heavily. Image blocking therefore trades effective negatives for a similarity that the loss then
+discards. Matching on chain geometry across images keeps the negatives distinct.
+
+RISKS
+1. The biggest: the training marginal is already close to balanced on both bits (in the 24 real
+trajectories in this jail, first_bit is true in 12 of 24 and last_bit in 13 of 24). The mechanism
+therefore only removes the finite-batch fluctuation, not a population bias, so the effect could be
+second order and swamped by seed noise at n=89 windows.
+2. The deepest routed read is one row of about 31 in a sequence; the pairing constrains the batch
+through that row while every other row rides along, which dilutes the constraint.
+3. `before[0]` is the first mv anywhere in the trajectory, which for a read late in a multi-block
+trajectory can belong to an unrelated block; the read-kind component of the stratum key confines
+this, and strata where one signature bag is empty simply produce no cells, but it does mean the
+paired part is drawn mostly from cups-arm reads rather than uniformly over all reads.
+
+CONTRACT AND COST CHECKS DONE IN THE JAIL
+Contract: returns exactly bs Python ints in [0, len(fit)) for every step in [1, total_steps];
+deterministic given the seed and identical across two constructions; different for a different
+seed; owns a private torch.Generator and touches no global RNG; `fit` is only read (verified by
+deep-copy comparison), and only the "cmds" key is read. Setup performs no random draws at all.
+Edge cases exercised: len(fit) in {1,2,3}, bs=1, odd bs=7, sequences with no mv, sequences with no
+"cmds" key at all -- each falls back to the uniform draw or to a shorter paired part without ever
+violating the length or the bounds. The batcher never indexes into a sequence's tokens, so the
+odd-length scored layout [cmd_0, obs_0, ..., cmd_r] is not a hazard for this axis; the backward
+walk uses command indices only and requires nothing after a command. Cost, measured against a
+1920-sequence stand-in built from this jail's real trajectories: 0.02s of setup and about 48us per
+step, i.e. under 0.2s added over a 4000-step budget. Setup is linear in the number of sequences.
+The in-batch balance was measured on that stand-in: first bit 0.500 mean / 0.031 sd and last bit
+0.510 / 0.031 under this batcher, against 0.501 / 0.062 and 0.540 / 0.062 under uniform sampling —
+the standard deviation of both position cues is halved, which is the intended effect and the only
+thing about this candidate I have actually measured.

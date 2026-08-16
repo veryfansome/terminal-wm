@@ -1,0 +1,236 @@
+AXES CHANGED: optim only (r4_twotimescale_router_polyak_tail -> r7_address_isometry_retraction).
+Every other axis keeps the parent's impl and params verbatim. The mechanism lives entirely in the
+optimizer's post-step projection, so no other axis needs to move with it.
+
+REVISION AFTER REVIEW — WHAT WAS WRONG AND WHAT I CHANGED
+
+The reviewer was right, and the arithmetic reproduces exactly. My first version rescaled the
+Bjorck-Schulz output by ||W||_F / sqrt(min(rows, cols)), which is the correct factor ONLY at
+convergence. At the configured ortho_iters=6 the iteration is not converged, so that factor was
+wrong by a fixed multiplicative amount and the retraction was a geometric contraction applied every
+step, not the scale-preserving operation I claimed.
+
+The exact numbers, recomputed independently and matching the reviewer's: with f(s) = 1.5 s - 0.5 s^3
+and a perfectly conditioned W, every singular value of A = W/||W||_F equals 1/sqrt(m) with
+m = min(rows, cols), so the old target came out at f^n(1/sqrt(m)) times W.
+
+  m=64  s0=0.125000: f^1..f^8 = 0.186523 0.276540 0.404237 0.573327 0.765763 0.924126 0.991583
+                                0.999894    -> needs n=8 to exceed 0.999
+  m=128 s0=0.088388: f^1..f^9 = 0.132237 0.197200 0.291965 0.425504 0.599736 0.791747 0.939462
+                                0.994614 0.999957 -> needs n=9
+
+  address family  m=64  rate 0.50: per-step 0.50 + 0.50*0.924126 = 0.962063, half-life 17.9 steps
+  ref_q / ref_k   m=128 rate 0.35: per-step 0.65 + 0.35*0.791747 = 0.927111, half-life  9.2 steps
+  ref_p           m=64  rate 0.35: per-step 0.65 + 0.35*0.924126 = 0.973444, half-life 25.8 steps
+
+There was no nonzero fixed point at all: the map was a strict contraction of the norm on the very
+manifold it was supposed to hold, so the weights fell geometrically until the gradient could hold
+them at roughly 1% of init, which is what the reviewer measured. Everything downstream of that — the
+1%-of-init norms, the per-step relative displacement of ~0.04, the closure family being annihilated
+faster than it could be conditioned — follows from that single wrong constant.
+
+THREE CHANGES, all in the retraction:
+
+1. The target is rescaled by its OWN MEASURED Frobenius norm, not by the asymptotic sqrt(m):
+
+       T <- A_n * ( ||W||_F / ||A_n||_F )
+
+   so ||T||_F = ||W||_F identically, for any iteration count and any conditioning. On a perfectly
+   conditioned W this now gives T = W exactly at every n >= 1, so the manifold is a genuine fixed
+   set instead of a repeller: per-step factor 1.000000 rather than 0.962063 / 0.927111 / 0.973444.
+
+2. The blend is renormalized back to the pre-retraction norm. Even with ||T||_F = ||W||_F, a convex
+   blend of two matrices that are not parallel is shorter than either; the residual is small and
+   self-limiting (it goes to zero as W approaches the manifold) but it is not zero, so I removed it
+   rather than argue it away. Measured on the exact singular-value dynamics, the pre-renorm blend
+   norm is 0.9835 at cond 4.7 (m=64, rate 0.50) and 0.9751 at cond 10, i.e. corrections of 1.7% and
+   2.5% applied once, shrinking to nothing as conditioning improves. After this step the Frobenius
+   norm is an EXACT invariant of the retraction, unconditionally.
+
+3. ortho_iters 6 -> 12. With (1) and (2) the norm is safe at any iteration count, so this is now
+   purely about the target being the nearest row-isometry rather than a partly conditioned matrix.
+   n=12 converges the worst conditioning actually observed in this model. For a (128,768) map with
+   a linearly spread cond-4.7 spectrum the smallest singular value of A = W/||W||_F is 0.029013,
+   and f^12(0.029013) = 0.99999287 against f^10 = 0.96162; for the (64,*) maps at the same
+   condition it is 0.040990 and f^12 = 1.00000000. Degrading further is graceful, not cliffed:
+   cond 7 gives f^12 = 0.99863, cond 10 gives f^12 = 0.97980 — the target is then slightly
+   under-conditioned in its smallest direction, which weakens the retraction, and cannot touch the
+   norm, which is invariant by (1) and (2) regardless of n.
+
+Verification, running the exact singular-value dynamics of the retraction (A_n shares W's singular
+vectors, so the whole operation reduces to the scalar map on singular values plus the two
+normalizations) for 500 gradient-free applications from cond 3.5:
+
+  OLD  addr  m=64  r=0.50 iters=6:  fro/init 0.9312 @1, 0.3542 @25, 1.95e-2 @100, 3.72e-9 @500
+  OLD  ref_q m=128 r=0.35 iters=6:  fro/init 0.9118 @1, 0.1383 @25, 4.74e-4 @100, 3.38e-17 @500
+  NEW  addr  m=64  r=0.50 iters=6:  fro/init 1 @1, 1 @25, 1 @100, 1 @500;  cond 2.486 -> 1.00000
+  NEW  ref_q m=128 r=0.35 iters=6:  fro/init 1 @1, 1 @25, 1 @100, 1 @500;  cond 3.013 -> 1.00000
+  NEW  iters=12 from cond 4.7:      fro/init 1.000000000 at every checkpoint through 500;
+                                    cond 4.7 -> 1.914 @1 -> 1.040 @5 -> 1.000000 @25 (addr),
+                                    cond 4.7 -> 2.401 @1 -> 1.156 @5 -> 1.000026 @25 (ref_q, ref_p)
+
+The defect is gone: in exact arithmetic the norm is invariant to nine significant figures over 500
+applications, the condition number still converges monotonically to 1, and it converges FASTER than
+before because the retraction is no longer spending most of its motion on shrinking. The real run
+computes this in float32, so what remains is an unbiased rounding walk of order eps per step —
+roughly sqrt(500) * 1.2e-7 ~= 3e-6 relative drift across a whole run, against the 0.962063^500 =
+4.0e-9 systematic collapse the old constant produced. That is the difference between a rounding
+artefact and a mechanism.
+
+ON THE SECOND FINDING — THE COMPETING TERMS IN THE CLOSURE SCORE
+
+The closure score is q.k/sqrt(ref_d) + ref_diff(mismatch) + ref_keybias(u). The reviewer is right
+that the first term was being suppressed relative to the other two, but the cause was defect (1),
+not the shape filter, and it goes away with it: ref_q and ref_k now keep their Frobenius norm
+exactly, so there is no systematic attenuation of the q.k logit against the untouched biases.
+
+The filter itself is not an exclusion. ref_keybias is (1,768) and ref_diff is (1,64); a matrix with
+min(rows, cols) == 1 has exactly one singular value, so it is already a scaled row-isometry and lies
+in the fixed set. Under the corrected rescale the retraction returns it unchanged in exact
+arithmetic — checked in the dynamics simulation, delta 0.000e+00, and true for the old rescale too
+since sqrt(min(1, n)) = 1 — so retracting it would be a no-op that costs kernels and float32 noise
+and buys nothing. I changed the predicate from `rows >= 2` to `min(rows, cols) >= 2` so the code states
+the actual mathematical condition rather than a shape coincidence. (ref_diff is (1,64), so it is not
+in the router group by the cols == D rule and was never a candidate either way.)
+
+What does remain, stated honestly rather than claimed away: preserving ||W||_F preserves the
+expected logit magnitude for isotropic inputs, but real command embeddings are not isotropic, so
+flattening the spectrum of ref_q / ref_k redistributes response away from their top singular
+directions. That can move the data-conditional logit RMS by at most a factor of the condition number
+(around 4.7 at init on this arch), once, and it stops as soon as the maps are conditioned — it does
+not compound across steps, which is the whole difference from the defect. If the closure routing
+collapses onto the bias terms anyway, that shows up as swap_stayed rising with native_hit, which is
+in my falsification list below.
+
+WHAT THE PARENT'S GENOME ACTUALLY DOES AT THE ADDRESS SITE
+
+The stream this genome carries writes each command token as fixed coordinate regions computed from
+the command string alone: columns [0:224] hold a dense Rademacher (+-1) hash of the command's source
+path, columns [224:448] the same hash family applied to its destination path, and the standardized
+embedding is zeroed under both. The arch reads exactly those two regions through ONE shared linear
+map, addr: R^224 -> R^64 (addr_w=224, src_lo=0, dst_lo=224), unit-normalizes each result, and uses
+them as the read address and the write address of the delta-rule transporter memory. Two distinct
+paths therefore arrive as two near-orthogonal +-1 codes u, v with |u.v|/224 concentrated around
+1/sqrt(224); whether they stay distinguishable after addressing is decided entirely by the singular
+spectrum of addr. This is the Johnson-Lindenstrauss situation in its exact textbook form: a map with
+orthonormal rows is a partial isometry, so ||Wu - Wv||^2 = ||P(u-v)||^2 concentrates at
+(64/224)||u-v||^2 for ANY pair of codes, including pairs the map never saw; a map that has collapsed
+to effective rank r << 64 preserves a much smaller and far more variable fraction, and the directions
+it kept were chosen by the training paths.
+
+THE GAP THIS TARGETS
+
+addr is the single most objective-relevant tensor in the model and the parent optimizer gives it the
+least care of any addressing weight. It is a lone (64, 224) tensor, so the parent's sibling rule
+(shape must appear at least twice) deliberately excludes it from the Muon group; it is not (r, 768),
+so it is not in the router group; it is not (768, 768), so the spectral cap never touches it. It
+falls into `rest` with weight_decay=5e-4 under the cosine-to-floor trunk schedule, and nothing in the
+run opposes spectral collapse. Nothing forces it to stay well conditioned, and the training loss has
+no reason to keep the directions used only by paths that appear on held-out images.
+
+THE MECHANISM, AS THE CODE NOW IMPLEMENTS IT
+
+After every optimizer step, retract the identity-separating projections toward the nearest
+row-isometry, in weight space, at exactly constant Frobenius norm. For each selected W:
+
+  A  <- W / ||W||_F                       (sigma_max(A) <= ||A||_F = 1, by construction)
+  repeat ortho_iters times:
+      A <- 1.5 A - 0.5 (A A^T) A          (Bjorck-Schulz; sigma -> 1.5 sigma - 0.5 sigma^3)
+  T  <- A * ( ||W||_F / ||A||_F )         (measured norm, correct at every iteration count)
+  B  <- (1 - rate) W + rate T
+  W  <- B * ( ||W||_F / ||B||_F )         (blend renormalization; exact norm invariance)
+
+The scalar map f(s) = 1.5 s - 0.5 s^3 has f(1) = 1, f'(1) = 0, and maps (0, 1] into (0, 1]
+monotonically, so from the guaranteed bound sigma_max <= 1 the iteration can only walk singular
+values UP toward 1 and can never overshoot or diverge. That bound is why I normalize by the
+Frobenius norm rather than by a power-iterated spectral norm: it needs no estimate and it cannot be
+wrong. f also compresses ratios — f(s1)/f(s2) = (s1/s2)(1.5 - 0.5 s1^2)/(1.5 - 0.5 s2^2) > s1/s2 for
+s1 < s2 — so the condition number improves strictly at ANY iteration count, and the two rescales are
+pure scalars that cannot change it. The fixed set is exactly the matrices with all singular values
+equal, i.e. the scaled row-isometries. Weight decay and the learning-rate schedule have sole
+authority over magnitude, and the closure attention temperature (q.k / sqrt(ref_d)) is carried
+through with its scale intact.
+
+Two families are selected, disjoint by shape:
+  - address family, rate ortho_rate=0.5: every 2-D weight with rows == key_d and cols not in
+    {key_d, D}. On this arch that is addr (64,224) and file_read, file_write, path_read, path_write,
+    sys_val (64,176). Every one of these produces a vector that is immediately unit-normalized (or
+    quotiented against the verb basis) and then compared by inner product — they are address maps,
+    and isometry is the property they are supposed to have. Because their outputs are normalized
+    before use, this family is insensitive to scale by construction; the norm invariance matters for
+    them not as a downstream effect but because without it the tensors were being driven to zero.
+  - closure family, rate router_ortho_rate=0.35: every 2-D weight with cols == D and
+    2 <= rows <= router_out_max, i.e. ref_q, ref_k (128,768) and ref_p (64,768) — the maps whose
+    inner products decide which earlier command a read chains back through. The router group keeps
+    its two-timescale LR treatment unchanged; the retraction is additive to it, not a replacement.
+
+The retraction is re-applied at full strength (rate 1.0) immediately after the Polyak tail copies its
+averaged weights into the live parameters, and the spectral cap is re-applied after that as the
+parent already did. A uniform average of successive near-isometries that have rotated relative to
+one another is systematically ill-conditioned (the average of rotations is not a rotation), so the
+parent's tail damages exactly the property this mechanism maintains, at the one moment whose weights
+are the ones actually scored. Note precisely what the full-strength pass does and does not do: it
+restores the CONDITIONING of the averaged weights and leaves their magnitude exactly as the average
+produced it, which is the parent's behaviour and is untouched here.
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN THE THINGS THAT CANCEL
+
+comp_ca is the paired difference between the native chain and a chain in which two contents exchange
+their move commands over the same board, same destinations, same depth. The role-swap re-encodes the
+move commands, so the +-1 source/destination hash codes that enter addr are exactly the tensors that
+differ between the two arms; everything else in the window is identical. A model whose addresses have
+collapsed cannot resolve which content went where in either arm and predicts nearly the same thing in
+both, which is the zero-difference regime. Keying on the location being read cancels exactly and
+keying on move-order cancels only in expectation; neither is helped by conditioning addr, because
+neither uses the fine structure of the path codes. What conditioning addr helps is the one thing that
+does not cancel: carrying a specific content's identity through several hops so that a read returns
+what is actually there. And because the scored windows are held out BY IMAGE, the paths at scoring
+time are strings the map never saw, which is precisely the regime where an isometry generalizes and a
+rank-collapsed map does not.
+
+WHAT I EXPECT TO SEE, AND WHAT WOULD FALSIFY IT
+
+Expected: native_hit rises on the deeper windows (d4+ more than d3, since each additional hop
+compounds one more addressing collision) while swap_stayed does not rise with it, so comp_ca goes up
+above the parent's +0.6929. I expect the effect to be largest where the parent's addressing is most
+strained rather than a uniform lift. Falsified if comp_ca does not move, or if native_hit and
+swap_stayed rise together — the latter would say the retraction bought general sharpness without
+buying content tracking, which is the outcome the paired metric exists to expose. A specific
+falsifier for the closure half: if the final weight norms of ref_q, ref_k, ref_p come back materially
+below the parent's, the norm invariance is not holding in the real run and the whole closure result
+should be discarded regardless of the score.
+
+PERFORMANCE, STATED AS UNMEASURED: I have not run this and could not; there is no torch in this jail.
+The retraction now costs twelve iterations over nine tensors, batched into four same-shape groups:
+five (64,176), one (64,224), two (128,768), one (64,768). Counting 2*R*R*C per bmm and two bmms per
+iteration that is about 1.58 GFLOP per step, dominated by the two (128,768) maps at 1.21 GFLOP of it,
+which is arithmetic noise on a 4090. Batching by shape is why doubling the iteration count does not
+double the overhead: the iteration now issues 4 groups * 12 iters * 2 kernels = 96 launches per step
+against the reviewed version's 9 tensors * 6 iters * 2 = 108, so the launch count went slightly DOWN.
+The extra allocation is one stack and one copy per group per step. I estimate low single-digit
+percent wall-clock and have NOT measured it. The retraction is written sync-free on purpose — no
+.item(), no Python-level branch on a device tensor, the finiteness guard is folded into a blend
+coefficient and the degenerate-norm guard into a torch.where — so it does not stall the pipeline.
+
+CORRECTNESS NOTES CHECKED AGAINST THE STATED FAILURE MODES
+
+- No new trainable parameter is introduced at all, so there is nothing that could receive gradient
+  only inside no_grad or only on an unscored branch. Every weight the retraction touches is an
+  existing parameter that already receives gradient from the training loss on every step and already
+  affects the prediction at the scored read position; the retraction runs after opt.step(), the same
+  seam the parent's spectral cap and Polyak tail already occupy.
+- The three new genome params are all live on this arch: ortho_rate acts on a non-empty 6-tensor set,
+  router_ortho_rate on a non-empty 3-tensor set, ortho_iters on both. ortho_iters is still reachable
+  after the fix — it no longer changes the norm, but it changes how far the target is conditioned,
+  and therefore the weights, on every step.
+- The optimizer never looks at the sequence, so odd sequence length is not reachable from this axis;
+  the parity-sensitive code paths in the arch and stream are untouched.
+- No method or attribute here shadows an nn.Module internal; _IsometryOpt is a plain object and its
+  attribute is named `retraction`, not `state`, `training`, `modules` or `parameters`.
+- No stream change, so code_cmds is untouched and the instrument reproduces the parent's tokens on
+  both the native and the role-swapped arm bit for bit.
+- Numerical guards: division by ||W||_F, by ||A_n||_F and by ||B||_F are all clamped; the target is
+  finiteness-checked before it is blended in and only then passed through nan_to_num, so a non-finite
+  target yields a blend coefficient of exactly zero and contributes a hard zero rather than a NaN.
+  On that path B equals W bit for bit, the renormalization ratio is therefore exactly 1.0, and the
+  weight is written back unchanged. A weight with ||W||_F <= 1e-8 takes the same untouched path.

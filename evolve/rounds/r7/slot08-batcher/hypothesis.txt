@@ -1,0 +1,115 @@
+AXIS CHANGED: batcher only (r6_sysblock_hardneg_curriculum -> r7_image_balanced_depth_rcbd).
+Every other axis keeps the parent's impl and params verbatim. The mechanism is a change to which
+sequences co-occur in a gradient step; it needs no cooperating change in arch, stream, head,
+objective, optim or target, and changing any of those would confound the one comparison this slot
+can make against its own parent.
+
+WHAT THE PARENT DOES, AND THE SPECIFIC THING I THINK IS WRONG WITH IT
+The parent anneals the batch from uniform to 75% blocked on a SINGLE system image
+(n_block_images=1, hard_frac_max=0.75). Its stated reason is negative-pool geometry: densify
+same-system in-batch negatives to match the eval's same-verb same-system foils. My claim is that
+this buys a property the batch already had, and pays for it with a property the eval directly
+punishes.
+
+  - It buys little. The training loss flattens over EVERY command position of every sequence in
+    the batch. Trajectories in this root run 26-32 steps (checked in
+    evolve/jail_data/train_sample.jsonl), so a batch of B sequences supplies roughly 30B negative
+    positions. Even an exactly image-uniform batch of 64 over the 8 images present in the split
+    (alpine, ubuntu, debian, node, python, redis, postgres, nginx -- also checked in the sample)
+    leaves 8 sequences, i.e. about 240 positions, from each image in EVERY batch. Same-system
+    negatives are already dense at one eighth of a batch; going to three quarters of a batch is
+    perhaps a 6x on a quantity that was not the binding constraint.
+  - It costs the thing that is measured. Windows are held out BY IMAGE, so this is literally a
+    domain-generalization problem with system image as the environment label. The parent makes
+    75% of every single gradient step come from ONE environment. The step direction is then
+    dominated by whatever is idiosyncratic to that image's paths, file formats and output
+    shapes; the invariant part of the mv-transport rule is only recovered by averaging ACROSS
+    steps, where the optimizer's momentum, the LR schedule and the network's own plasticity sit
+    in between and do not average cleanly.
+
+MECHANISM IMPORTED FROM OUTSIDE THE DOMAIN
+A randomized complete block design (Fisher's blocking, the standard two-way agricultural/clinical
+layout). In an RCBD you have a treatment factor whose effect you want to estimate and a nuisance
+factor you want to remove, and you arrange the units so that every treatment level appears an
+equal number of times inside every block; the nuisance main effect then leaves the treatment
+contrast unchanged rather than having to be averaged out over replicates. The same construction
+is what the domain-generalization literature calls a balanced-domain minibatch sampler (every
+DomainBed-style method draws an equal number of examples from each environment per step, which
+is a precondition for the averaged gradient at each step to be the cross-environment gradient
+rather than one environment's).
+
+Translated here:
+  TREATMENT = routing depth. Each training sequence is replayed through a symbolic content
+    tracker built from its command strings alone: "mv A B" carries the content at A to B and
+    destroys A, "cat A > B" carries a copy, "cat A >> B" carries a copy under a max, a bare
+    "cat A" reads whatever now sits at A. The sequence's row is the hop count of its deepest
+    routed read, capped at 5. I checked this parse against the ground-truth cups metadata in
+    evolve/jail_data/train_sample.jsonl: it reproduces the recorded chain depth on 23 of 24
+    trajectories (the one disagreement is a deeper cvar redirect chain in the same trajectory,
+    which is a real transport chain, not a parse error). Observed depths run 1..6 with the mode
+    at 2; the scored slice is d3 and d4+.
+  NUISANCE = system image, read straight off s["image"].
+  LAYOUT = every step allocates the batch across depth rows by largest-remainder rounding of a
+    mixture between the empirical depth distribution and a monotone depth shape (1+r)^1, annealed
+    from pure-empirical over the first 30% of training so the opening of training is the natural
+    distribution. Each row's quota is then spread over the images occupying that row as an equal
+    base share plus remainder units handed out fewest-options-row-first to whichever image
+    currently holds the fewest slots in this batch, ties broken by a step-rotating offset. The
+    result is exact image balance within the batch and near-balance within each depth row.
+  GUARD = each row's quota is capped at rate_cap=6x the visit rate uniform sampling would give
+    it, so flattening the depth distribution cannot turn into memorizing the handful of depth-5+
+    trajectories. Row cells are drawn from per-cell shuffled epoch cursors, so a cell is
+    exhausted without replacement before it reshuffles -- lower variance than iid draws and
+    guaranteed coverage of the rare deep cells.
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN THE CAPABILITY GATE
+comp_ca is a paired difference between the native chain and the role-swapped chain on the SAME
+board. Anything the model knows about a system's surface -- what an nginx config looks like, what
+that image's ls output is -- appears identically in both arms and cancels. The only thing that
+can produce a positive difference is machinery that binds a particular content's identity to a
+particular chain of moves. That machinery is exactly the image-invariant part of what the model
+could learn, and it is the part a single-image batch is worst at isolating. So the prediction is
+directional and specific: making image a balanced nuisance factor at every step should raise the
+differential without needing to raise the absolute pick rate, and it has no route to inflate the
+gate reading, because the gate's per-cell ceiling is not a function of batch composition.
+
+FALSIFIABLE PREDICTIONS
+1. comp_ca beats the parent's +0.6142 on the same environment and split.
+2. The gain shows up disproportionately in the d4+ windows (29 of the 89), because those are the
+   windows whose native-vs-swap difference requires carrying identity through the most moves, and
+   because the depth shape (1+r)^1 raises the d>=3 share of training from about 50% of sequences
+   to about 66% (measured on the sample's depth labels, not on the real split).
+3. private.shortcut_leaning should not rise relative to the parent. Nothing in this mechanism
+   touches the command tokens, the read position, or move order; it only changes which
+   trajectories share a step. A first-mover positional lookup is neither helped nor hindered by
+   image balance, so if the differential moves, it should move without the shortcut indicator
+   moving with it.
+4. If the mechanism is inert rather than wrong, the failure signature is a comp_ca within noise
+   of the parent with an unchanged health reading -- which would say the same-image blocking was
+   never the binding factor in either direction.
+
+WHAT IS UNMEASURED
+I cannot run the harness from the jail, so no fitness claim here is measured. What IS measured, on
+the real trajectories in evolve/jail_data/train_sample.jsonl and on replicated synthetic splits
+built from them: the batcher returns exactly bs in-range indices for every step including bs=1,
+bs=3, total_steps=0 and n=1; it never mutates fit; it is bit-reproducible from the seed; it never
+touches global torch RNG; with populated (depth, image) cells it puts exactly bs/8 sequences from
+each of the 8 images in every batch, with per-image totals equal to the last unit over 6000 steps;
+per-sequence visit counts stay inside a 3.3x band; and every parameter changes the emitted index
+stream (rate_cap 1.5 / 6 / 100 moves the deep-row share from 1.6% to 4.7% to 51.9% on a stress
+split, depth_shape 0 / 1 / 2 moves the d5 share from 17.8% to 24.3% to 29.8%). Setup parses all
+command strings once (0.08s for 5760 sequences) and the per-step cost is a few dozen Python
+operations plus one randperm, about 0.9ms per batch of 64 in pure Python with no tensor
+allocations in the inner loop -- negligible against a training step.
+
+BIGGEST RISK
+The parent's same-system hard negatives may be load-bearing in a way my position-count argument
+misses -- if the objective r5_decision_direction_metric_quotient forms its negative pool per
+sequence rather than over the flattened batch, then cutting same-image density from 75% to 12.5%
+cuts the hard-negative supply almost 6x and the candidate loses on exactly the axis the parent
+was tuned for. I cannot read that objective's source from the jail, so this stays a stated
+assumption, not a verified one. A second, smaller risk: if the real split is not image-balanced
+the way the jail sample is, images with few sequences in a deep row get their members revisited
+far more often than images with many, trading the image bias I am removing for a within-image
+sampling bias I am introducing; the rate cap bounds this at the row level but not at the cell
+level.

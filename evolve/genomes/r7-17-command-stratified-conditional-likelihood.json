@@ -1,0 +1,62 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r7_command_stratified_conditional_likelihood",
+   "params": {}
+  },
+  "arch": {
+   "impl": "r6_capacity_ledger_transport",
+   "params": {
+    "addr_hidden": 192,
+    "avail_eps": 0.0001,
+    "consume_bias": 0.0,
+    "d": 176,
+    "dropout": 0.1,
+    "dst_init_noise": 0.02,
+    "ffn_mult": 2,
+    "gate_hidden": 96,
+    "heads": 4,
+    "key_d": 64,
+    "layers": 4,
+    "link_temp": 0.25,
+    "presence_margin": 1.0,
+    "presence_scale": 0.5,
+    "read_gate_bias": -0.5,
+    "readout_init": 0.5,
+    "recency_init": -1.0,
+    "take_bias": 1.0,
+    "tr_gscale": 0.5,
+    "tr_hidden": 192,
+    "tr_mix_bias": -2.0,
+    "tr_out_std": 0.01,
+    "write_bias": 1.0
+   }
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "target": {
+   "impl": "within_sequence_contrast_equalizer",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r20_depthtilted_sysblock_curriculum",
+   "params": {
+    "depth_base": 1.0,
+    "depth_pow": 2.0,
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "head": {
+   "impl": "r4_chainlink_route_transport",
+   "params": {}
+  }
+ }
+}

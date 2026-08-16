@@ -1,0 +1,89 @@
+AXES CHANGED: objective only (r22_exact_target_equivalence_quotient -> r7_board_conditional_routed_contrast).
+All six other axes keep the parent's impl names and params verbatim. The mechanism is entirely
+loss-side: it needs no new module, no new parameter, and no change to how tokens are built, so
+touching arch / stream / head / optim / target / batcher would only add unreasoned risk.
+
+THE ONE MECHANISM I CHANGED
+
+The parent selects its hard negatives with a batch-GLOBAL band-pass on target-target distance (the
+"confusability ring"): every row in the batch is a candidate, and candidates are importance-weighted
+by how close their target embedding is to the anchor's. I replace that distance heuristic with the
+structurally correct candidate set: the anchor's OWN BOARD. The listwise softmax now runs over the
+rows of the same trajectory and nothing else.
+
+The enabling observation is mechanical, not statistical. The harness builds ctx["prev"] as
+torch.cat([zeros_like(tgt[:, :1]), tgt[:, :-1]], dim=1) and then flattens with cmd_mask in
+row-major order, so the strict-causal previous-observation channel is EXACTLY the zero vector at,
+and only at, each trajectory's first command row (targets are per-dimension standardized embeddings;
+none is exactly zero in all 768 dims). A cumsum over that indicator recovers the trajectory id of
+every flattened row exactly, for variable-length trajectories, with no assumption that the batch is
+a rectangle. I verified this reconstruction on a synthetic batch with lengths 26/31/29/32: it
+recovers the segment sizes exactly. This is causal batch structure only; it feeds gradients, never
+the forward pass, so the no-future-leakage contract is untouched.
+
+WHY THIS SHOULD MOVE comp_ca
+
+The score is a paired difference over one board: the native chain of moves versus the role-swapped
+chain, read at the same location, with the same read token in both arms. Anything that keys on the
+read token cancels exactly. The only thing that can survive is separating the contents that are
+sitting on THIS board, and the metric's foils are precisely those contents. The parent's global
+contrast spends most of its gradient separating things the metric never compares: rows from other
+images, other file types, other trajectories. Those negatives are easy, they dominate the softmax
+by sheer count (roughly two thousand candidates against about thirty on-board ones), and separating
+them is off-target capacity. Conditioning the contrast on the board makes the discriminative task
+the metric's task. Outside this domain this is the conditional-contrastive construction (Tsai et
+al., conditional contrastive learning): instead of sampling negatives from the marginal p(target),
+sample them from p(target | conditioning variable), so the learned representation cannot score by
+exploiting the conditioning variable itself. Here the conditioning variable is the board, and the
+degenerate solution it forecloses is exactly the one the role-swap cancels out.
+
+The second half of the same idea is the anchor weight. A row earns weight (1 + rho * route_i) where
+route_i is 1 when the row has an EARLIER same-board row with a numerically identical target, that
+duplicate group is small (<= 4), and the earlier row's command differs (command-embedding cosine gap
+above a ramp of 0.02). That is a causal, exact statement of "the content at this location arrived
+here through a chain of silent moves and was seen earlier on this board". I checked the real
+trajectories in evolve/jail_data/train_sample.jsonl: rendered-observation duplicate groups are
+sharply bimodal - 70 groups of size 2 and 4 of size 3 (the read-establish / read-after-move content
+pairs), versus groups of size 8 to 15 (the empty-output class produced by mv and by redirects).
+The size cap keeps the empty-output class out; the command-gap ramp keeps out the 16 rows that are
+plain re-reads of the same path. On a synthetic board carrying all four cases, route fires at 1.0
+on exactly the routed re-reads and 0.0 on establishing reads, mv rows, same-command repeats and
+noise. Note that only the LATER member of the pair is upweighted: on a held-out image the
+establishing read of a random canary is unpredictable, while the read after the move chain is
+predictable precisely because the content already appeared as an observation token earlier in the
+same context window. Upweighting the establishing read would spend the budget on noise.
+
+WHAT I KEPT FROM THE PARENT
+
+Exact-target equivalence classes as multi-positives with occurrence mass divided by class size (now
+computed within the board, which also automatically discounts the large empty-output class), the
+class-balanced MSE anchor, per-dimension precision weighting, the focal hardness factor, and the
+gated repulsion margin in the eval's own squared-L2 decision variable. The repulsion's confusable
+target is now the NEAREST distinct in-board content rather than a ring-weighted mixture, which is
+the same statement of the mechanism change. I deliberately left _ANCHOR at the parent's 0.05: the
+board-local negative log likelihood is roughly log(2000/30) ~ 4 nats smaller than the global one, so
+the MSE anchor's relative weight rises on its own and re-tuning it would confound the comparison.
+
+WHAT I EXPECT TO SEE, AND HOW IT COULD BE WRONG
+
+Prediction: comp_ca above the parent's +0.0037, driven by a higher native_hit with swap_stayed
+roughly unchanged, because the added pressure is specifically on resolving which of the board's
+contents sits at the read location - the quantity that does not cancel between the two arms. I have
+NOT measured this; no number here is an observation. The synthetic checks establish correctness and
+cost only: gradients are finite in every degenerate batch I could construct (all boards length 1,
+all targets identical, all distinct, n=2, float64), a constant prediction leaves a large positive
+loss with nonzero gradient so the objective is anti-collapse safe, an exact prediction drives it to
+~5e-4, and swapping the routed rows' predictions to another content on the same board raises the
+loss from 0.0006 to 1.21 - the mechanism is pointed at the right rows. Cost is 25 ms per step on
+CPU at n=1984 while building strictly fewer n-by-n tensors than the parent, so it fits the fixed
+step budget.
+
+Biggest way this fails: the board-local candidate set is small enough that the listwise term
+saturates early - most in-board negatives are trivially separable empty-output rows and unrelated
+system-file reads, so once those are handled the gradient collapses onto the handful of routed rows
+per board, and if the arch cannot carry content identity through six moves at all, that concentrated
+gradient becomes concentrated noise and the run ends up below the parent rather than above it. The
+focal factor and the routing weight both amplify that concentration, so this design has no fallback
+if the routed rows are simply unlearnable under this budget. A second, smaller risk: dropping global
+negatives removes all pressure to separate contents ACROSS boards, and if the frozen-encoder space
+is poorly conditioned the MSE anchor alone may not keep the global geometry usable.

@@ -1,0 +1,121 @@
+AXES CHANGED: head only (r18_transition_forwardmodel_consistency -> r7_boardroute_prefix_nce).
+Every other axis keeps the parent's impl and params verbatim. No other axis needs to move: the
+new mechanism adds no parameters, does not touch forward, and reads the prediction the harness
+already computes, so the arch/optim/objective/batcher/stream/target contracts are untouched.
+
+WHAT THE PARENT DOES, AND THE HOLE IN IT
+
+The parent's single arm mines (pre, mutating-cmd, post) triples whose three positions are mutually
+near in command-embedding cosine, and regresses the shared latent-transition operator onto the
+post observation with a change-weighted cosine+MSE. Its mining weight is
+  w = sim(k,i) * sim(k,j) * mean((obs_i - obs_j)^2),
+kept only when mean((obs_i - obs_j)^2) >= change_floor and w > 0. So a span across which the
+observation did NOT change contributes exactly zero, structurally.
+
+Checked against evolve/jail_data/train_sample.jsonl: the trajectories are built as
+  cat P_1 ... cat P_m        (contents exposed at locations, each read a distinct content)
+  mv A B; mv B C; ...        (a silent chain, output "" for every step)
+  cat P_final                (a read whose content is one of the exposed ones, unchanged)
+render_obs is "cwd=<cwd> exit=<code>\n<output>", so the exposure read and the post-chain read of
+a routed content produce byte-identical observation text, hence (up to encoder fp noise)
+identical embeddings; and every silent step in a row produces one and the same observation text.
+The routed read is therefore exactly a zero-change span -- precisely the case the parent's
+change_floor deletes. The parent trains the operator only where content was rewritten, and never
+where content was carried. That is the hole this candidate fills.
+
+THE MECHANISM ADDED (one arm, train-time only, no new parameters)
+
+A second arm supervises the model's OWN next-observation prediction at exactly the reads a silent
+chain routed, and supervises it discriminatively rather than by regression.
+
+Mining, from embedding geometry alone (no strings, no_grad), per row:
+  1. dup[a,b] = cos(unit(obs_a), unit(obs_b)) >= dup_thresh (0.98).
+  2. The duplicate cluster with the largest membership is the row's silent/mutating set (all
+     silent steps share one observation text; contents recur at most a couple of times). Rows
+     whose largest cluster is smaller than silent_min (3) contribute nothing.
+  3. A window is a pair of NON-silent duplicates i < j with at least min_chain silent steps
+     strictly between them. depth = #silent in (i, j) is the chain length; for each j the
+     earliest such i is taken, which is the original exposure and the deepest chain.
+  4. Candidates are the first-occurrence representatives of the row's non-silent duplicate
+     classes at positions strictly before j -- i.e. the other contents already exposed on the
+     same board. The positive is the exposure vector at i (identical to obs_j, and at a strictly
+     earlier position), so the entire candidate set lies in the causal prefix of the read.
+
+Loss at the command position j, over the C nearest-in-time candidates (C = 8, positive always
+included):
+  logits_c = -mean_d (pred_j - cand_c)^2 / tau      (tau = 0.25)
+  L_win    = -log softmax(logits)_positive
+  L        = sum_w  (depth_w^depth_pow / sum depth^depth_pow) * L_win,   depth capped at 8
+folded in with weight nce_weight (0.25) under the parent's existing smoothstep ramp and
+aux_weight. The parent's transition-consistency arm is kept verbatim and still runs
+(legacy_weight = 1.0); this is an addition, not a replacement, so the comparison against the
+parent isolates the new term.
+
+WHY THIS SHOULD MOVE comp_ca
+
+comp_ca = mean over windows of (native_hit - swap_stayed). A predictor that keys on the location
+being read cancels exactly; what survives is carrying a particular content's identity through the
+chain of moves. The scored decision at a read is an N-way forced-foil pick by squared distance
+against confusable same-verb observations. Three specific reasons this arm should raise the
+differential:
+
+1. Gradient placement. The main objective spends its listwise pressure uniformly over every
+   command position in the batch, and the large majority of those positions have the trivial
+   silent observation as their target. The mined windows are ~3 per trajectory (77 across the 24
+   sampled rows), and they are exactly the positions the metric scores. This concentrates
+   gradient by roughly an order of magnitude onto the routed reads without changing the loss the
+   rest of the sequence sees.
+
+2. Negatives that are the board, not the batch. The confusables at scoring time are the other
+   contents sitting on the same system -- same file format, same canary-line shape, different
+   identity. In-batch negatives are drawn across images and content families; the ring in the
+   objective also deliberately down-weights near-identical targets. Here the negatives are the
+   other exposed contents of the same board, in the eval's own squared-L2 decision variable. An
+   L2 regression's gradient on near-parallel targets is dominated by their shared component; a
+   softmax over -d^2/tau is dominated by the component that separates them. That is the
+   difference between "be near a config file" and "be this config file".
+
+3. Depth weighting. Mined depth on the sample is mean 3.7, max 12, which is the same regime as
+   the scored slice (n=89: d3 60, d4+ 29). Weighting each window by its chain depth puts the
+   pressure on the long chains, where a shallow heuristic and genuine tracking diverge.
+
+Nothing in the arm mentions position in the move order: the positive is defined by content
+identity and the negatives by co-presence on the board, so the pressure is toward the component
+that survives both arms of the paired difference rather than toward the first-mover lookup that
+the frozen slice happens to reward.
+
+WHAT I EXPECT TO SEE (all unmeasured -- no real training run is possible from the jail)
+
+comp_ca above the parent's +0.0337, driven by native_hit rising more than swap_stayed. If the arm
+works, the pick rate against the analytic ceiling should also rise, and shortcut_leaning should
+not: the arm supplies no positional signal. A null result that would falsify the mechanism is
+comp_ca unchanged with the gate reading unchanged -- that would say the discriminative pressure
+at routed reads is already saturated by the objective's ring.
+
+MEASURED FACTS ABOUT THE IMPLEMENTATION (from the jail, on synthetic per-text embeddings that
+reproduce the real duplicate structure exactly; these are mechanical checks, not performance
+claims): the miner recovers 77 windows over the 24 sampled trajectories, identical to the count
+obtained by clustering the rendered observation TEXT directly, and the largest-cluster rule
+identified a subset of the truly silent steps in all 24 rows; mean depth 3.69, max 12; mean 7.1
+candidates per window; zero windows whose positive or whose candidates lie at or after the read
+position; the arm alone produces gradient on 109 parameters including the trunk attention, the
+readout, the transition readout and the composition renderer; per-step wall clock is +7% over the
+parent on CPU at bs=32.
+
+RISKS AND GUARDS
+
+- The prediction is read off a forward hook on the net, so the arm costs no second forward. The
+  hook stashes only when grad is enabled and the module is training, the stash is cleared on
+  every path out of aux_loss, and if the stash is missing or shape-mismatched the arm recomputes
+  the forward itself rather than scoring the wrong batch. The hook stores into a plain dict held
+  outside the module graph, so there is no parent-child module cycle and forward is not
+  re-pointed.
+- The arm compares the prediction to raw observation vectors, which is correct for an identity
+  target. It disables itself when the genome installs a learned target module; a pure non-identity
+  target chunk would be a mis-pairing and is not detectable from the head's inputs.
+- Silent-set identification is a heuristic over embedding duplicates. If a row's largest duplicate
+  cluster is not the silent set the arm mines nothing useful for that row (it needs an intervening
+  member of that cluster), so the failure mode is a dropped window rather than a wrong label.
+- Odd-length layouts: aux_loss runs only on training collates, refuses any batch failing the
+  interleave layout check, and all indexing is derived from cmd_mask's width rather than assuming
+  a relation between L and the number of steps.

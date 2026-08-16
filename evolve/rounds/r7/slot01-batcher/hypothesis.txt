@@ -1,0 +1,90 @@
+AXES CHANGED: batcher only (r6_sysblock_hardneg_curriculum -> r7_namecue_propensity_deepcells).
+Every other axis keeps the parent's impl and params verbatim. The mechanism is entirely a
+statement about which sequences co-occur and how often each is drawn, which is exactly and only
+what the batcher contract controls, so no other axis needs to move with it.
+
+THE NUISANCE I AM ATTACKING
+
+In a routed read the model is asked what is at a location that a chain of mv commands wrote. That
+location's file name is inherited from some content's ORIGINAL file: `mv A B` writes `B.k`, so the
+read path `.../magic.txt.1` carries the name of whatever content was exposed at `.../magic.txt`.
+Answering "return the content belonging to the file this location is named after" is therefore a
+complete, chain-free rule, and in the training trajectories it is CORRECT a large minority of the
+time -- in the 24 real trajectories in evolve/jail_data/train_sample.jsonl the routed content and
+the name-owning content are the same content in 9 of 24 (37.5%). The rule is not merely an
+identity shortcut: the name owner also fixes the content TYPE (a `magic.txt` holds JSON, a
+`backup.job` holds a shell script, an `f149.tmp` holds env-style key=value lines), and the frozen
+encoder embeds that type strongly, so a name-keying model gets a large slice of the answer
+embedding for free on those sequences and is punished for it only on the rest. Under the scored
+differential this rule is worth nothing: the swapped arm re-encodes the move commands over the
+same board with the same read, so the read location and its name are identical in both arms and a
+name-keying prediction contributes exactly zero per window. Training that pays for it therefore
+buys capability the metric cannot see, at the expense of the chain-following capability it can.
+
+THE MECHANISM
+
+Group-balanced training under spurious correlation (subsampling the group in which a nuisance rule
+happens to be correct removes the rule's marginal payoff without discarding any structure --
+Sagawa et al. group robustness, Idrissi et al. on plain data balancing), translated into a
+sampler. At setup each training sequence is reduced, from its command strings alone, to its
+deepest mv-routed read: `cat P` is walked backwards through the mv edges that wrote P earlier in
+the same trajectory, giving a hop count h >= 1 and the ORIGIN path the routed content was exposed
+at. Stripping trailing `.<digits>` copy-suffixes off P gives the base path whose name the read
+location carries. The sequence is NAME-AGREEING when origin == base and NAME-CROSSING otherwise.
+This parse is verified against the trajectories' own recorded structure on all 24 sample
+trajectories: hop count matches the recorded depth on 23/24 (the one difference is a tie at depth
+1 between two equally deep routed reads, resolved differently but into the same cell) and the
+name-agreement label matches recorded `routed_idx == name_idx` on 24/24.
+
+A batch is then a uniform iid base part plus a focus part, exactly the parent's skeleton and the
+parent's two knobs (focus_frac_max 0.75, ramp_frac 0.3, both unchanged). What changes is the
+definition of a focus block. The parent drew its focus slots from ONE system image, with
+replacement; this impl draws them from cells of (hop class capped at 4, name-agreement), off a
+fixed depth wheel that spends three quarters of the focus slots on hop counts three and above,
+with the name-agreeing share of the focus part annealed from its measured natural prevalence down
+to a floor of 0.10 as the ramp completes, and with focus slots drawn distinct within the batch.
+Early training is the plain uniform distribution (the ramp starts the focus part at zero slots),
+so nothing is starved before the model has any routing behaviour to shape.
+
+WHAT I EXPECT
+
+Measured on the real sample corpus with a deterministic stand-in RNG: the realized share of
+name-agreeing sequences per batch falls from the natural 0.375 to about 0.16 once the ramp
+completes, and the share of hop-count >= 3 sequences rises from about 0.50 to about 0.70. The
+prediction is that a model trained on that stream is forced to read the mv chain rather than the
+location's name, so its pick FOLLOWS the swapped chain instead of holding, which lowers
+swap_stayed more than it lowers native_hit and raises comp_ca above the parent's -0.0037. I
+expect the effect to show up mainly in the d4+ windows, where the chain is long and the name cue
+is most tempting. This is unmeasured -- the real harness cannot be run from the jail, and every
+number above is either a property of the sampler itself or a count over the 24 sample
+trajectories, not a fitness estimate.
+
+FALSIFIERS
+
+If comp_ca does not move, the name cue was not what the parent's model was leaning on. If comp_ca
+falls, the name-agreeing sequences were carrying supervision the routing behaviour needs (they are
+the sequences where chain and name point at one content, i.e. the least ambiguous supervision),
+and the floor of 0.10 is too aggressive -- the same impl with self_named_floor at the natural
+prevalence is the control that separates the two coordinates of the change, and setting
+focus_frac_max to 0 reduces it to the uniform baseline exactly.
+
+RISKS I ACCEPT
+
+The depth wheel moves the depth profile at the same time as the polarity, so a single run cannot
+attribute the change to one coordinate alone; the two are deliberately coupled because the name
+cue is most valuable to a model exactly where the chain is longest, and the parameter controls
+above make them separable in a follow-up. The parse is command-string-only and ignores the
+trajectory metadata (the batcher never receives it), so a sequence whose deepest routed read is a
+decoy mv rather than the pack's own routed read is labelled off that decoy; both remain genuine
+routed reads, so the cell is still a routing cell.
+
+CONTRACT NOTES
+
+make_batcher(fit, bs, seed, **params) -> next_batch(step, total_steps) -> list[int] of exactly bs
+python ints in [0, len(fit)). One private torch.Generator, seeded from `seed`; no global RNG is
+touched (verified: nothing calls torch.* without generator=g). `fit` is read through .get only and
+never mutated (verified against a deep copy). Deterministic given the seed and sensitive to it
+(both verified). Falls back to the uniform baseline when fewer than two sequences, when
+focus_frac_max <= 0, or when no mv-routed read can be parsed anywhere in the corpus. Per-step cost
+is one rand call, at most eight randint calls and one randperm; setup is one linear pass over the
+command strings, the same order of work the parent's prior mechanisms already paid.

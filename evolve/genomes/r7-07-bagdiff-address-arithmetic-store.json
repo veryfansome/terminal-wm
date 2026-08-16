@@ -1,0 +1,56 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r7_bagdiff_address_arithmetic_store",
+   "params": {
+    "d": 192,
+    "layers": 4,
+    "heads": 4,
+    "ffn_mult": 4,
+    "key_d": 64,
+    "slots": 24,
+    "inv_tau_read": 8.0,
+    "inv_tau_write": 8.0,
+    "kappa_src": 1.5,
+    "match_sharp": 12.0,
+    "match_thresh": 0.5,
+    "scale_move_init": 1.4,
+    "readout_init": 0.25
+   }
+  },
+  "batcher": {
+   "impl": "r6_routing_necessity_pips",
+   "params": {
+    "alpha": 2.0,
+    "dup_frac": 0.2,
+    "dup_tol": 0.02,
+    "kappa_bias": 0.5,
+    "kappa_ref": 0.1,
+    "pool_mult": 16,
+    "proj_dim": 96,
+    "top_k": 3,
+    "w_floor": 0.15
+   }
+  },
+  "head": {
+   "impl": "r20_dualpre_transition_consistency",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

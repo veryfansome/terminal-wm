@@ -1,0 +1,81 @@
+MECHANISM (arch only; every other axis is the parent's verbatim)
+
+I replace the parent's backward multi-hop pointer chase with a forward REGISTER FILE whose slot
+KEYS are mutable and whose slot CONTENTS are immutable. This is the transpose of every routing
+mechanism in the parent lineage. The parent keeps the board static and, at read time, chases
+K hops backwards through a soft follow-matrix over commands; content is what moves through the
+attention. Here the scan runs forward once: a bank of n_slots registers each holds a unit
+location key, a coefficient row over observations, and an occupancy scalar. A `cat X` binds the
+observation into a register keyed at address(X). A `mv A B` finds the register whose key matches
+address(A) and REWRITES that key to address(B) — the content never moves, its address does.
+A later `cat B` matches the rewritten key and pulls the register's coefficient row.
+
+Concretely, per step i (read strictly before write, so state at the read comes only from steps
+< i): sim = keys · a_read_i; p = softmax(sim * s_read); w = p * occ; the read is w/sum(w) applied
+to the coefficient matrix, so the retrieved vector is exactly a convex mixture of strictly
+earlier RAW observation embeddings — never a free-floating latent. The write applies (a) a
+relocation, softmax-matching keys against a_src_i, scaled by a confidence sigmoid on the
+occupancy-masked peak similarity and by a learned move gate, sliding the matched key toward
+a_dst_i and renormalizing to the sphere; and (b) an install, which either updates the register
+that already holds a_read_i (occupancy-masked peak similarity says the address is held) or
+allocates a fresh one by a straight-through hard argmax over (1 - occupancy) plus a learned
+per-slot tiebreak — hard, because a soft allocation over 32 slots smears one content across the
+whole bank at the first install and destroys every later address match. Occupancy leaks by a
+learned factor, so allocation recycles the stalest register. Read, source and destination
+addresses come from three separate nonlinear branches over one shared command-feature trunk, all
+passed through ONE shared address projection, so a read address and an earlier command's
+destination address are comparable by construction.
+
+WHY IT SHOULD MOVE comp_ca
+
+comp_ca is native_hit minus swap_stayed on the same board. A predictor that keys on the location
+being read is identical in both arms and contributes exactly zero. This mechanism cannot key on
+the location alone: the answer it returns for a fixed read address depends on which content the
+chain of key rewrites parked there, which is exactly what the role swap changes. It also carries
+no positional or recency prior at all — the parent's chase is explicitly recency-biased, which is
+the family of features that cancels only in expectation and can score on a frozen slice for the
+wrong reason; nothing here reads step index.
+
+The two structural advantages over the backward chase are (1) unbounded depth at constant cost —
+composition happens by mutating one key in place, so a d=4 chain costs the same as d=1 and there
+is no hop budget to exhaust and no product of d softmaxes to attenuate the signal; the parent
+needs chase_hops >= depth and multiplies a follow matrix by itself, so probability mass diffuses
+with depth exactly where the objective's d4+ windows live. And (2) the retrieval is a coefficient
+row over observations, computed as one [B,n,n] x [B,n,D] matmul at the end, so the whole scan is
+cheaper in memory and compute than the parent's repeated bmm over [B,n,n] follow matrices.
+
+I verified the recurrence with oracle addresses (a directed test, not a training run): on a
+depth-3 and a depth-4 move chain the final read puts 0.98-0.99 of its coefficient mass on the
+step whose observation introduced the content; and on a role-swapped pair — same board, same
+destinations, two contents exchanging their move sets — the native arm returns content A and the
+swapped arm returns content B, 0.977 vs 0.977 on opposite steps. That is the sign structure
+comp_ca pays for. It is a statement about the arithmetic only: whether the learned address
+branches actually separate the source path from the destination path inside a mean-pooled command
+embedding is the open empirical question, and no fitness claim here is measured.
+
+WHY ONLY arch CHANGES
+
+The head (r2 dual-address move transport) is the value-moved / key-fixed memory; mine is the
+key-moved / value-fixed one, so they are complementary rather than redundant, and the head's
+relocation-mined InfoNCE is applied to the final prediction, which now contains my retrieval —
+it supervises this mechanism for free. The optim's spectral cap applies to the new (D,D) readout
+exactly as it did to the parent's. Changing the objective, target, stream or batcher would
+confound the mechanism swap with a training-signal change, and nothing in the design needs them
+to move.
+
+WHAT I EXPECT TO SEE
+
+Higher native_hit and lower swap_stayed together, with the gain concentrated in the d4+ windows
+where the parent's fixed hop budget and diffusing follow matrix hurt most. The retrieval mass
+feature should be near zero on `mv`-type steps and near one on reads of a moved location; if the
+gate learns to fire everywhere, the mechanism has degenerated to a prefix copy.
+
+BIGGEST RISK
+
+The install gate must learn to bind on content-bearing reads and not on generic `ls` output, and
+the three role branches must separate the two paths inside one mean-pooled `mv src dst`
+embedding. If either fails, registers get keyed on junk addresses, the read matches nothing, the
+output gate closes, and the candidate lands at the r22 base rather than above the parent. The
+straight-through hard allocation is a second risk: it is discrete, so a training run can thrash
+between allocation patterns early, and its gradient reaches the allocation sharpness only through
+the soft surrogate.

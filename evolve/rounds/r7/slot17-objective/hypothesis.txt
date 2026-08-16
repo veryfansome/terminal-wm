@@ -1,0 +1,83 @@
+MECHANISM: a command-stratified conditional partial likelihood, imported from conditional maximum
+likelihood in discrete choice / panel econometrics (McFadden's conditional logit, the Rasch
+conditional likelihood, and the Cox partial likelihood). Those estimators eliminate a per-group
+nuisance parameter not by modelling it but by conditioning on a statistic that makes it drop out of
+the likelihood: within a group, the group effect multiplies every alternative equally and cancels
+from the ratio. Here the nuisance is exactly the thing the metric already cancels — the command.
+
+Rows in the flattened training batch are partitioned into COHORTS of numerically equal causal
+command embeddings (the same command string, cheap relative-threshold equality on ctx["cmd"],
+1e-3 of the batch's mean pairwise distance — the tolerance an archived impl already uses for exact
+duplicate detection in this same standardized space). The primary loss term is a multi-positive
+listwise likelihood whose DENOMINATOR IS RESTRICTED TO THE ANCHOR'S OWN COHORT. Every candidate in
+that denominator answers the identical question, so a predictor of the form pred = f(cmd) emits
+the same logit row for every member of the cohort: it is tied across the cohort and cannot make
+row i prefer its own answer while row i' prefers a different one. Its achievable value is the
+cohort floor, which is a constant of the batch. That is the training-side analogue of the way
+comp_ca cancels location-keying — the loss refuses to pay for the shortcut instead of merely
+out-weighting it. Measured on synthetic batches with this structure, the BEST command-only
+predictor (the per-cohort mean target) scores 3.963 on the conditional term versus 3.971 for a
+random predictor and 0.213 for the oracle: the command channel buys essentially nothing, and the
+whole 3.75-nat gap is reachable only through the trajectory history.
+
+Two refinements pick out the compositional rows rather than the merely-unpredictable ones.
+(1) Inside a cohort, distinct-target candidates drawn from the anchor's OWN trajectory carry an
+additive logit bonus (+4). Where a command was issued twice in one trajectory and returned
+different content — a read of a location before and after a silent move, which is 6.6% of the rows
+in the jail's real trajectory sample and the exact shape of the scored window — the conditional
+problem collapses onto that pair, so the gradient is "is the old content or the new content there
+now", not "which of sixty systems am I on". The bonus is applied to negatives only, so rows with no
+same-trajectory alternative keep an ordinary cohort softmax rather than becoming trivially easy.
+(2) Row mass is raised for rows whose answer already occurred earlier in their own trajectory
+(retrievable, x2) and for rows that have a same-trajectory same-command alternative (x5). This is
+deliberately NOT focal weighting: much of the cross-system content is a random per-image hash that
+was never observed in the prefix and is irreducible, and focal loss would pour the conditional
+gradient into exactly that noise. Focal weighting is kept only on the auxiliary global term.
+
+The rest is inherited from the parent's lineage: exact-target equivalence classes pooled
+multi-positively with inverse-class mass, per-dimension precision weighting, squared-L2 distances
+in the eval's own decision variable, a repulsion hinge with a margin, and an untouched raw MSE
+anchor so a constant prediction cannot minimize the loss (measured: 6.05 for the best constant
+versus 0.032 for the oracle). Two things from the parent are DROPPED: the confusability ring is
+gone — negatives are now selected by command identity rather than by target proximity, which is
+what the probe's forced choice actually presents — and the full-batch listwise term survives only
+at weight 0.3, as a geometry calibrator for the N-way choice, because at full weight it is the term
+a command-keyer can still profit from.
+
+AXES CHANGED and why they change together (operator is CROSSOVER):
+- objective -> r7_command_stratified_conditional_likelihood (new; the mechanism above).
+- arch -> r6_capacity_ledger_transport, head -> r4_chainlink_route_transport, batcher ->
+  r20_depthtilted_sysblock_curriculum: the partner's half of the cross, taken as the co-designed
+  unit it is. The conditional term supplies a gradient that ONLY a content-routing computation can
+  earn; it needs a parameterization in which "which earlier observation is at this location now" is
+  an expressible choice. The capacity ledger is exactly that — its prediction at a command position
+  is a link-weighted combination of earlier observation embeddings, depleted as content is moved
+  away — and the chainlink head supervises that routing distribution directly. The depth-tilted
+  curriculum comes with them because the boost the objective puts on same-trajectory alternatives
+  only bites when deep move chains are present in the batch. Pairing the new objective with the
+  parent's arch instead would leave the strongest gradient it produces with nothing to move: the
+  parent scores +0.0000, which is the value the metric returns structurally for a pure
+  location-keyer, so the parent's stack is sitting on the exact fixed point this objective is built
+  to make unprofitable.
+- target, stream, optim: unchanged, and identical in both halves of the cross. The objective's
+  temperature, margin and both equality thresholds are fractions of the batch's mean off-diagonal
+  target distance precisely so it stays calibrated while within_sequence_contrast_equalizer
+  rescales the target space during training.
+
+EXPECTATION (falsifiable): comp_ca rises above the parent's +0.0000, and above the +0.0112 floor.
+The specific prediction that distinguishes this mechanism from a lucky reroll: because the
+conditional term is tied across a cohort, a shortcut that keys on the read command cannot be the
+source of any gain, so a positive comp_ca should come with a low private.shortcut_leaning and the
+gain should concentrate in the d4+ windows rather than d3. If comp_ca moves but the leaning
+diagnostic moves with it, the mechanism is not what produced the number. The failure mode I would
+expect if the hypothesis is wrong is comp_ca near zero with a healthy loss curve: that would mean
+the cohorts are real and the conditional gap is being closed by per-image prefix identity — routing
+the batch's system identity rather than a particular content — which cohort restriction alone does
+not forbid.
+
+UNMEASURED: every number above is either from the jail's real trajectory sample (cohort and
+repeat-command frequencies) or from synthetic batches with the same shape (the command-only floor,
+the anti-collapse gap, cost). No claim about comp_ca has been measured. Cost: forward+backward at
+n=2048 rows is ~78 ms on CPU against ~69 ms for the parent objective on the same batch, i.e. one
+extra n-by-n command distance matrix on top of the two the parent already forms; it should not
+threaten the fixed step budget.

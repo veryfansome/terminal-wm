@@ -1,0 +1,38 @@
+{
+ "chunks": {
+  "objective": {
+   "impl": "r12_antiretrieval_ring_negatives",
+   "params": {}
+  },
+  "arch": {
+   "impl": "r22_retrieval_composition_renderer",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  },
+  "batcher": {
+   "impl": "r6_slotconflict_deficit_scheduler",
+   "params": {
+    "block_size": 4,
+    "clique_gamma": 1.0,
+    "conf_frac_max": 0.6,
+    "neyman_beta": 1.0,
+    "ramp_frac": 0.25
+   }
+  },
+  "stream": {
+   "impl": "baseline_interleave",
+   "params": {}
+  },
+  "head": {
+   "impl": "r7_boardroute_prefix_nce",
+   "params": {}
+  }
+ }
+}

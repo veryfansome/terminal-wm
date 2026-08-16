@@ -1,0 +1,144 @@
+CROSSOVER: parent r6-01-slotconflict-deficit-scheduler x the dual-address partner.
+Axes changed: target (new impl), stream (partner's impl adopted), head (one param retuned to
+keep the partner's stream from silently disabling the parent's aux loss). arch, objective,
+optim and batcher are the parent's, verbatim.
+
+WHAT THE READ ACTUALLY DECIDES
+
+The scored decision is argmin over candidate contents of the squared L2 distance between the
+read-position prediction and each candidate's observation embedding. In this data the candidates
+at a window's read are whole file contents, and a content renders to the SAME observation text
+wherever it currently sits (cwd is constant, exit is 0, the payload is the file body) - verified
+against evolve/jail_data/train_sample.jsonl, where a file read before a move and after a move
+produces byte-identical output. So prediction error only ever flips a decision through its
+projection onto the DIFFERENCES between co-present contents. Error along any direction in which
+the candidates agree is free; error along the directions in which mutually confusable contents
+differ is the entire decision. Plain MSE in the observation space (the parent's identity target)
+weights all 768 directions equally and therefore spends most of its gradient on the high-variance
+directions that separate a cat from an ls from a uname - directions on which every candidate at a
+cups read already agrees.
+
+THE MECHANISM (axis target, new impl fisher_volume_metric_flow)
+
+Train in a linearly remapped observation space and read back through the exact algebraic inverse,
+where the map is LEARNED BY GRADIENT from the training loss and constrained to unit determinant:
+
+    W = diag(exp(g)) . (I + N_low) . (I + N_up)
+    g = cap * tanh(s/cap) then mean-centred  ->  det diag(exp(g)) = exp(sum g) = 1 exactly
+    N_low strictly lower, N_up strictly upper, each Frobenius-renormalised to <= 0.35 in the
+    forward  ->  both factors unit-triangular, det 1, always invertible, spectrum in [0.65,1.35]
+
+make_target(z_obs, z_prev) = W z_obs. to_obs(pred, z_prev) = W^-1 pred, assembled from the same
+three factors by a reciprocal gain and two unit-triangular solves. Determinant one is the whole
+safety argument: a learned target that can shrink collapses, and a learned target that can inflate
+makes an in-batch contrastive trivially easy. Volume preservation forbids both, so the map can only
+trade one direction against another - it is forced to be a choice of METRIC, never a change of
+scale. Condition number is bounded by construction (<= ~18 with these caps), so the inverse cannot
+amplify prediction error without limit. All parameters are zero-initialised, so at step 1 the map
+is exactly the identity and the genome is exactly the parent; every departure has to be paid for by
+the loss. This is what makes it a strict, bounded extension of the parent rather than a gamble.
+
+Two opposed pressures shape W, and their equilibrium is the point.
+
+(1) The main loss (the parent's ring-negative listwise contrastive plus its anchor MSE) pulls W
+toward shrinking the directions where the model's residual is large. Under a fixed determinant,
+minimising E||W e||^2 has the solution W proportional to Sigma_e^-1/2: a whitening of the model's
+own residual covariance. On its own that is the wrong half - it would happily amplify whatever the
+model already predicts easily, which is exactly the shared cat-format directions, and then the
+inverse would amplify the residual on the content directions at read time.
+
+(2) reg() supplies the missing Fisher numerator. Inside make_target the module caches a band-pass
+CONFUSABILITY ring over the batch's target-target squared distances - the same band-pass shape the
+parent's objective already trusts: near-identical targets (the repeated-file case, which is common
+here because contents recur verbatim) get about zero weight, close-but-distinct targets take the
+mass. reg() returns
+
+    -beta * log( sum_ij ring_ij * ||W z_i - W z_j||^2 / D ),   ring detached, beta = 0.05
+
+i.e. minus the log of the ring-weighted mean squared separation of confusable targets MEASURED IN
+THE MAPPED SPACE. Minimising it means maximising that separation. Because W is linear, W z_i - W z_j
+is just the difference of the targets make_target already computed, so the whole term costs one
+192x192 gram matrix per step and nothing else. Gradient reaches only W; z is detached.
+
+Together, under det(W) = 1: stretch the directions along which co-present, mutually confusable
+contents actually differ, shrink the directions the model cannot resolve anyway. That is an online
+Fisher discriminant on the target space, learned jointly with the model instead of estimated
+offline, and the unit-determinant constraint is what makes the ratio well-posed. The translated
+outside-the-domain mechanism is the volume-preserving flow layer from normalising flows (a
+det-1 diagonal-plus-triangular factorisation with an exact triangular-solve inverse) used not to
+model a density but to carry a learned metric.
+
+WHY IT SHOULD MOVE comp_ca SPECIFICALLY
+
+comp_ca is native_hit minus swap_stayed on the same board. Both arms are decided by the same
+argmin over the same candidate set; what differs is which content the chain routed to the read.
+Raising the resolution of the model in exactly the directions that separate co-present contents
+raises native_hit and, symmetrically, makes the model less likely to return the native content
+under the swapped chain, because the two contents become further apart in the metric the loss is
+actually optimising. A transform of the target space cannot manufacture the location-keying
+cancellation and cannot manufacture a first-mover lookup: it does not see commands, positions or
+order at all, only the answer embedding. It changes only how much a given residual costs. So
+whatever it buys is bought on the content axis.
+
+WHY THE STREAM CHANGES WITH IT (axis stream -> r4_pathslot_dualaddress_code)
+
+This is the crossover half. The partner's mechanism overwrites three hash-chosen coordinate slots
+of every command embedding with a purely lexical dual-address code: a 96-bit Rademacher hash of the
+command's source path, the same family on its destination path, and a 16-dim structural tag. The
+same path string yields the identical vector wherever it appears, so a move's DESTINATION slot and
+a later read's SOURCE slot hold the identical 96-dim vector exactly when the two paths are equal,
+and near-orthogonal vectors otherwise. The parent's arch is r22, whose delta-rule file memory and
+path memory write a raw observation at a key linear in the command embedding and read it back at a
+query linear in the command embedding. Those read/write projections currently have to invent path
+identity out of a frozen sentence embedding of the whole command line; with the dual-address code
+they can align source and destination addresses by an exact vector match. That is the single most
+direct enabler of "which content is now at this location", and it is why the partner's stream, not
+its arch, is the piece worth importing: it composes with the parent's memory instead of replacing
+it. The code is a pure per-command function exposed as code_cmds(cmds, z_cmd) with no cross-command
+state, so the instrument can reproduce the tokens on the native chain and on the role-swapped chain
+independently. The two changed axes are orthogonal by construction: the stream reshapes the COMMAND
+space, the target reshapes the OBSERVATION space, and neither reads the other's tensors.
+
+WHY THE HEAD PARAM MOVES (axis head, path_thresh 0.60 -> 0.45)
+
+The parent's head mines (pre-read, mutating command, future read) triples by thresholding cosine
+similarity between raw command rows of the batch, and those rows are now the coded ones. The code
+replaces 208 of 768 coordinates with +-1 values whose squared norm is 208, which is what
+standardised coordinates already carried, so the cosine DENOMINATOR is essentially unchanged while
+the numerator loses the contribution those 208 coordinates used to make: every cosine is scaled by
+roughly 560/768 = 0.73, plus 96/768 = 0.125 when two commands share a source path. The triples the
+head most wants - a read of the move's DESTINATION path paired with the move itself - match on
+different slots (read source vs move destination) and so get the 0.73 dilution with no bonus. At the
+inherited 0.60 threshold those triples stop being mined and the aux loss silently goes to zero,
+which is a regression against the parent for a reason that has nothing to do with the head. 0.60 x
+0.73 = 0.44, so 0.45 approximately preserves the parent's mining behaviour under the new stream.
+This is arithmetic on the coding scheme, not a tuned number, and it is unmeasured.
+
+FALSIFIABLE PREDICTIONS
+
+- comp_ca rises above the parent's +0.0337. If the learned metric is doing what is claimed, the
+  gain shows up as a higher native_hit at unchanged-or-lower swap_stayed, not as both arms rising.
+- The map does not stay at the identity: because reg() always pushes for expansion along confusable
+  directions while the main loss resists, the Frobenius caps should bind early and W should sit at
+  a bounded, non-trivial tilt for the rest of training.
+- FALSIFIED IF: comp_ca lands at or below the parent while the health/reconstruction readings stay
+  normal. That would mean the residual-whitening pressure (1) dominates the discriminant pressure
+  (2) - the map is amplifying the easy shared-format directions and the inverse is paying for it on
+  the content directions at read time - and the fix is a larger beta, not a different family.
+- FALSIFIED ALSO IF: the reconstruction/health reading degrades. With det(W) = 1 and a bounded
+  condition number that should be impossible for the target to cause, so a degraded reading would
+  point at the stream swap instead, and the two changes would need separating.
+
+PERFORMANCE (all unmeasured, no miniature run was used)
+
+Two extra 768x768 parameters plus a 768-vector, about 1.18M parameters, ~4.7MB, trained by the same
+AdamW group as the rest. Per training step the target costs two 768x768 matmuls against the batch's
+command rows plus one 192x192 gram - small against the trunk. The optimiser's spectral cap does
+touch both (768,768) parameters, but the forward renormalises them to a fixed Frobenius norm, so any
+uniform rescale the cap applies is exactly absorbed and the effective map is unchanged. to_obs costs
+two unit-triangular solves and one fused 768x768 matmul per call, on whatever device the caller's
+tensor lives on (device and dtype are taken from the argument, so a CPU read-back works). Neither
+make_target nor to_obs touches z_prev, indexes a position, or assumes anything about sequence
+length or parity, so the odd-length scored layout [cmd_0, obs_0, ..., cmd_r] is handled identically
+to any other input: it is a per-row map. The forward/inverse algebra and det(W) = 1 were verified
+numerically outside the harness on a small dimension (round-trip error at machine epsilon).

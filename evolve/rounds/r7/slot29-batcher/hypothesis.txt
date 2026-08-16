@@ -1,0 +1,82 @@
+AXES CHANGED: batcher only (r4_hopdepth_scaffold_stratified_quota -> r7_antithetic_moverrole_pairing).
+Every other axis keeps the parent's impl and params verbatim. The mechanism is entirely a change to
+which sequences co-occur in a batch, so it needs no help from the objective, arch, stream, head,
+optim or target — it is designed to feed a channel that the parent's objective ALREADY has and that
+the parent's batcher never deliberately fills.
+
+MECHANISM (antithetic variates, imported from Monte-Carlo variance reduction).
+Hammersley and Handscomb's antithetic-variates construction pairs each draw X with a second draw X'
+built so that a nuisance component enters the two with opposite sign; the nuisance then cancels in
+the pair's contribution to the estimator instead of only in expectation over many draws. Here the
+estimator is the gradient of the in-batch listwise contrastive loss, and the nuisance is chain
+POSITION: whether the content a read returns was the first thing on its board to be displaced, or
+sat behind a peer in the move order.
+
+The parent already replays each training sequence's command list through a symbolic tracker to label
+it by the hop count of its deepest routed read, and it spends each batch's scheduled slots on an
+exact per-depth quota drawn from image-restricted strata. I keep that skeleton bit-for-bit — same
+event parser, same hop arithmetic for mv / cp / 'read > path' / 'read >> path', same depth labels,
+same frontier ramp, same asymmetric kernel, same largest-remainder quota, same image block, same
+occupancy tilt, same uniform remainder — and extend the replay to forward a CONTENT TOKEN alongside
+the hop count. Each content records the board it lives on (the /tmp/w/cups or /tmp/w/cvar/<group>
+prefix of where it was first displaced) and the step index of its first displacement. The deepest
+routed read then gives the sequence a MOVER ROLE: side 0 if the content the read returns was the
+earliest-displaced content on its board, side 1 if some board peer moved first. Sequences are binned
+by (system image, board family, hop depth, number of board peers) and split by side; a bin holding
+both sides is an antithetic cell. A fixed fraction (pair_frac=0.85) of each scheduled depth quota is
+then spent on PAIRS: a cell is sampled per pair with weight equal to its smaller side's population,
+pair counts are aggregated per cell so each cell costs two draws per step, and one member is drawn
+from each side. The unpaired remainder falls through to the parent's exact draw, so pair_frac=0 is
+the parent.
+
+WHY IT SHOULD MOVE comp_ca.
+comp_ca is native_hit minus swap_stayed, and the role-swap arm exchanges the move-position SETS of
+the routed content and a partner over the same board, same destinations, same depth. A model that
+answers by location cancels exactly; a model that answers by chain position cancels only in
+expectation. So the training-time analogue of the swapped arm is precisely two trajectories that
+agree on board geometry, family and chain length but disagree on which chain role the answer occupies
+— and the antithetic pair puts exactly that adversary into the same batch by construction.
+
+That adversary lands in a channel the objective already reserves for it. r5_boardlocal_namecollision
+_quotient_nce spends _RHO_COLL = 0.25 of each row's negative mass on candidates whose command input is
+an upper-tail outlier in cosine similarity to the anchor's command input while carrying a different
+target, and additionally upweights such rows in the listwise average by _ROW_COLL. Under the
+r3_srcdst_hashslot_coding stream the command token is z_cmd plus sparse hash blocks for src path, dst
+path, verb and flags, so two deep reads of paths in the same board family on the same image are
+strongly similar and sit in that upper tail, while their targets are the two different contents of the
+board and are therefore not merged by the _EQ_EPS equivalence test. So each antithetic pair converts
+directly into concentrated negative mass and an upweighted row whose ONLY discriminating information
+is which content the mv chain actually routed. A representation that assigns the answer by chain
+position gets the two rows of a pair exactly backwards on one of them and is penalised; a
+representation that carries content identity through the chain satisfies both.
+
+WHAT I EXPECT TO SEE.
+comp_ca above the parent's +0.0112, driven by the d3 and d4+ windows rather than by a uniform shift,
+because the deep strata are where the parent's quota is smallest and where an independent draw is
+least likely to contain both roles. I expect native_hit to rise more than swap_stayed, and I do NOT
+expect the shortcut-leaning report to rise: the mechanism's whole content is to make first-mover
+lookup a losing strategy on the training distribution, so if the number moves and shortcut_leaning
+moves with it, that is evidence AGAINST this hypothesis rather than for it.
+
+MEASURED IN THE JAIL (mechanical only, not performance):
+On evolve/jail_data/train_sample.jsonl the mover role is well populated and genuinely two-sided — 13
+sequences side 0, 10 side 1, 1 unpairable — and both sides occur at capped depths 2, 3, 4 and 5, so
+antithetic cells exist at exactly the depths the objective is scored on. Replaying 800 batches over a
+replicated 1440-sequence corpus, the number of matched opposite-role pairs available in a batch rises
+from 10.5 (parent) to 16.3 at pair_frac=0.75 and 18.4 at pair_frac=1.0, with the number of depth-3+
+rows per batch unchanged (26.1 vs 26.0) — the composition changes, the depth curriculum does not.
+That replicated corpus is favourable to the parent (60 copies of 24 sequences make independent draws
+collide), so the real gap should be larger. Determinism from the seed, exact batch length, index
+bounds and no mutation of fit were checked across bs in {1,2,3,5,16,64,128,256}, pair_frac in
+{0,0.75,0.85,1.0}, n_block_images in {1,3,8}, single-image / missing-image / empty-cmds / non-string
+-cmds / no-routed-read corpora, and the two-sequence corner. Setup cost is one linear pass over the
+command strings, the same pass the parent already pays; per-step cost adds at most two small
+multinomial draws per occupied cell. NO PERFORMANCE CLAIM IS MEASURED — comp_ca has not been run.
+
+BIGGEST RISK.
+Pairing constrains the joint composition, which spends batch diversity: at pair_frac=0.85 most
+scheduled slots are tied to a partner, so the number of DISTINCT (image, family, depth, peers) cells
+a batch visits falls, and the collision channel may saturate on one geometry per step instead of
+sampling broadly. If the objective's collision component is already close to saturated under the
+parent, the extra matched mass buys nothing and the lost coverage costs. The parent is recovered
+exactly at pair_frac=0, so that failure mode is a one-parameter walk back rather than a dead impl.

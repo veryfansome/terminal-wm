@@ -1,0 +1,40 @@
+{
+  "chunks": {
+    "arch": {
+      "impl": "r22_retrieval_composition_renderer",
+      "params": {}
+    },
+    "batcher": {
+      "impl": "r6_slotconflict_deficit_scheduler",
+      "params": {
+        "block_size": 4,
+        "clique_gamma": 1.0,
+        "conf_frac_max": 0.6,
+        "neyman_beta": 1.0,
+        "ramp_frac": 0.25
+      }
+    },
+    "head": {
+      "impl": "r18_transition_forwardmodel_consistency",
+      "params": {
+        "path_thresh": 0.45
+      }
+    },
+    "objective": {
+      "impl": "r12_antiretrieval_ring_negatives",
+      "params": {}
+    },
+    "optim": {
+      "impl": "r18_spectral_capped_transition_readout",
+      "params": {}
+    },
+    "stream": {
+      "impl": "r4_pathslot_dualaddress_code",
+      "params": {}
+    },
+    "target": {
+      "impl": "fisher_volume_metric_flow",
+      "params": {}
+    }
+  }
+}

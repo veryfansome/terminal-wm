@@ -1,0 +1,114 @@
+AXES CHANGED: stream only (r5_shared_pathid_signed_role_binding -> r7_bam_slot_address_link_code).
+Every other axis keeps the parent's impl name and params verbatim. No other axis needs to move:
+the change is entirely in the geometry of the command token, and arch/head/optim/objective/target
+read that token through the same interfaces (collate, extract_cmd_pred, extract_cmd_input,
+flatten_predictions, leakage_ok, CUPS_LAYOUT="interleave2") with identical shapes and dtypes.
+
+THE MECHANISM I ADDED
+
+The parent superposes a path's identity atom and its role atom in the SAME address coordinates and
+separates the two roles by the SIGN of a second, much smaller block: a mv token holds
+id(src)+id(dst) at full identity energy in one shared block, plus +role(src)-role(dst) in a narrow
+block. I replace that with a two-slot code borrowed, equation for equation, from Kosko's
+Bidirectional Associative Memory (1988). A BAM stores a set of pairs as W = sum_k x_k y_k^T and
+recalls y from x with W and x from y with W^T; the two directions are the same memory read in
+transpose. A transformer's attention IS that memory when the keys carry one member of the pair and
+the values carry the other, so all I have to supply is a token layout that puts the two members in
+disjoint, index-aligned coordinate slots.
+
+Concretely: the address space is split into an OUT slot (coords 0..320) and an IN slot
+(coords 320..640), aligned coordinate for coordinate. One path yields ONE dense Rademacher pattern
+p(P) of width 320, drawn from a blake2b digest of the whole normalized path string. That same
+pattern is written into OUT when P is the command's source or its plain argument, and into IN when
+P is the command's destination or redirect target. A command with no explicit destination leaves
+the IN slot EMPTY -- it is not filled with a copy of the source. Let J be the involution on the
+640-wide address space that swaps the two slots (J^2 = I). Then, exactly:
+
+  mv A B      ->  OUT = p(A),  IN = p(B)
+  cat B       ->  OUT = p(B),  IN = 0
+  cat A > B   ->  OUT = p(A),  IN = p(B)
+
+  <J x_read , x_mv>_addr = <p(X), p(dst)> = 320*g^2  iff dst == X, and ~sqrt(320)*g^2 otherwise
+  <  x_read , x_mv>_addr = <p(X), p(src)> = 320*g^2  iff src == X, and ~sqrt(320)*g^2 otherwise
+
+so one fixed linear map J turns "which command moved content INTO X" into a pure inner-product
+match, its transpose turns it into "which command moved content OUT OF X", and the value the head
+copies back (the matched command's other slot) is linearly separable from the matched slot because
+the two slots share no coordinate. The same J-structured map performs a hop at every layer and in
+either direction, so the chain is a fixed-point iteration of ONE operator rather than a different
+learned circuit per hop.
+
+WHY THIS SHOULD MOVE comp_ca
+
+Two concrete defects of the parent's geometry are removed.
+
+(1) Role discrimination was energy-starved. In the parent, id(src) and id(dst) land on the same
+coordinates with the same signs, so "X as a source" and "X as a destination" differ only by the
+narrow role block: |id|^2 = 48*4.5^2 = 972 of shared, role-blind agreement against |role|^2 =
+32*1.5^2 = 72 of discriminating signal, a 13.5:1 ratio in favour of the term that cannot tell the
+two directions apart. To make a backward hop selective the model must learn to suppress the largest
+component of its own address block, and every suppression it learns also costs it identity
+selectivity. Here the discriminating margin IS the identity margin: 720 matched against ~40 typical
+and 144 worst-case interference, measured over 1770 real path pairs from the training sample
+(stdev 18.1 = sqrt(320) as predicted, max |.| = 64 of 320). Nothing has to be cancelled.
+
+(2) Correlated command sentences leaked a common-mode term into address inner products. The parent
+keeps the standardized command embedding at full strength under the address block, so two cups
+commands -- which are near-identical sentences differing only in a path -- contribute z.z' over 512
+coordinates on top of the code. I attenuate the raw embedding to 0.4 inside the two address slots
+(energy x0.16) while keeping it at FULL strength in the 128 tail coordinates that carry the verb
+hash and the sixteen replicated form flags, so the general next-observation signal survives while
+the address match stops being contaminated by sentence similarity.
+
+The prediction I am making is about depth. A depth-d cups window needs d successive pointer hops
+plus one content retrieval, and the net has 4 layers. Because both traversal directions now carry
+equal, uncontaminated margin, the net can run the chain BACKWARD from the read (X -> mover with
+dst=X -> its src -> ...) and FORWARD from each expose (L_i -> mover with src=L_i -> its dst -> ...)
+at the same time and meet in the middle, which is ceil(d/2)+1 layers instead of d+1. The parent's
+code supports the forward direction only through the same starved role block. So I expect the
+largest relative gain on the d4+ windows (29 of the 89), a smaller gain on d3 (60 of 89), and I
+expect the swap arm to move: swapped-follows should rise relative to swapped-held, because a
+resolved chain is what makes the two arms disagree.
+
+FALSIFIABLE, AND HOW IT FAILS
+
+Falsifier: comp_ca does not exceed the parent's +0.0337, or the d4+ subset does not improve more
+than the d3 subset in relative terms. Either outcome says the bottleneck was not the role geometry
+of the command token. A second, sharper falsifier: if native pick rate rises while comp_ca does not,
+the gain went into location-keying, which cancels exactly per window and is worthless here.
+
+The performance claim is UNMEASURED. I could not run the harness from the jail (no torch, no numpy
+available there); what I did verify is arithmetic, in pure Python against real command strings from
+evolve/jail_data/train_sample.jsonl: the parse recovers (verb, src, dst, redirect, n_paths)
+correctly for ls/cat/mv/cp/cd/uname, for both '>' and '>>' redirects, and for the empty command;
+plain reads leave the IN slot exactly zero; <read.OUT, mv.IN> = 720 for the mover that targets the
+read location and ~0 for every other command; and suffix variants such as magic.txt against
+magic.txt.1 stay near-orthogonal, which they must, because they are different locations holding
+different contents.
+
+CONTRACT AND GATE CHECKS
+
+- code_cmds(cmds, z_cmd) is a pure per-command function: the row for position i depends on cmds[i]
+  and nothing else, no cross-command state, no accumulator, no ordering. It is therefore trivially
+  prefix-causal, and the token at a READ position is bit-identical under the native chain and under
+  a chain in which two contents exchange their moves, because the read command string is the same in
+  both and no other command enters its token. collate calls exactly this same code_cmds on
+  s["cmds"] and s["z_cmd"], so the instrument reproduces training tokens exactly.
+- OBSERVATION tokens are untouched; the target space is unchanged (tgt is the raw standardized
+  z_obs, as in the parent).
+- CUPS_LAYOUT stays "interleave2".
+- No new nn.Parameter is introduced anywhere, so there is nothing that could fail reachability: the
+  stream only shapes the inputs the rest of the genome already trains on, and every coordinate it
+  writes lands in tok, which reaches the scored read position through the net's own weights.
+- No even-length assumption. code_cmds takes m = min(len(z_cmd), len(cmds)) and never pairs a
+  command with a following observation; extract_cmd_pred is pred_full[:, 0::2], which on an
+  odd-length layout [cmd_0, obs_0, ..., cmd_r] returns r+1 columns with the final read included.
+  collate guards n <= 0 and uses max(1, ...) for maxn.
+- No nn.Module attribute or method name is shadowed; the module defines no class.
+- leakage_ok corrupts obs_3 at token index 7 and asserts the predictions at cmd positions 0..3 are
+  unchanged, on a realistic six-command cups sequence (an ls, two exposes, an mv, a redirect and a
+  read) rather than six copies of one string, so the coding path is actually exercised by the probe.
+- Cost: one blake2b per unique path and one D-wide row per unique command string, both cached
+  behind a lock; per batch it is m row copies and one host-to-device transfer, strictly cheaper than
+  the parent's per-command sparse index_put_ with numpy concatenation. It will finish inside the
+  fixed step budget.

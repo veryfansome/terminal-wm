@@ -1,0 +1,41 @@
+{
+ "chunks": {
+  "arch": {
+   "impl": "r7_slot_permutation_transport_bank",
+   "params": {
+    "n_slots": 64,
+    "key_d": 64,
+    "code_dims": 128,
+    "addr_temp": 10.0
+   }
+  },
+  "batcher": {
+   "impl": "r6_sysblock_hardneg_curriculum",
+   "params": {
+    "hard_frac_max": 0.75,
+    "n_block_images": 1,
+    "ramp_frac": 0.3
+   }
+  },
+  "head": {
+   "impl": "r2_dualaddress_move_transport",
+   "params": {}
+  },
+  "objective": {
+   "impl": "r6_occupancy_transport_name_decoy",
+   "params": {}
+  },
+  "optim": {
+   "impl": "r18_spectral_capped_transition_readout",
+   "params": {}
+  },
+  "stream": {
+   "impl": "r4_role_bound_path_atom_codes",
+   "params": {}
+  },
+  "target": {
+   "impl": "identity",
+   "params": {}
+  }
+ }
+}

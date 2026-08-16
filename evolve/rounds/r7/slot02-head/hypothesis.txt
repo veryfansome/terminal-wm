@@ -1,0 +1,121 @@
+SLOT 2 / axis head / operator rewrite / parent r4-11-flatbasin-lsam-tailavg (+0.0225)
+
+AXES CHANGED: head only.
+  arch, batcher, objective, optim, stream and target are the parent's verbatim. The mechanism
+  needs nothing from them: it is a self-contained memory that reads the raw command and
+  observation embeddings the stream already produces and injects an additive term into the
+  arch's prediction at command positions. Changing another axis would confound the one thing
+  this slot is testing, so nothing else moved.
+
+WHAT THE PARENT DOES, AND THE SPECIFIC WEAKNESS I AM ATTACKING
+  The parent stacks two associative memories on the trunk: a slot registry with occupancy
+  routing, and a delta-rule outer-product store (a matrix K^T V) whose source and destination
+  keys come from two extractors over one path-to-key projection. Both are APPROXIMATE stores.
+  In a delta-rule outer-product memory, reading key q returns v_q plus a crosstalk term
+  sum_{p != q} <q, k_p> v_p that does not vanish, because the learned keys are only
+  approximately orthogonal. That crosstalk is not merely noise on the read: when the store then
+  writes the retrieved value to the destination key, the crosstalk is written too. Over a chain
+  of moves the residue compounds, so the memory's content estimate degrades roughly
+  monotonically with chain depth. The objective is compositional DEPTH, and the parent's
+  eligible slice is 60 windows at d3 and 29 at d4+, so depth-compounding error is exactly where
+  the remaining headroom is.
+
+THE MECHANISM (outside-domain translation: unitary-binding VSA + cleanup memory)
+  From the vector-symbolic-architecture literature (Plate's holographic reduced
+  representations, and specifically the UNITARY variant where the binding vector has unit
+  modulus in a Fourier basis so unbinding is the exact inverse rather than an approximation).
+  I translate the algebra, not the metaphor, and I implement the unitary rotation directly in
+  the real domain so no FFT is needed and no device-specific complex kernel is involved.
+
+  Represent R^768 as 384 planes: dimension pair (2k, 2k+1) is the plane k. An ADDRESS is an
+  angle vector theta in R^384, and binding is the block-diagonal rotation
+
+      bind(theta, v)_k  = ( v_k^r cos t_k - v_k^i sin t_k ,  v_k^r sin t_k + v_k^i cos t_k )
+      unbind(theta, u)_k= ( u_k^r cos t_k + u_k^i sin t_k , -u_k^r sin t_k + u_k^i cos t_k )
+
+  This is orthogonal, so unbind(theta, bind(theta, v)) = v exactly (to machine precision), it
+  preserves inner products, and binding by an unrelated address leaves a vector decorrelated
+  from every stored item. The whole board is ONE vector
+
+      S = sum_over_locations bind(A_location, content_at_location).
+
+  Each command position emits, from the raw command embedding alone (never from the trunk
+  hidden state, and never from an observation), three addresses and three gates via a shared
+  feature: its OWN path address A_own (generated after the learned verb subspace is projected
+  out of the feature, so "cat P" and "mv P Q" have a chance to agree on the component that
+  encodes P), a source address A_src, a destination address A_dst, a move amount m, a write
+  amount w and a read gate g. The per-step order is READ, then MOVE, then WRITE:
+
+      read_i   = unbind(A_own_i, S)                                (S from steps < i only)
+      v        = cleanup_i( unbind(A_src_i, S) )
+      S       <- S + m_i * ( bind(A_dst_i, v) - bind(A_src_i, v) )
+      S       <- S + w_i * bind(A_own_i, obs_i)                     (only if obs_i exists)
+
+  CLEANUP is the load-bearing part and it is why this should buy depth. cleanup_i(u) is a
+  null-augmented softmax attention, scored by cosine at a learned temperature, over the
+  observation embeddings ALREADY SEEN in this window (strictly j < i), returning their convex
+  combination; the null column means an unmatched query retrieves approximately nothing. So the
+  vector that gets subtracted at the source and added at the destination is snapped back onto
+  an actually-observed content vector before it is moved. The erase at the source is therefore
+  exact rather than approximate, and the content is re-quantised after EVERY hop. Error does
+  not accumulate along the chain: a depth-6 chain is six exact transports of the same observed
+  vector, not six approximate copies of a copy. That is the whole bet.
+
+  This also matters for what the metric cancels. The transport is content-agnostic by
+  construction: the move step never conditions on WHICH content it is carrying, only on the
+  two addresses read off the move command. Under the role-swapped chain the move commands are
+  re-encoded, so A_src and A_dst change and the routing genuinely changes; the read command is
+  byte-identical in both arms, so anything the head does that keys on the read alone cancels
+  per window, as the brief describes.
+
+WHY THE TRAINING SIGNAL SHOULD REACH IT
+  Zero-scale injection alone would leave the addressing untrained, so the aux loss supervises
+  the memory read directly. It mines, per row and with no parameters involved, positions whose
+  observation duplicates an earlier observation in that row (threshold relative to the row's
+  own mean pairwise squared distance), drops observations that duplicate too many others so the
+  contentless outputs of mv/cd cannot dominate, and runs an InfoNCE in the EVAL's decision
+  variable (mean squared L2 over dims) against the causally visible observations, positives
+  being the duplicate set. Positions whose duplicate is the immediately preceding observation
+  are down-weighted (near_weight 0.25) precisely so the head is not rewarded for the degenerate
+  "return the last content" policy, which is a first-mover lookup and not transport. The same
+  InfoNCE is applied at lower weight to the raw unbound read and to the injected prediction, so
+  the injection is tied to the quantity the instrument scores. A secondary same-path
+  forward-model term supervises the arch's shared transition operator, retained from the
+  parent's context at weight 0.5 so that removing it is not a confound.
+
+  Reachability: out_clean is initialised to 0.02 (not zero), so the head perturbs the
+  prediction at every command position, including the final odd-length read position, from step
+  one; every parameter of the memory therefore has a live path to the scored prediction as well
+  as gradient from the aux. out_raw starts at zero but still receives gradient (its derivative
+  is the raw read, which is non-zero). Nothing that carries a parameter runs inside no_grad:
+  the no_grad blocks contain only index mining over raw observation tokens.
+
+  Odd-length safety: n_cmd = (L+1)//2 and n_pair = L//2 are computed separately, the write arm
+  is guarded by `i < n_pair`, and the cleanup candidate mask is empty rather than degenerate
+  when n_pair is 0, so the scored layout [cmd_0, obs_0, ..., cmd_r] with no trailing observation
+  runs the read at cmd_r off the memory built from steps 0..r-1 and writes nothing.
+
+WHAT I EXPECT TO SEE (all unmeasured; I cannot run the harness from the jail)
+  1. comp_ca above the parent's +0.0225, with the gain concentrated in the d4+ windows rather
+     than d3 — that is the signature the cleanup argument predicts. If comp_ca rises but the
+     d3/d4+ split is flat or d3-led, the cleanup story is NOT what moved it and the result
+     should be read as such.
+  2. native pick rate up, swapped-stayed down: transport that actually carries identity should
+     move both terms, not just the difference.
+  3. Falsifier: if the learned cleanup temperature drifts up toward its 2.0 clamp, the cleanup
+     has become an average over all observed contents. An average is the same vector in both
+     arms, so comp_ca would collapse toward zero even if the main loss improves. That is the
+     clean way this hypothesis is wrong.
+
+BIGGEST RISK
+  Address extraction. Everything rests on A_own("cat /b/x"), A_dst("mv /a/x /b/x") and
+  A_src("mv /b/x /c/x") agreeing on the path component, and those addresses are learned from a
+  frozen mean-pooled sentence embedding of the whole command. Source and destination appear
+  near-additively in a bag-of-tokens pooling, so separating them relies on whatever ordering
+  signal the encoder's contextualisation leaves behind; the verb-quotient helps the OWN address
+  but does not help the src/dst split. If the split is not learnable from the training
+  trajectories, the move update transports the wrong thing and the head degenerates to a
+  location-keyed read, which cancels to exactly zero per window and lands the candidate at the
+  baseline rather than above the parent. A secondary risk is throughput: the memory adds a
+  second per-command Python loop on top of the arch's own, so if wall-clock matters the fixed
+  step budget costs more time (not fewer steps).

@@ -1,0 +1,104 @@
+AXES CHANGED: stream only (baseline_interleave -> r7_cupgen_dualrail_address).
+Every other axis keeps the parent's impl and params verbatim. The mechanism is a pure
+re-coding of command tokens; it adds no parameters, so nothing else has to move with it.
+
+WHAT THE PARENT ACTUALLY DOES, AND WHY THE STREAM IS ITS BOTTLENECK
+
+The parent resolves a chain of moves with a ledger, not with layers. Its arch scores every
+step j against every earlier step i by <src_j, dst_i>, weights that by how much unconsumed
+content still sits at i's destination, and carries content as a coefficient row over earlier
+observation embeddings, so an arbitrarily deep chain resolves in one causal pass. Its head
+runs a second router of the same shape. Both build their addresses from ONE tensor: the raw
+command token, read at tok[:, 0::2]. Both derive a source address and a destination address
+from that single vector through one shared linear map read under two additive role biases
+before a GELU, then two key maps initialised nearly equal, then unit-normalisation.
+
+The parent hands that machinery a mean-pooled sentence embedding. For
+  mv /tmp/w/cups/etc/ssh/sshd_config.cfg.7 /tmp/w/cups/etc/ssh/sshd_config.cfg.8
+the two paths differ by one digit and are averaged into one vector, so "the address I take
+from" and "the address I write to" are close to the same direction and a linear role read
+cannot pull them apart. The ledger is a good chain solver being fed addresses it cannot
+separate. My claim is that the parent's +0.0562 is what that solver achieves on unusable
+addresses, and that the cheapest large gain available on this genome is to make the two roles
+linearly separable in the token itself.
+
+THE MECHANISM
+
+Command tokens only; observation tokens, the target space and the interleave layout are
+untouched. Coordinates 0-191 carry the source address, 192-383 the destination address,
+index for index, both OVERWRITING the standardized embedding there; 384-415 carry eight form
+flags, 416-447 a verb hash, and the embedding survives scaled by 0.75 on 448-767. Both
+address blocks are written by the same function of a path string, so token[192+k] equals
+token[k] exactly when destination equals source, and one linear map reads either role
+identically - which is the structure the arch's shared addr_in / role-bias / near-equal
+src_key,dst_key initialisation is built to exploit, and the separation its head's train-time
+read-versus-destination hinge is asking for.
+
+An address is three aligned rails rather than one hash, because the data has two different
+notions of "where":
+  rail ID  (96 dims, gain 1.0)  balanced Rademacher hash of the whole normalized path
+  rail CUP (64 dims, gain 0.5)  the same hash of the path with a trailing ".<digits>" removed
+  rail GEN (32 dims, gain 0.5)  row g of a 32-point Sylvester-Hadamard matrix, zero when g=0
+In the real trajectories every move renames its destination to <cup>.<k> with k a counter that
+runs 1,2,3,... once per sequence (verified over the 24 jail trajectories: 172 moves, no k
+repeated, max 8). So a location wears many names over one chain, and the three rails say both
+things at once: ID matches only an exact path, CUP matches every name one cup ever wore, GEN
+separates the generations of one cup exactly - Walsh/CDMA spreading codes, where distinct
+symbols share the same coordinates and are exactly orthogonal, so the same 32-symbol alphabet
+recurs in every trajectory and on every held-out image instead of each path being a fresh
+random direction the learned 768->192->64 key maps have never seen.
+Measured on the 24 jail trajectories with the arch's own normalisation: all 391 true chain
+edges (src string of j equals dst string of i) score cosine > 0.999, and the worst false edge
+in any trajectory is 0.333 (a same-cup pair, which is the graded fallback the rails intend,
+not a collision). Over 2000 synthetic path pairs: exact 1.000 +/- 0.000, same cup 0.132,
+same generation 0.068, unrelated 0.000. That is the geometry the ledger needs: an exact
+identity match when a name is unique, and a soft same-cup prior when it is not, which is
+exactly the case its capacity-depletion and recency arbitration were built to settle.
+Every hash pattern carries exactly as many +1 as -1 entries (permute a balanced base vector
+by a shake_256-derived ordering), so an address shifts neither the token mean nor the token
+variance - DC-free line coding, so that the LayerNorm the address extractor opens with keeps
+a fixed operating point whatever paths a command names, and the two role reads sit at the
+same point on the GELU.
+The eight flags name occupancy semantics rather than surface form: source present, explicit
+destination, mv (the source is EMPTIED), plain read, ls, ">" (destination overwritten, source
+RETAINED), ">>" (appended, source retained), destination distinct from source. Those are
+precisely the take / write / consume decisions the ledger gates have to make, and they sit in
+overwritten coordinates instead of superposed on the embedding, because a binary signal read
+at 0.75 against unit-variance embedding noise is a signal the gate has to fight for.
+
+WHY IT SHOULD MOVE comp_ca AND NOT SOMETHING ELSE
+
+comp_ca is a paired difference between the native chain and a chain in which two contents swap
+their moves. The read command string is identical in both arms and my coding is a pure
+function of one command string, so the token at the scored read position is bit-identical
+across arms (checked) and nothing about the coding can key the answer to the read location.
+What differs across arms is only which move tokens name which paths - so the only way this
+coding can raise the difference is by making the ledger's src/dst matching resolve the chain
+that actually happened. A predictor that keys on the read location still cancels to exactly
+zero per window; a predictor that keys on move-order position still does not, and I am not
+claiming the change is immune to that - if the gain shows up with shortcut_leaning up, the
+hypothesis is refuted rather than confirmed.
+
+FALSIFIABLE EXPECTATIONS
+
+1. comp_ca rises above the parent's +0.0562, driven mainly by the d4+ bucket, where the parent
+   has the most chain to resolve. If d3 moves and d4+ does not, the addresses got sharper but
+   the ledger is not composing, and the mechanism story is wrong.
+2. Failure mode I would accept as a clean refutation: comp_ca at or below the parent with the
+   native pick rate UP. That would mean the coding helps read the last hop while the ledger
+   still cannot chain, i.e. the win is location-keyed and cancels.
+3. Failure mode I would accept as a cost: overall latent MSE / retrieval on ordinary system
+   reads degrades, because 448 of 768 embedding coordinates are overwritten. I kept 320
+   embedding coordinates at 0.75 for that reason, and the address rails encode path identity
+   exactly, which is what a next-observation prediction on a re-read file needs; but if the
+   base measurements fall while comp_ca does not rise, the split point is too aggressive.
+
+No performance number here is measured. I cannot run the harness from the jail; the geometry,
+purity, alignment, role-swap invariance, gradient reachability and speed numbers above are
+from the jail's own arch module and the jail's own trajectories on CPU, and none of them is a
+score. Checked by construction: code_cmds is pure per command (no cross-command state, so
+prefix-causality is structural), collate writes command tokens only through code_cmds so the
+instrument reproduces them exactly, leakage_ok returns True against the real parent arch,
+every one of the arch's 95 parameters still receives a nonzero finite gradient, the odd-length
+[cmd_0, obs_0, ..., cmd_r] layout forwards cleanly, and code_cmds costs about 1.6 ms per 72
+sequences warm, so nothing here endangers the step budget.

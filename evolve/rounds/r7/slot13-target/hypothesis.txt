@@ -1,0 +1,103 @@
+AXES CHANGED: target only (r6_spectral_equalized_target -> r7_local_contrast_expanding_target).
+The other six axes are the parent's, verbatim. Nothing else needs to move: the mechanism is a
+change to which subspace of the regression target the training loss is forced to pay for, and it
+is expressed entirely inside the target chunk's own transform and regulariser.
+
+WHAT THE PICK ACTUALLY DEPENDS ON
+
+The scored read chooses between candidate observation embeddings by squared distance to the
+prediction mapped back through to_obs. For two candidates c1 and c2,
+
+    ||y - c1||^2 - ||y - c2||^2 = -2 y . (c1 - c2) + ||c1||^2 - ||c2||^2 ,
+
+so the only part of the prediction y that can change the pick is its projection onto the
+candidate DIFFERENCE direction u = c1 - c2. In this corpus the candidates at a read are
+observations of the same command shape whose file content differs (the trajectories are cat/mv/ls
+over files whose bodies are canary hashes, csv blocks and log lines), so u lies in a
+low-variance "which content is this" subspace, while the corpus spectrum is dominated by
+empty-versus-nonempty output, format and length. Prediction error orthogonal to u is invisible to
+the pick; error along u is the whole game.
+
+THE MECHANISM AND HOW IT DIFFERS FROM THE PARENT
+
+The parent keeps an exactly orthonormal Householder k-frame and rescales the target by exp(a_i)
+along k selected directions. Its frame is steered by a log-volume term onto the LEADING
+eigendirections of the target covariance, and its equalisation term drives the variance there
+DOWN toward the untouched complement, so a_i is negative. I keep the frame machinery, the bounded scale
+and the exact inverse, and change two things that together invert the flow:
+
+1. The frame criterion becomes LOCAL discriminability instead of global variance. On each batch,
+   every target's m=4 nearest neighbours are found in the fixed observation space (detached, exact
+   squared distances), neighbour pairs closer than 0.002 of the mean pairwise squared distance are
+   dropped as duplicates (the empty-output observations of mv and redirected cat render to
+   literally identical text, so they sit at distance zero and would otherwise dilute the estimate),
+   and the frame maximises mean_i [ log Var_local_i - 0.5 * log Var_global_i ], where Var_local is
+   the variance of the surviving nearest-neighbour differences along frame direction i. This is
+   local Fisher discriminant analysis / locality-preserving projection read as a determinant
+   criterion: pick the k orthonormal directions along which observations that are ALREADY
+   near-duplicates still differ. Those differences are exactly the same-shape-different-content
+   differences that u is made of. The tempered denominator (eta=0.5) keeps globally dominant
+   directions out; the criterion is bounded above because a nearest-neighbour difference variance
+   is at most a constant times the global variance along the same direction, so there is no
+   degenerate escape to zero global variance.
+
+2. The scale is expansion-only: a_i = 2.0 * sigmoid(4 * spec_raw_i - 2) >= 0, so the map is
+   Q diag(e^a, 1) Q^T with e^a >= 1 and its exact inverse Q diag(e^-a, 1) Q^T is a CONTRACTION in
+   every direction. The equalisation term now pulls the post-transform variance along the selected
+   directions UP to twice the mean variance of the untouched complement, rather than down to it.
+
+WHY THIS SHOULD MOVE THE OBJECTIVE
+
+Write the transform T and the model output p. Training compares p to T z; the eval compares
+T^-1 p to the candidates. If the model were exact, T cancels: (T z) . (T^-1 u) = z . u, so the
+decision variable is unchanged by construction and the transform cannot manufacture a score. What
+it changes is the error term: with p = T z + eps, the decision variable carries eps . T^-1 u,
+whose component along the selected directions is shrunk by e^-a. At the same time the loss sees
+those directions scaled up by e^a, so the model is charged more for relative error there. The MSE
+anchor charges e^{2a}; the ring-negative listwise term charges about e^a, because its detached
+per-dimension precision weights w = (1/(mse+eps))^0.5 make the per-dimension contribution scale
+like the per-dimension RMS error rather than its square. Neither cancels the expansion. So the
+model buys accuracy on the content axes with capacity it was previously spending on format and
+length axes that cannot affect any pick, and whatever error survives there is contracted before
+the candidates are ranked. A second, smaller effect: the ring's confusability band-pass is computed
+on target-target distances, which after expansion are content-weighted, so its "close but distinct"
+band lands on content-distinct pairs instead of on format-distinct ones.
+
+This is a bet about which subspace deserves the error budget, and it is neutral with respect to the
+shortcut the metric does not cancel. comp_ca is a paired difference between the native chain and
+the role-swapped chain over the same board; a predictor that keys on the location being read
+contributes exactly zero in both arms whatever the target geometry is, because the transform is
+applied identically in both. Sharpening the content axes can only pay if the model already carries
+some signal about WHICH content the chain routed to that location — the prefix-content
+cross-attention channel in the arch and the dual-address move-transport head are what would supply
+it. The prediction is therefore that native_hit rises while swap_stayed does not, i.e. the
+difference rises, and not that native accuracy rises uniformly.
+
+WHAT I EXPECT TO SEE (all unmeasured — I cannot run the harness from the jail)
+
+- comp_ca above the parent's -0.0262. I also expect it above the unmodified baseline's +0.0112,
+  because I believe the parent's negative score comes from the sign of its flow: compressing the
+  leading directions by up to e^-1.5 means its inverse AMPLIFIES prediction error there by up to
+  4.5x in observation space, on axes the loss was simultaneously told to stop caring about, so its
+  net observation-space error on those axes grows by up to e^{2*1.5} ~ 20x. My inverse is a
+  contraction everywhere, so that failure mode is structurally unavailable.
+- Learned scales settling near a ~ 0.6 to 1.0 (gain 1.8 to 2.7) rather than at the sigmoid ceiling:
+  the equalisation goal is log-variance of the complement plus log 2, and the selected directions
+  are low-variance but not vanishing.
+- Health unchanged: the transform is bounded, orthonormal and exactly invertible, the regulariser
+  is finite-guarded, and per-step cost over the parent is one 384x384 squared-distance matrix and
+  a topk, which is negligible beside the unchanged 24-reflection Householder chain.
+
+HOW IT COULD FAIL
+
+- The strongest failure mode is that the mechanism is simply a no-op: if the model's relative error
+  along a direction grows exactly in proportion to that direction's scale, the expansion and the
+  inverse contraction cancel and nothing changes but the noise. The argument above says the
+  proportionality is sub-linear, but it is an argument about a fixed point, not a measurement.
+- The local-scatter criterion could select the encoder's high-frequency noise floor rather than
+  content. The absolute (rather than purely ratio) form of the criterion is what guards this — pure
+  noise directions have small absolute nearest-neighbour scatter — but the eta=0.5 tempering moves
+  part-way toward the ratio and therefore part-way toward that failure.
+- If the model carries no content signal at all at the read position, expanding the content axes
+  amplifies whatever bias it does have, which is as likely to hurt as to help; the paired difference
+  makes that neutral in expectation but the scored slice is one frozen realization.

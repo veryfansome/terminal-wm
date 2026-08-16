@@ -1,0 +1,81 @@
+AXES CHANGED: optim only (r18_spectral_capped_transition_readout -> r18_stiefel_address_isometry).
+Every other axis is the parent's, verbatim. The mechanism is an optimizer-side manifold
+constraint on parameters that both parents already have, so nothing else needs to move; changing
+arch or head as well would confound the one thing this slot is testing.
+
+WHAT THE CROSSOVER TAKES FROM EACH PARENT
+Both programs select the same optim impl, so the recombination is not "pick one optimizer". What
+differs is where each arch puts the parameters that decide WHICH CONTENT is being addressed. The
+parent (r24) scores a soft reference graph with a bilinear form q(u_i) . k(u_j) built by ref_q and
+ref_k, two (ref_d, 768) maps applied to the RAW command embedding. The crossover partner (r23)
+builds a pointer-copy attention with ptr_q and ptr_k, two (ptr_dim, 768) maps, again applied to the
+raw command embedding, alongside dual (key_d, addr_hidden) address heads. The parent's optim
+recognises addressing only by the signature (key_d, d) with d != 768, so in BOTH archs the
+raw-embedding content scorers are invisible to it: they fall into plain AdamW, untreated. The
+common structure the two designs actually share is "an identical-shape sibling pair of narrow
+projections that turns a raw command embedding into a content address or a content-matching
+score". This impl adopts that as the definition of the addressing group -- the (key_d, d)
+delta-rule pairs the parent already routed, plus (m, 768) sibling pairs with m <= addr_out_max --
+so the same treatment lands on r24's ref_q/ref_k and on r23's ptr_q/ptr_k. addr_out_max = 128
+admits ref_q/ref_k (128, 768) and ptr_q/ptr_k (64, 768) and excludes the trunk's cmd_proj/obs_proj/
+read_to_h at (d, 768) for both archs (d = 176 and 192). The (1, 768) bias-like pairs that also match
+the signature are skipped by the min-dim guard and are provably untouched: orthogonalizing a single
+row and then rescaling it to its own Frobenius norm returns the row unchanged.
+
+THE MECHANISM
+After every optimizer step, each addressing weight W gets one scale-preserving Stiefel retraction:
+
+    Q = NewtonSchulz(W)                    quintic iteration, 3 passes, singular values -> 1
+    W <- (1 - tau) * W + tau * (||W||_F / ||Q||_F) * Q
+
+This is Riemannian optimization on the Stiefel manifold done as a retraction rather than as a
+penalty (orthogonal weight normalization / Cayley-free Stiefel SGD), and it is a different object
+from the Muon step the parent already runs. Muon orthogonalizes the UPDATE and says nothing about
+where the parameter ends up; this orthogonalizes the PARAMETER, so the singular spectrum of W is
+held near-flat for the whole run. Because the target is rescaled to the current ||W||_F, the step
+is norm-non-increasing and exactly norm-preserving at its fixed point: it moves conditioning, not
+scale, and so does not fight weight decay. The parent's other two mechanisms are kept intact --
+Muon on the (key_d, d) pairs, and the soft spectral cap on the (D, D) latent-transition readouts
+(tr_read and ref_read in r24, tp_out in r23) -- and the warmup-hold-cosine-floor schedule is
+unchanged. The plain-AdamW fallback for archs with none of these surfaces is unchanged.
+
+WHY THIS SHOULD MOVE comp_ca RATHER THAN SOME OTHER NUMBER
+comp_ca is native_hit minus swap_stayed on the same board, so anything keyed on WHICH LOCATION is
+read cancels exactly and contributes nothing either way. The two things that can produce a nonzero
+number are (a) actually carrying a content's identity through the chain of moves and (b) keying on
+where in the move order something sits, which does not cancel on a frozen slice. A content scorer
+whose weight matrix collapses toward low rank can only implement a SEPARABLE score, score(i, j) ~
+a(i) * b(j): the interaction between the two command embeddings drops out and what is left is a
+per-row bias plus a per-column bias, which is exactly a recency / first-mover ranking over the
+prefix -- family (b), and r24 already has an explicit learned recency term and a null slot that make
+that solution cheap to reach. Holding W_q and W_k near partial isometries makes the bilinear form
+W_q^T W_k full rank inside its 128-dimensional subspace and bounded in gain, so a separable score
+is no longer a low-cost attractor and the graph has to pay attention to the interaction between the
+two raw command embeddings, which is where the file identity lives. The same argument applies to
+the delta-rule pairs: if file_read and file_write collapse in rank, every command writes to nearly
+the same address, the store holds one blended content, and a read returns "whatever was written
+last" -- again a position shortcut. So the constraint removes reachable implementations of family
+(b) while leaving family (a) intact, which is the direction the metric rewards.
+
+WHAT I EXPECT TO SEE
+Higher comp_ca than the parent's -0.0037, with the gain concentrated in the deeper windows (d4+)
+where a separable recency score is most wrong. I expect the reported native pick rate to be at
+worst flat -- the retraction is a conditioning constraint, not a capacity cut, since a semi-
+orthogonal (128, 768) map still freely chooses which 128-dimensional subspace it reads -- and I
+expect swap_stayed to fall, which is where the differential comes from. I also expect lower spread
+across seeds, because rank collapse is a seed-dependent failure and the constraint removes it in
+every seed. No performance claim here is measured; the jail cannot run the real harness. What I did
+verify mechanically, on synthetic modules with r24's and r23's exact parameter shapes, is that the
+grouping selects exactly the intended tensors in both archs, that a deliberately ill-conditioned
+(128, 768) scorer with condition number 85 is driven to 1.3 within 80 steps while training
+proceeds, that no parameter goes non-finite, that the plain-AdamW fallback still fires on an arch
+with none of these surfaces, and that the retraction costs about 2.5 ms per step for four matrices
+on CPU, which is negligible against a transformer step on the scoring GPU.
+
+BIGGEST RISK
+tau = 0.05 against a per-step relative gradient change of order 0.5% makes the constraint
+effectively hard, not soft. If the useful thing r24's reference graph learned is a strongly
+anisotropic scorer -- a few dominant directions that read one narrow slot of the embedding, with
+the rest of the spectrum deliberately suppressed -- then flattening the spectrum destroys a
+co-designed mechanism instead of a shortcut, and comp_ca falls. The knob to turn on that outcome is
+stiefel_tau; the knob for "the group is wrong" is addr_out_max.
